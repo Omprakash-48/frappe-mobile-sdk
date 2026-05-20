@@ -22,7 +22,8 @@ import 'widgets/form_builder.dart'
         FrappeFormBuilder,
         FrappeFormStyle,
         OnButtonPressedCallback,
-        FieldChangeHandler;
+        FieldChangeHandler,
+        FormValidator;
 
 /// Visual customization for [FormScreen] action area.
 class FormScreenStyle {
@@ -78,6 +79,12 @@ class FormScreen extends StatefulWidget {
   /// Called when a field value changes. Returns computed field patches (for hidden computed fields).
   final FieldChangeHandler? onFieldChange;
 
+  /// Called before save with the current form data. Return a non-null error
+  /// message to block the save; return null to allow it to proceed. Use this
+  /// for DB-independent rules so the user sees errors at save-time, not
+  /// sync-time.
+  final FormValidator? validator;
+
   /// Optional builder for runtime link filters. Called during link option resolution.
   final LinkFilterBuilder? Function(String doctype, String fieldname)?
   getLinkFilterBuilder;
@@ -115,6 +122,7 @@ class FormScreen extends StatefulWidget {
     this.initialData,
     this.onButtonPressed,
     this.onFieldChange,
+    this.validator,
     this.getLinkFilterBuilder,
     this.useLinkFieldCoordinator = true,
     this.screenStyle,
@@ -564,6 +572,29 @@ class _FormScreenState extends State<FormScreen> with WidgetsBindingObserver {
   }
 
   Future<void> _handleSubmit(Map<String, dynamic> formData) async {
+    // Local-first validation: DB-independent rules run on-device so the user
+    // sees errors at save-time rather than at sync-time. Returns null on pass;
+    // a non-null String aborts the save and is shown to the user.
+    if (widget.validator != null) {
+      final error = widget.validator!(formData);
+      if (error != null) {
+        setState(() {
+          _errorMessage = error;
+        });
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text(error),
+              backgroundColor: Theme.of(context).colorScheme.error,
+              behavior: SnackBarBehavior.floating,
+              duration: const Duration(seconds: 5),
+            ),
+          );
+        }
+        return;
+      }
+    }
+
     // Normalize multi-select: Frappe expects comma-separated string for plain
     // multi-select fields, but Table / Table MultiSelect fields must remain as
     // List<Map> so Frappe can create child-table rows.

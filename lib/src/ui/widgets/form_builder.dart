@@ -40,6 +40,15 @@ typedef FieldChangeHandler =
       Map<String, dynamic> formData,
     );
 
+/// Called before save with the current form data. Return a non-null error
+/// message to block the save and surface the message to the user; return
+/// null to allow the save to proceed.
+///
+/// Use this for DB-independent rules (range checks, regex, conditional
+/// mandatory, cross-field rules) that can be evaluated against [data]
+/// alone — so the user sees the error at save-time rather than at sync-time.
+typedef FormValidator = String? Function(Map<String, dynamic> data);
+
 /// Layout mode for form tab headers.
 enum FormTabHeaderLayout { tabBar, stepper }
 
@@ -1265,10 +1274,21 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
     // This ensures we save complete data, not just changed fields
     final completeFormData = <String, dynamic>{};
 
-    // First, initialize all fields from metadata with their default/initial values
-    // Skip non-data fields (Button, HTML, Image, etc.) - they hold no form value
+    // First, initialize all visible data fields from metadata with their
+    // default/initial values. Hidden-by-depends_on fields are skipped so
+    // they neither seed defaults nor survive into the save payload — this
+    // half of the sweep covers fields with no current value but a stale
+    // default; the post-merge sweep below covers fields with stale user
+    // input from before the gate flipped.
     for (final field in widget.meta.fields) {
       if (field.fieldname != null && !field.hidden && field.isDataField) {
+        if (field.dependsOn != null && field.dependsOn!.isNotEmpty) {
+          // Evaluate against the merged formValues so the latest user
+          // changes drive the visibility decision.
+          if (!DependsOnEvaluator.evaluate(field.dependsOn, formValues)) {
+            continue;
+          }
+        }
         // Priority: formValues > initialData > defaultValue > empty value
         completeFormData[field.fieldname!] =
             formValues[field.fieldname] ??
@@ -1292,6 +1312,54 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
         completeFormData[entry.key] = entry.value;
       }
     }
+
+    // Drop fields the user can't actually see from the save payload,
+    // mirroring Frappe Desk's behaviour where hidden-by-depends_on fields
+    // are not part of `frm.doc` at save time. A field is "not visible" if
+    // its own `depends_on` evaluates false, OR if the enclosing section /
+    // tab break's `depends_on` evaluates false (hidden sections
+    // short-circuit before their children build, so the build-time clear
+    // at `_buildFieldWidget` never runs for them).
+    final dataForDepends = Map<String, dynamic>.from(completeFormData);
+    final hiddenByContainer = <String>{};
+    String? currentSectionDeps;
+    String? currentTabDeps;
+    for (final f in widget.meta.fields) {
+      if (f.fieldtype == 'Tab Break') {
+        currentTabDeps = (f.dependsOn != null && f.dependsOn!.isNotEmpty)
+            ? f.dependsOn
+            : null;
+        currentSectionDeps = null;
+        continue;
+      }
+      if (f.fieldtype == 'Section Break') {
+        currentSectionDeps = (f.dependsOn != null && f.dependsOn!.isNotEmpty)
+            ? f.dependsOn
+            : null;
+        continue;
+      }
+      if (f.fieldtype == 'Column Break') continue;
+      if (f.fieldname == null) continue;
+      final tabHidden =
+          currentTabDeps != null &&
+          !DependsOnEvaluator.evaluate(currentTabDeps, dataForDepends);
+      final secHidden =
+          currentSectionDeps != null &&
+          !DependsOnEvaluator.evaluate(currentSectionDeps, dataForDepends);
+      if (tabHidden || secHidden) {
+        hiddenByContainer.add(f.fieldname!);
+      }
+    }
+    completeFormData.removeWhere((fieldname, _) {
+      if (hiddenByContainer.contains(fieldname)) return true;
+      final field = widget.meta.fields.firstWhere(
+        (f) => f.fieldname == fieldname,
+        orElse: () => DocField(fieldtype: '_missing_'),
+      );
+      if (field.fieldtype == '_missing_') return false;
+      if (field.dependsOn == null || field.dependsOn!.isEmpty) return false;
+      return !DependsOnEvaluator.evaluate(field.dependsOn, dataForDepends);
+    });
 
     widget.onSubmit?.call(completeFormData);
   }
