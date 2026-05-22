@@ -33,11 +33,21 @@ typedef OnButtonPressedCallback =
 ///
 /// The [formData] argument is a snapshot — mutating it does not alter the
 /// SDK's internal form state. Return patches to apply changes.
-typedef FieldChangeHandler = Map<String, dynamic>? Function(
-  String fieldName,
-  dynamic newValue,
-  Map<String, dynamic> formData,
-);
+typedef FieldChangeHandler =
+    Map<String, dynamic>? Function(
+      String fieldName,
+      dynamic newValue,
+      Map<String, dynamic> formData,
+    );
+
+/// Called before save with the current form data. Return a non-null error
+/// message to block the save and surface the message to the user; return
+/// null to allow the save to proceed.
+///
+/// Use this for DB-independent rules (range checks, regex, conditional
+/// mandatory, cross-field rules) that can be evaluated against [data]
+/// alone — so the user sees the error at save-time rather than at sync-time.
+typedef FormValidator = String? Function(Map<String, dynamic> data);
 
 /// Layout mode for form tab headers.
 enum FormTabHeaderLayout { tabBar, stepper }
@@ -191,7 +201,7 @@ class FrappeFormBuilder extends StatefulWidget {
   /// Looks up a filter builder by doctype + fieldname. Returns null when
   /// the app has no custom filter for that field.
   final LinkFilterBuilder? Function(String doctype, String fieldname)?
-      getLinkFilterBuilder;
+  getLinkFilterBuilder;
 
   const FrappeFormBuilder({
     super.key,
@@ -645,7 +655,7 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
       _formKey.currentState?.patchValue(_normalizePatchValues(updates));
 
       // Chain: if a patched field is itself a Link, trigger its dependents too.
-      // e.g. learner_name → household_survey (Link) → religion, category
+      // e.g. picking a parent Link cascades to the child's own Link fields.
       for (final entry in updates.entries) {
         if (entry.value == null || entry.value.toString().trim().isEmpty) {
           continue;
@@ -682,6 +692,13 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
     }
 
     final formStyle = widget.style ?? DefaultFormStyle.standard;
+
+    // Compute effective reqd / readonly first so the decoration below can
+    // reflect the current state of `mandatory_depends_on` (not just the
+    // static `reqd` flag).
+    final effectiveReqd = _isFieldRequired(field);
+    final effectiveReadOnly = _isFieldReadOnly(field) || widget.readOnly;
+
     var decoration = formStyle.fieldDecoration?.call(field);
     if (widget.translate != null && decoration != null) {
       final labelText = widget.translate!(field.label ?? field.fieldname ?? '');
@@ -695,6 +712,30 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
             : decoration.helperText,
       );
     }
+
+    // Render the mandatory indicator (`*`) on the visible label.
+    // base_field's standalone label-with-asterisk only renders when
+    // `style.showLabel != false`, which the default form style disables —
+    // so without this, mandatory fields show no `*` at all. Honors both
+    // static `reqd` and dynamic `mandatory_depends_on` via `effectiveReqd`.
+    //
+    // Appended to whichever of labelText / hintText carries the visible
+    // label (depends on `showFieldLabel` + whether translate is set).
+    // We can't switch to a `label:` widget because `InputDecoration.copyWith`
+    // doesn't clear `labelText` (assertion: cannot have both `label` and
+    // `labelText`).
+    if (effectiveReqd && decoration != null) {
+      final labelTxt = decoration.labelText;
+      if (labelTxt != null && labelTxt.isNotEmpty && !labelTxt.endsWith(' *')) {
+        decoration = decoration.copyWith(labelText: '$labelTxt *');
+      } else {
+        final hintTxt = decoration.hintText;
+        if (hintTxt != null && hintTxt.isNotEmpty && !hintTxt.endsWith(' *')) {
+          decoration = decoration.copyWith(hintText: '$hintTxt *');
+        }
+      }
+    }
+
     final fieldStyle = FieldStyle(
       labelStyle: formStyle.labelStyle,
       descriptionStyle: formStyle.descriptionStyle,
@@ -703,9 +744,6 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
       showLabel: formStyle.showFieldLabel,
       showDescription: formStyle.showFieldDescription,
     );
-
-    final effectiveReqd = _isFieldRequired(field);
-    final effectiveReadOnly = _isFieldReadOnly(field) || widget.readOnly;
 
     final fieldWithEffectiveProps = DocField(
       fieldname: field.fieldname,
@@ -837,6 +875,19 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
       enabled: !effectiveReadOnly,
       formData: Map<String, dynamic>.from(_formData),
       style: fieldStyle,
+      onIsLocalChanged: (isLocal) {
+        // Picker tells us whether the chosen target is local-only
+        // (mobile_uuid) or server-known. Mirror that into the
+        // `<field>__is_local` companion so [LocalWriter] persists it
+        // and [UuidRewriter] can rewrite the value at push time.
+        final fname = field.fieldname;
+        if (fname == null) return;
+        final companion = '${fname}__is_local';
+        setState(() {
+          _formData[companion] = isLocal ? 1 : 0;
+        });
+        _formKey.currentState?.patchValue({companion: isLocal ? 1 : 0});
+      },
     );
 
     if (fieldWidget == null) return const SizedBox.shrink();
@@ -860,7 +911,8 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
   bool _hasAnyVisibleField(_FormSection section) {
     return section.columns.any(
       (col) => col.fields.any(
-        (field) => field.isDataField && !field.hidden && _shouldShowField(field),
+        (field) =>
+            field.isDataField && !field.hidden && _shouldShowField(field),
       ),
     );
   }
@@ -1222,10 +1274,21 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
     // This ensures we save complete data, not just changed fields
     final completeFormData = <String, dynamic>{};
 
-    // First, initialize all fields from metadata with their default/initial values
-    // Skip non-data fields (Button, HTML, Image, etc.) - they hold no form value
+    // First, initialize all visible data fields from metadata with their
+    // default/initial values. Hidden-by-depends_on fields are skipped so
+    // they neither seed defaults nor survive into the save payload — this
+    // half of the sweep covers fields with no current value but a stale
+    // default; the post-merge sweep below covers fields with stale user
+    // input from before the gate flipped.
     for (final field in widget.meta.fields) {
       if (field.fieldname != null && !field.hidden && field.isDataField) {
+        if (field.dependsOn != null && field.dependsOn!.isNotEmpty) {
+          // Evaluate against the merged formValues so the latest user
+          // changes drive the visibility decision.
+          if (!DependsOnEvaluator.evaluate(field.dependsOn, formValues)) {
+            continue;
+          }
+        }
         // Priority: formValues > initialData > defaultValue > empty value
         completeFormData[field.fieldname!] =
             formValues[field.fieldname] ??
@@ -1249,6 +1312,54 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
         completeFormData[entry.key] = entry.value;
       }
     }
+
+    // Drop fields the user can't actually see from the save payload,
+    // mirroring Frappe Desk's behaviour where hidden-by-depends_on fields
+    // are not part of `frm.doc` at save time. A field is "not visible" if
+    // its own `depends_on` evaluates false, OR if the enclosing section /
+    // tab break's `depends_on` evaluates false (hidden sections
+    // short-circuit before their children build, so the build-time clear
+    // at `_buildFieldWidget` never runs for them).
+    final dataForDepends = Map<String, dynamic>.from(completeFormData);
+    final hiddenByContainer = <String>{};
+    String? currentSectionDeps;
+    String? currentTabDeps;
+    for (final f in widget.meta.fields) {
+      if (f.fieldtype == 'Tab Break') {
+        currentTabDeps = (f.dependsOn != null && f.dependsOn!.isNotEmpty)
+            ? f.dependsOn
+            : null;
+        currentSectionDeps = null;
+        continue;
+      }
+      if (f.fieldtype == 'Section Break') {
+        currentSectionDeps = (f.dependsOn != null && f.dependsOn!.isNotEmpty)
+            ? f.dependsOn
+            : null;
+        continue;
+      }
+      if (f.fieldtype == 'Column Break') continue;
+      if (f.fieldname == null) continue;
+      final tabHidden =
+          currentTabDeps != null &&
+          !DependsOnEvaluator.evaluate(currentTabDeps, dataForDepends);
+      final secHidden =
+          currentSectionDeps != null &&
+          !DependsOnEvaluator.evaluate(currentSectionDeps, dataForDepends);
+      if (tabHidden || secHidden) {
+        hiddenByContainer.add(f.fieldname!);
+      }
+    }
+    completeFormData.removeWhere((fieldname, _) {
+      if (hiddenByContainer.contains(fieldname)) return true;
+      final field = widget.meta.fields.firstWhere(
+        (f) => f.fieldname == fieldname,
+        orElse: () => DocField(fieldtype: '_missing_'),
+      );
+      if (field.fieldtype == '_missing_') return false;
+      if (field.dependsOn == null || field.dependsOn!.isEmpty) return false;
+      return !DependsOnEvaluator.evaluate(field.dependsOn, dataForDepends);
+    });
 
     widget.onSubmit?.call(completeFormData);
   }
