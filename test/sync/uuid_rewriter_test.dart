@@ -172,6 +172,51 @@ void main() {
     );
   });
 
+  test('UUID-shaped Link value WITHOUT __is_local flag is still resolved '
+      '(no flag-only blind spot)', () async {
+    // Regression: a Link populated by a non-picker path (fetch_from,
+    // default, programmatic prefill, back-reference) never gets
+    // `__is_local=1`. Before the fix the raw mobile_uuid was sent to the
+    // server, which rejected it as an unknown name ("incorrect server_name").
+    final meta = DocTypeMeta(
+      name: 'SO',
+      fields: [f('customer', 'Link', options: 'Customer')],
+    );
+    const uuid = '550e8400-e29b-41d4-a716-446655440000';
+    final payload = <String, Object?>{
+      'customer': uuid,
+      // no customer__is_local key at all
+    };
+    final resolver = _FakeResolver({
+      'Customer': {uuid: 'CUST-777'},
+    });
+    final out = await UuidRewriter.rewrite(
+      meta: meta,
+      payload: payload,
+      resolveServerName: resolver.call,
+    );
+    expect(out['customer'], 'CUST-777');
+  });
+
+  test('UUID-shaped Link value WITHOUT flag, unresolved → BlockedByUpstream '
+      '(never sent raw)', () async {
+    final meta = DocTypeMeta(
+      name: 'SO',
+      fields: [f('customer', 'Link', options: 'Customer')],
+    );
+    const uuid = '550e8400-e29b-41d4-a716-446655440000';
+    final payload = <String, Object?>{'customer': uuid};
+    final resolver = _FakeResolver({'Customer': {}});
+    await expectLater(
+      UuidRewriter.rewrite(
+        meta: meta,
+        payload: payload,
+        resolveServerName: resolver.call,
+      ),
+      throwsA(isA<BlockedByUpstream>()),
+    );
+  });
+
   test('non-local Link values pass through untouched', () async {
     final meta = DocTypeMeta(
       name: 'SO',

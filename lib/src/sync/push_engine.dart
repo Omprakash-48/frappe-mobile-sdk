@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:math';
 
 import 'package:flutter/foundation.dart';
 import 'package:sqflite/sqflite.dart';
@@ -23,6 +24,7 @@ import 'sync_state_notifier.dart';
 import 'tier_computer.dart';
 import 'three_way_merge.dart';
 import 'uuid_rewriter.dart';
+import '../utils/uuid_pattern.dart';
 
 /// Sends a push request. [method] is one of POST / PUT / SUBMIT / CANCEL /
 /// DELETE — the consumer maps it to the right Frappe endpoint. [payload]
@@ -104,6 +106,19 @@ class PushEngine {
   /// when [writeQueueResolver] is non-null.
   final Map<String, WriteQueue> _writeQueues = {};
 
+  /// RNG for backoff jitter. Deadlock victims that retry on a fixed
+  /// schedule re-collide in lockstep; jitter spreads them out.
+  final Random _rng = Random();
+
+  /// Returns [base] plus up to +50% random jitter. A zero base (tests)
+  /// yields zero so suites stay instant; a real backoff (2s/5s/10s) is
+  /// spread across a window so concurrent retries don't re-collide.
+  Duration _withJitter(Duration base) {
+    if (base == Duration.zero) return base;
+    final extraMs = (base.inMilliseconds * 0.5 * _rng.nextDouble()).round();
+    return base + Duration(milliseconds: extraMs);
+  }
+
   PushEngine({
     required this.db,
     required this.outboxDao,
@@ -183,12 +198,47 @@ class PushEngine {
 
       for (final tier in tiers) {
         await Future.wait(
-          tier.map((r) => pool.submit<void>(() => _process(r))),
+          _dispatchUnits(tier).map((u) => pool.submit<void>(u)),
         );
       }
     } finally {
       notifier.value = notifier.value.copyWith(isPushing: false);
     }
+  }
+
+  /// Splits a dispatch tier into independently-runnable units. INSERT rows
+  /// that share a doctype are chained into ONE sequential unit so the
+  /// server increments that doctype's naming-series counter (`tabSeries`)
+  /// one row at a time — N concurrent same-series INSERTs deadlock on that
+  /// counter row (MySQL/MariaDB 1213). Rows of different doctypes, and all
+  /// non-INSERT operations (which don't touch `tabSeries`), stay separate
+  /// units so cross-doctype throughput is preserved; the [pool] still caps
+  /// overall concurrency. Tiering already guarantees rows within a tier are
+  /// mutually independent, so the order within a same-doctype chain is
+  /// arbitrary but always safe.
+  List<Future<void> Function()> _dispatchUnits(List<OutboxRow> tier) {
+    final insertsByDoctype = <String, List<OutboxRow>>{};
+    final units = <Future<void> Function()>[];
+    for (final r in tier) {
+      if (r.operation == OutboxOperation.insert) {
+        (insertsByDoctype[r.doctype] ??= <OutboxRow>[]).add(r);
+      } else {
+        units.add(() => _process(r));
+      }
+    }
+    for (final group in insertsByDoctype.values) {
+      if (group.length == 1) {
+        final only = group.first;
+        units.add(() => _process(only));
+      } else {
+        units.add(() async {
+          for (final r in group) {
+            await _process(r);
+          }
+        });
+      }
+    }
+    return units;
   }
 
   Future<void> _process(OutboxRow row, {bool mergeAttempted = false}) async {
@@ -225,6 +275,15 @@ class PushEngine {
       await outboxDao.markFailed(
         row.id,
         errorCode: ErrorCode.TIMEOUT,
+        errorMessage: e.message,
+      );
+    } on DeadlockError catch (e) {
+      // All deadlock retries exhausted. Record as NETWORK (the retryable
+      // transient bucket, via toErrorCode) — not UNKNOWN — so the error UI
+      // groups it under retryAll for a later, less-contended attempt.
+      await outboxDao.markFailed(
+        row.id,
+        errorCode: e.toErrorCode(),
         errorMessage: e.message,
       );
     } on ServerRejection catch (e) {
@@ -344,14 +403,22 @@ class PushEngine {
         lastTransient = e;
       } on TimeoutError catch (e) {
         lastTransient = e;
+      } on DeadlockError catch (e) {
+        // Transient server contention (e.g. concurrent naming-series
+        // INSERTs racing on `tabSeries`). The deadlocked transaction rolled
+        // back, so nothing committed — retry the whole request after a
+        // jittered delay. Without this branch the deadlock escaped as a raw
+        // ApiException to `_process`'s terminal `markFailed(UNKNOWN)`.
+        lastTransient = e;
       }
       if (attempt < networkBackoff.length) {
-        await Future<void>.delayed(networkBackoff[attempt]);
+        await Future<void>.delayed(_withJitter(networkBackoff[attempt]));
       }
     }
     // Re-raise the last transient so the caller's catch-block records it.
     if (lastTransient is NetworkError) throw lastTransient;
     if (lastTransient is TimeoutError) throw lastTransient;
+    if (lastTransient is DeadlockError) throw lastTransient;
     throw NetworkError(message: 'unknown network failure');
   }
 
@@ -679,10 +746,17 @@ class PushEngine {
       final name = f.fieldname;
       if (name == null) continue;
       if (f.fieldtype != 'Link' && f.fieldtype != 'Dynamic Link') continue;
-      if ((row['${name}__is_local'] as int?) != 1) continue;
       final v = row[name]?.toString();
       if (v == null || v.isEmpty) continue;
-      out.add(v);
+      // Treat a Link value as a local dependency when the form flagged it
+      // (`__is_local == 1`) OR when the value is shaped like a mobile_uuid.
+      // The shape check mirrors [UuidRewriter] so tiering and rewriting
+      // agree: without it, a UUID-valued Link populated by a non-picker
+      // path (no `__is_local`) is invisible to the dependency scan, lands
+      // in the same tier as its parent, and races — exactly the
+      // "not synced in order" symptom.
+      final flagged = (row['${name}__is_local'] as int?) == 1;
+      if (flagged || looksLikeMobileUuid(v)) out.add(v);
     }
   }
 }
