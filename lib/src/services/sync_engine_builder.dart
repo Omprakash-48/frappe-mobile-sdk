@@ -4,6 +4,7 @@ import 'package:flutter/foundation.dart';
 import 'package:sqflite/sqflite.dart';
 
 import '../api/client.dart';
+import '../api/exceptions.dart';
 import '../concurrency/concurrency_pool.dart';
 import '../concurrency/device_tier.dart';
 import '../concurrency/write_queue.dart';
@@ -17,11 +18,33 @@ import '../sync/idempotency_strategy.dart';
 import '../sync/pull_engine.dart';
 import '../sync/pull_page_fetcher.dart';
 import '../sync/push_engine.dart';
+import '../sync/push_error.dart';
 import '../sync/sync_state_notifier.dart';
 import 'sync_controller.dart';
 
 // Re-export so callers building the SDK pack can name the typedef.
 export '../sync/push_engine.dart' show PayloadTransformerFn;
+
+/// True when [e] is Frappe's `QueryDeadlockError` — MySQL/MariaDB error
+/// 1213 ("Deadlock found when trying to get lock; try restarting
+/// transaction"), surfaced as HTTP 500. Concurrent INSERTs that share a
+/// naming series race on the `tabSeries` counter row and one is chosen as
+/// the deadlock victim and rolled back. The transaction committed nothing,
+/// so the request is safe to retry — [PushEngine] does, via [DeadlockError].
+///
+/// Detection is on the response body's `exc_type`/text rather than the
+/// status code alone, so it survives proxies that rewrite 500s.
+bool isDeadlockApiException(ApiException e) {
+  final details = e.details;
+  if (details is Map && details['exc_type'] == 'QueryDeadlockError') {
+    return true;
+  }
+  final haystack = '${e.message} $details'.toLowerCase();
+  return haystack.contains('querydeadlockerror') ||
+      haystack.contains('deadlock found') ||
+      haystack.contains('(1213,') ||
+      haystack.contains('error 1213');
+}
 
 /// Bundle of the engines + façade that `FrappeSDK` stashes after wiring.
 class SyncEnginePack {
@@ -76,27 +99,41 @@ class SyncEngineBuilder {
       String? serverName,
     ) async {
       final doctype = payload['doctype'] as String;
-      switch (method) {
-        case 'POST':
-          return client.document.createDocument(
-            doctype,
-            Map<String, dynamic>.from(payload),
-          );
-        case 'PUT':
-          return client.document.updateDocument(
-            doctype,
-            serverName!,
-            Map<String, dynamic>.from(payload),
-          );
-        case 'SUBMIT':
-          return client.document.submitDocument(doctype, serverName!);
-        case 'CANCEL':
-          return client.document.cancelDocument(doctype, serverName!);
-        case 'DELETE':
-          await client.document.deleteDocument(doctype, serverName!);
-          return const <String, dynamic>{};
-        default:
-          throw StateError('SyncEngineBuilder.send: unknown method "$method"');
+      try {
+        switch (method) {
+          case 'POST':
+            return await client.document.createDocument(
+              doctype,
+              Map<String, dynamic>.from(payload),
+            );
+          case 'PUT':
+            return await client.document.updateDocument(
+              doctype,
+              serverName!,
+              Map<String, dynamic>.from(payload),
+            );
+          case 'SUBMIT':
+            return await client.document.submitDocument(doctype, serverName!);
+          case 'CANCEL':
+            return await client.document.cancelDocument(doctype, serverName!);
+          case 'DELETE':
+            await client.document.deleteDocument(doctype, serverName!);
+            return const <String, dynamic>{};
+          default:
+            throw StateError(
+              'SyncEngineBuilder.send: unknown method "$method"',
+            );
+        }
+      } on ApiException catch (e) {
+        // A server-side deadlock is transient — translate it to the
+        // retryable [DeadlockError] so PushEngine's attempt loop retries it
+        // (with jitter) instead of letting the raw ApiException fall through
+        // to the terminal `markFailed(UNKNOWN)` path. All other
+        // ApiExceptions propagate unchanged.
+        if (isDeadlockApiException(e)) {
+          throw DeadlockError(message: e.message);
+        }
+        rethrow;
       }
     }
 

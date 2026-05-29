@@ -33,7 +33,11 @@ List<String> buildChildSchemaDDL(
     if (!seen.add(name)) continue;
     final sqlType = sqliteColumnTypeFor(type);
     if (sqlType == null) continue;
-    cols.add('$name $sqlType');
+    // Quote identifiers — Frappe meta can name a column with a SQL
+    // reserved word (e.g. `User Document Type` exposes `create`,
+    // `delete`, `cancel`). Unquoted, the CREATE TABLE fails parse with
+    // `near "<word>": syntax error` and the schema-create loop aborts.
+    cols.add('"$name" $sqlType');
     if (isLinkFieldType(type)) {
       cols.add(linkCompanionColumnDDL(name));
     }

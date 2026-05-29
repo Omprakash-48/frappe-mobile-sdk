@@ -224,6 +224,58 @@ void main() {
   });
 
   test(
+    'DeadlockError is transient — retried then succeeds (not markFailed)',
+    () async {
+      // The deadlock victim rolled back, so the INSERT never committed; a
+      // retry against the now-uncontended tabSeries row succeeds. Before the
+      // fix the deadlock escaped as a raw ApiException → markFailed(UNKNOWN).
+      var attempts = 0;
+      final engine = buildEngine(
+        send: (m, p, sn) async {
+          attempts++;
+          if (attempts < 3) {
+            throw DeadlockError(message: 'Deadlock found (1213)');
+          }
+          return {'name': 'CUST-9', 'modified': '2026-01-01 00:00:00'};
+        },
+      );
+      await engine.runOnce();
+
+      expect(attempts, 3, reason: 'two deadlocks then success');
+      final row = (await db.query('docs__customer')).first;
+      expect(row['server_name'], 'CUST-9');
+      expect(row['sync_status'], 'synced');
+      // Slim outbox: a completed push deletes the row.
+      expect(await outbox.findById(1), isNull);
+    },
+  );
+
+  test(
+    'DeadlockError exhausting all retries → markFailed(NETWORK), retryable',
+    () async {
+      var attempts = 0;
+      final engine = buildEngine(
+        send: (m, p, sn) async {
+          attempts++;
+          throw DeadlockError(message: 'Deadlock found (1213)');
+        },
+      );
+      await engine.runOnce();
+
+      expect(
+        attempts,
+        greaterThanOrEqualTo(2),
+        reason: 'retries before giving up',
+      );
+      final row = await outbox.findById(1);
+      expect(row!.state, OutboxState.failed);
+      // NETWORK (not UNKNOWN) so the error UI groups it as a retryable
+      // transient under retryAll.
+      expect(row.errorCode, ErrorCode.NETWORK);
+    },
+  );
+
+  test(
     'BlockedByUpstream from UuidRewriter (unresolved Link) → markBlocked',
     () async {
       // Add an unresolved local Link to a non-existent target.
@@ -700,4 +752,128 @@ void main() {
       ]);
     },
   );
+
+  test(
+    'same-doctype INSERTs in one tier are serialized (max in-flight == 1) '
+    'even with pool maxConcurrent=2 — prevents tabSeries deadlock storm',
+    () async {
+      // Two MORE Customer INSERTs (the seeded u-c-1 makes three). No deps →
+      // all land in tier 0, all the same doctype → _dispatchUnits chains
+      // them into ONE sequential unit. Pre-fix they were three separate
+      // pool.submit calls and the pool (cap 2) ran two at once, racing on
+      // the naming-series counter.
+      for (final u in ['c-2', 'c-3']) {
+        await db.insert('docs__customer', {
+          'mobile_uuid': u,
+          'sync_status': 'dirty',
+          'local_modified': 1,
+          'customer_name': 'C-$u',
+        });
+        await outbox.insertPending(
+          doctype: 'Customer',
+          mobileUuid: u,
+          operation: OutboxOperation.insert,
+        );
+      }
+
+      var inFlight = 0;
+      var maxInFlight = 0;
+      final engine = buildEngine(
+        send: (method, payload, serverName) async {
+          inFlight++;
+          if (inFlight > maxInFlight) maxInFlight = inFlight;
+          await Future<void>.delayed(const Duration(milliseconds: 10));
+          inFlight--;
+          return {
+            'name': 'X-${payload['mobile_uuid']}',
+            'modified': '2026-01-01',
+          };
+        },
+      );
+      await engine.runOnce();
+
+      expect(
+        maxInFlight,
+        1,
+        reason: 'same-doctype INSERTs must not overlap (pre-fix this was 2)',
+      );
+      // All three still synced.
+      final synced = await db.query(
+        'docs__customer',
+        where: 'sync_status = ?',
+        whereArgs: ['synced'],
+      );
+      expect(synced.length, 3);
+    },
+  );
+
+  test('UUID Link WITHOUT __is_local flag: parent ordered first AND child '
+      'payload gets resolved server_name (end-to-end no-flag fix)', () async {
+    // Self-referential Link populated by a non-picker path → no
+    // `parent_customer__is_local` companion. Before the fix the scanner
+    // ignored it (no tier edge → race) and the rewriter passed the raw
+    // UUID to the server.
+    await db.execute(
+      'ALTER TABLE docs__customer ADD COLUMN parent_customer TEXT',
+    );
+    const parentUuid = 'a1b2c3d4-e5f6-4789-89ab-cdef01234567';
+    const childUuid = 'b1c2d3e4-f5a6-4789-89ab-cdef01234567';
+    // Rename the seeded row to be the parent.
+    await db.update(
+      'docs__customer',
+      {'mobile_uuid': parentUuid},
+      where: 'mobile_uuid=?',
+      whereArgs: ['u-c-1'],
+    );
+    await db.update(
+      'outbox',
+      {'mobile_uuid': parentUuid},
+      where: 'mobile_uuid=?',
+      whereArgs: ['u-c-1'],
+    );
+    // Child references the parent by UUID — and crucially NO
+    // parent_customer__is_local column value.
+    await db.insert('docs__customer', {
+      'mobile_uuid': childUuid,
+      'sync_status': 'dirty',
+      'local_modified': 2,
+      'customer_name': 'Child',
+      'parent_customer': parentUuid,
+    });
+    await outbox.insertPending(
+      doctype: 'Customer',
+      mobileUuid: childUuid,
+      operation: OutboxOperation.insert,
+    );
+
+    final dispatchOrder = <String>[];
+    final sentParentCustomer = <String, Object?>{};
+    final engine = buildEngine(
+      customMeta: DocTypeMeta(
+        name: 'Customer',
+        autoname: 'field:mobile_uuid',
+        fields: [
+          f('customer_name', 'Data'),
+          f('parent_customer', 'Link', options: 'Customer'),
+        ],
+      ),
+      send: (method, payload, serverName) async {
+        final uuid = payload['mobile_uuid'] as String;
+        dispatchOrder.add(uuid);
+        sentParentCustomer[uuid] = payload['parent_customer'];
+        return {
+          'name': 'SRV-${dispatchOrder.length}',
+          'modified': '2026-01-0${dispatchOrder.length}',
+        };
+      },
+    );
+    await engine.runOnce();
+
+    // Ordering: parent before child (scanner saw the UUID edge).
+    expect(dispatchOrder, [parentUuid, childUuid]);
+    // Rewrite: child's Link carries the parent's resolved server_name,
+    // never the raw UUID.
+    expect(sentParentCustomer[childUuid], 'SRV-1');
+    expect(sentParentCustomer[childUuid], isNot(parentUuid));
+  });
 }

@@ -67,4 +67,4 @@ const systemSyncMetadataColumnNames = <String>{
 /// runtime ALTER TABLE migration so a column-name or type change is made
 /// in exactly one place.
 String linkCompanionColumnDDL(String fieldName) =>
-    '${fieldName}__is_local INTEGER';
+    '"${fieldName}__is_local" INTEGER';
