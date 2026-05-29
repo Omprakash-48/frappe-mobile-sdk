@@ -703,28 +703,29 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
     if (widget.translate != null && decoration != null) {
       final labelText = widget.translate!(field.label ?? field.fieldname ?? '');
       decoration = decoration.copyWith(
-        labelText: formStyle.showFieldLabel ? labelText : null,
+        // When showFieldLabel=true, BaseField renders the external label above
+        // the box; setting labelText here would produce a second floating label
+        // inside the box. Only set it when there is no external label.
+        labelText: formStyle.showFieldLabel ? null : labelText,
         hintText: field.placeholder != null
             ? widget.translate!(field.placeholder!)
             : (formStyle.showFieldLabel ? decoration.hintText : labelText),
-        helperText: field.description != null
-            ? widget.translate!(field.description!)
-            : decoration.helperText,
+        // When showFieldDescription=true, BaseField renders the description
+        // below the box; setting helperText here would duplicate it.
+        helperText: formStyle.showFieldDescription
+            ? null
+            : (field.description != null
+                  ? widget.translate!(field.description!)
+                  : decoration.helperText),
       );
     }
 
     // Render the mandatory indicator (`*`) on the visible label.
-    // base_field's standalone label-with-asterisk only renders when
-    // `style.showLabel != false`, which the default form style disables —
-    // so without this, mandatory fields show no `*` at all. Honors both
-    // static `reqd` and dynamic `mandatory_depends_on` via `effectiveReqd`.
-    //
-    // Appended to whichever of labelText / hintText carries the visible
-    // label (depends on `showFieldLabel` + whether translate is set).
-    // We can't switch to a `label:` widget because `InputDecoration.copyWith`
-    // doesn't clear `labelText` (assertion: cannot have both `label` and
-    // `labelText`).
-    if (effectiveReqd && decoration != null) {
+    // When showFieldLabel=true, BaseField's external Row already appends a red
+    // `*` Text widget — no need to also mark the decoration label/hint.
+    // When showFieldLabel=false, the decoration carries the visible label, so
+    // append `*` to labelText first, then hintText as fallback.
+    if (effectiveReqd && decoration != null && !formStyle.showFieldLabel) {
       final labelTxt = decoration.labelText;
       if (labelTxt != null && labelTxt.isNotEmpty && !labelTxt.endsWith(' *')) {
         decoration = decoration.copyWith(labelText: '$labelTxt *');
