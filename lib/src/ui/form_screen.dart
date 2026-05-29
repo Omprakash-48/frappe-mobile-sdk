@@ -23,7 +23,8 @@ import 'widgets/form_builder.dart'
         FrappeFormBuilder,
         FrappeFormStyle,
         OnButtonPressedCallback,
-        FieldChangeHandler;
+        FieldChangeHandler,
+        FormValidator;
 
 /// Visual customization for [FormScreen] action area.
 class FormScreenStyle {
@@ -79,6 +80,12 @@ class FormScreen extends StatefulWidget {
   /// Called when a field value changes. Returns computed field patches (for hidden computed fields).
   final FieldChangeHandler? onFieldChange;
 
+  /// Called before save with the current form data. Return a non-null error
+  /// message to block the save; return null to allow it to proceed. Use this
+  /// for DB-independent rules so the user sees errors at save-time, not
+  /// sync-time.
+  final FormValidator? validator;
+
   /// Optional builder for runtime link filters. Called during link option resolution.
   final LinkFilterBuilder? Function(String doctype, String fieldname)?
   getLinkFilterBuilder;
@@ -116,6 +123,7 @@ class FormScreen extends StatefulWidget {
     this.initialData,
     this.onButtonPressed,
     this.onFieldChange,
+    this.validator,
     this.getLinkFilterBuilder,
     this.useLinkFieldCoordinator = true,
     this.screenStyle,
@@ -226,9 +234,17 @@ class _FormScreenState extends State<FormScreen> with WidgetsBindingObserver {
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    if (state == AppLifecycleState.resumed) {
-      _loadSyncErrors();
-    }
+    if (state != AppLifecycleState.resumed) return;
+    // Every mounted FormScreen subscribed to WidgetsBindingObserver
+    // receives this callback on app resume — including off-screen
+    // IndexedStack / PageView siblings that stay mounted by design.
+    // Without this gate, an N-tab form host hits the outbox DAO N
+    // times per foreground. Cap to the form the user is actually
+    // looking at. (PR#36 round-2 M14)
+    if (!mounted) return;
+    final route = ModalRoute.of(context);
+    if (route != null && !route.isCurrent) return;
+    _loadSyncErrors();
   }
 
   @override
@@ -281,6 +297,14 @@ class _FormScreenState extends State<FormScreen> with WidgetsBindingObserver {
     } catch (e, st) {
       // ignore: avoid_print
       print('FormScreen: retry($outboxId) failed — $e\n$st');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Retry failed: ${toUserFriendlyMessage(e)}'),
+            backgroundColor: Colors.red,
+          ),
+        );
+      }
     }
     await _loadSyncErrors();
   }
@@ -538,6 +562,29 @@ class _FormScreenState extends State<FormScreen> with WidgetsBindingObserver {
   }
 
   Future<void> _handleSubmit(Map<String, dynamic> formData) async {
+    // Local-first validation: DB-independent rules run on-device so the user
+    // sees errors at save-time rather than at sync-time. Returns null on pass;
+    // a non-null String aborts the save and is shown to the user.
+    if (widget.validator != null) {
+      final error = widget.validator!(formData);
+      if (error != null) {
+        setState(() {
+          _errorMessage = error;
+        });
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text(error),
+              backgroundColor: Theme.of(context).colorScheme.error,
+              behavior: SnackBarBehavior.floating,
+              duration: const Duration(seconds: 5),
+            ),
+          );
+        }
+        return;
+      }
+    }
+
     // Normalize multi-select: Frappe expects comma-separated string for plain
     // multi-select fields, but Table / Table MultiSelect fields must remain as
     // List<Map> so Frappe can create child-table rows.
@@ -739,15 +786,19 @@ class _FormScreenState extends State<FormScreen> with WidgetsBindingObserver {
       }
     } catch (e, st) {
       debugPrint('FormScreen.save (server-first/offline) failed — $e\n$st');
-      setState(() {
-        _errorMessage = e is FrappeException
-            ? e.message
-            : toUserFriendlyMessage(e);
-      });
+      if (mounted) {
+        setState(() {
+          _errorMessage = e is FrappeException
+              ? e.message
+              : toUserFriendlyMessage(e);
+        });
+      }
     } finally {
-      setState(() {
-        _isSaving = false;
-      });
+      if (mounted) {
+        setState(() {
+          _isSaving = false;
+        });
+      }
       // Either branch above may have queued a fresh outbox row or
       // resolved an existing one; refresh the persistent banner.
       _loadSyncErrors();
@@ -798,15 +849,19 @@ class _FormScreenState extends State<FormScreen> with WidgetsBindingObserver {
       }
     } catch (e, st) {
       debugPrint('FormScreen.delete failed — $e\n$st');
-      setState(() {
-        _errorMessage = e is FrappeException
-            ? e.message
-            : toUserFriendlyMessage(e);
-      });
+      if (mounted) {
+        setState(() {
+          _errorMessage = e is FrappeException
+              ? e.message
+              : toUserFriendlyMessage(e);
+        });
+      }
     } finally {
-      setState(() {
-        _isSaving = false;
-      });
+      if (mounted) {
+        setState(() {
+          _isSaving = false;
+        });
+      }
     }
   }
 

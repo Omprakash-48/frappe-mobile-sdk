@@ -4,6 +4,7 @@
 import 'package:flutter/material.dart';
 
 import '../api/client.dart';
+import '../api/utils.dart';
 import '../models/doc_type_meta.dart';
 import '../models/document.dart';
 import '../models/link_filter_result.dart';
@@ -17,7 +18,11 @@ import '../services/sync_controller.dart';
 import '../services/sync_service.dart';
 import 'form_screen.dart';
 import 'widgets/form_builder.dart'
-    show FrappeFormStyle, OnButtonPressedCallback, FieldChangeHandler;
+    show
+        FrappeFormStyle,
+        OnButtonPressedCallback,
+        FieldChangeHandler,
+        FormValidator;
 import 'widgets/screen_helpers.dart';
 import 'widgets/sync_error_banner.dart' show humanizeOutboxError;
 
@@ -77,6 +82,10 @@ class DocumentListScreen extends StatefulWidget {
   /// Called when a field value changes in the form. Returns computed field patches.
   final FieldChangeHandler? onFieldChange;
 
+  /// Called before form save with the current form data. Return a non-null
+  /// error message to block the save; null to allow it.
+  final FormValidator? validator;
+
   /// Optional builder for runtime link filters. Called during link option resolution.
   final LinkFilterBuilder? Function(String doctype, String fieldname)?
   getLinkFilterBuilder;
@@ -113,6 +122,7 @@ class DocumentListScreen extends StatefulWidget {
     this.translate,
     this.onButtonPressed,
     this.onFieldChange,
+    this.validator,
     this.getLinkFilterBuilder,
     this.style,
     this.formStyle,
@@ -271,6 +281,14 @@ class _DocumentListScreenState extends State<DocumentListScreen> {
           print(
             'DocumentListScreen: pullSync(${widget.doctype}) failed — $e\n$st',
           );
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(
+                content: Text('Sync failed: ${toUserFriendlyMessage(e)}'),
+                backgroundColor: Colors.red,
+              ),
+            );
+          }
         }
       }
       final docs = await _fetchViaResolver();
@@ -279,6 +297,16 @@ class _DocumentListScreenState extends State<DocumentListScreen> {
     } catch (e, st) {
       // ignore: avoid_print
       print('DocumentListScreen: _pullDocuments failed — $e\n$st');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              'Failed to load documents: ${toUserFriendlyMessage(e)}',
+            ),
+            backgroundColor: Colors.red,
+          ),
+        );
+      }
     } finally {
       if (mounted) setState(() => _isSyncing = false);
     }
@@ -666,6 +694,7 @@ class _DocumentListScreenState extends State<DocumentListScreen> {
           getMobileUuid: widget.getMobileUuid,
           onButtonPressed: widget.onButtonPressed,
           onFieldChange: widget.onFieldChange,
+          validator: widget.validator,
           getLinkFilterBuilder: widget.getLinkFilterBuilder,
           style: widget.formStyle,
           screenStyle: widget.formScreenStyle,

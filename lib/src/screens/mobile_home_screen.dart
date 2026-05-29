@@ -5,7 +5,7 @@ import 'package:flutter/material.dart';
 import '../models/link_filter_result.dart';
 import '../sdk/frappe_sdk.dart';
 import '../ui/document_list_screen.dart';
-import '../ui/widgets/form_builder.dart' show FieldChangeHandler;
+import '../ui/widgets/form_builder.dart' show FieldChangeHandler, FormValidator;
 import '../ui/widgets/screen_helpers.dart';
 
 /// Generic home screen that renders doctype groups from the SDK's Mobile Configuration.
@@ -56,6 +56,19 @@ class MobileHomeScreen extends StatefulWidget {
   /// ```
   final FieldChangeHandler? Function(String doctype)? getFieldChangeHandler;
 
+  /// Optional resolver that returns a per-doctype save-time validator.
+  /// Use this for DB-independent rules (range checks, regex, conditional
+  /// mandatory, cross-field rules) that should fire on the device before
+  /// the row hits the outbox — so the user sees errors at save-time, not
+  /// at sync-time.
+  ///
+  /// Example:
+  /// ```dart
+  /// getValidator: (doctype) =>
+  ///     FormHandlers.forDoctype(doctype)?.onValidate,
+  /// ```
+  final FormValidator? Function(String doctype)? getValidator;
+
   /// Optional builder for runtime link filters. Called during link option resolution.
   final LinkFilterBuilder? Function(String doctype, String fieldname)?
   getLinkFilterBuilder;
@@ -69,6 +82,7 @@ class MobileHomeScreen extends StatefulWidget {
     this.groupHeaderBuilder,
     this.tileBuilder,
     this.getFieldChangeHandler,
+    this.getValidator,
     this.getLinkFilterBuilder,
   });
 
@@ -604,6 +618,7 @@ class _MobileHomeScreenState extends State<MobileHomeScreen>
               permissionService: widget.sdk.permissions,
               translate: (s) => widget.sdk.translations.translate(s),
               onFieldChange: widget.getFieldChangeHandler?.call(doctype),
+              validator: widget.getValidator?.call(doctype),
               getLinkFilterBuilder: widget.getLinkFilterBuilder,
               syncController: widget.sdk.syncController,
             ),
