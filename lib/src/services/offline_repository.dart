@@ -525,6 +525,62 @@ class OfflineRepository {
   /// pending INSERT existed (the doc never reached the server), cancels
   /// it and hard-deletes the docs__ row instead — there is nothing to
   /// push.
+  /// True when a [DatabaseException] is the benign "the table/column was
+  /// never created" case — e.g. a stale build site that never migrated a
+  /// `docs__<child>` table (see the parent_uuid child-schema model). Those
+  /// rows are unreachable garbage, so skipping them is safe. Any other
+  /// DatabaseException (disk full, lock timeout, corruption) is a real
+  /// failure and must propagate so the surrounding transaction rolls back.
+  /// Mirrors the swallow-only-absence idiom in `MetaMigration.apply`.
+  static bool _isBenignSchemaAbsence(Object e) {
+    final msg = e.toString().toLowerCase();
+    return msg.contains('no such table') || msg.contains('no such column');
+  }
+
+  /// Best-effort removal of the local `docs__` mirror (parent row, child
+  /// rows, and any queued attachments) for a document that has already been
+  /// deleted on the server. The server delete cannot be undone, so a local
+  /// cleanup failure is logged, never thrown, and each table is attempted
+  /// independently — the parent row is always removed even if a child table
+  /// is absent (PR#36 round-4 B5). Callers: the online (`!offlineMode`)
+  /// branch of [deleteDocument], and host UI that deletes via the API
+  /// directly (e.g. FormScreen's online delete by serverId, which then calls
+  /// this with the local mobile_uuid).
+  Future<void> hardDeleteLocalMirror({
+    required String doctype,
+    required String mobileUuid,
+  }) async {
+    final db = _database.rawDatabase;
+    Future<void> tryDelete(String table, String where) async {
+      try {
+        await db.delete(table, where: where, whereArgs: [mobileUuid]);
+      } on DatabaseException catch (e, st) {
+        // ignore: avoid_print
+        print(
+          'OfflineRepository.hardDeleteLocalMirror: $table cleanup failed '
+          'for $doctype/$mobileUuid (best-effort) — $e\n$st',
+        );
+      }
+    }
+
+    await tryDelete('pending_attachments', 'top_parent_uuid = ?');
+    await tryDelete(normalizeDoctypeTableName(doctype), 'mobile_uuid = ?');
+
+    final parentMeta = await _loadMeta(doctype);
+    if (parentMeta == null) return;
+    for (final f in parentMeta.fields) {
+      if (f.fieldtype != 'Table' && f.fieldtype != 'Table MultiSelect') {
+        continue;
+      }
+      final childDoctype = f.options;
+      if (childDoctype == null || childDoctype.isEmpty) continue;
+      await tryDelete(
+        normalizeDoctypeTableName(childDoctype),
+        'parent_uuid = ?',
+      );
+    }
+  }
+
   Future<void> deleteDocument({
     required String doctype,
     required String mobileUuid,
@@ -532,6 +588,10 @@ class OfflineRepository {
     if (!offlineMode.enabled) {
       _requireOnlineClient('deleteDocument');
       await client!.document.deleteDocument(doctype, mobileUuid);
+      // Online saves still persist a local docs__ mirror (applyServerDocument
+      // / reconcileServerSave). After the server delete succeeds, drop that
+      // mirror so the doc doesn't reappear in list screens (PR#36 round-4 B5).
+      await hardDeleteLocalMirror(doctype: doctype, mobileUuid: mobileUuid);
       return;
     }
 
@@ -586,19 +646,28 @@ class OfflineRepository {
                   whereArgs: [mobileUuid],
                 );
               } on DatabaseException catch (e, st) {
+                // A real error must roll the whole delete back (don't commit
+                // a parent delete with children left behind, reported as
+                // success — PR#36 round-4 H8). Only a benignly absent child
+                // table is skipped.
+                if (!_isBenignSchemaAbsence(e)) rethrow;
                 // ignore: avoid_print
                 print(
-                  'OfflineRepository.deleteDocument: child cascade delete '
-                  'failed for $childDoctype — $e\n$st',
+                  'OfflineRepository.deleteDocument: child table absent for '
+                  '$childDoctype (stale schema) — skipping cascade. $e\n$st',
                 );
               }
             }
           }
         } on DatabaseException catch (e, st) {
+          // Same policy as the child cascade above: a real error rolls the
+          // delete back; only a benignly absent parent table is skipped.
+          // (A child cascade rethrow also lands here — propagate it.)
+          if (!_isBenignSchemaAbsence(e)) rethrow;
           // ignore: avoid_print
           print(
-            'OfflineRepository.deleteDocument: hard-delete failed for '
-            '$doctype/$mobileUuid — $e\n$st',
+            'OfflineRepository.deleteDocument: parent table absent for '
+            '$doctype/$mobileUuid (stale schema) — $e\n$st',
           );
         }
         return;

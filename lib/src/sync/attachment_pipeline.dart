@@ -75,32 +75,47 @@ class AttachmentPipeline {
   Future<AttachmentUploadResult> _uploadOne(PendingAttachment p) async {
     await dao.markUploading(p.id);
     Object? lastError;
+    // If a prior attempt already uploaded the binary (url recorded via
+    // recordUpload, but the done-state write failed or was interrupted), do
+    // NOT upload again — reuse the recorded url. Re-uploading would make
+    // Frappe's attach hook create a duplicate File row (PR#36 round-4 H3).
+    String? fileUrl = p.serverFileUrl;
+    String? fileName = p.serverFileName;
     for (var attempt = 0; attempt < backoff.length; attempt++) {
       try {
-        // No `doctype` and no `docname` — File row is created fully
-        // unattached (all attached_to_* are NULL). v16's File controller
-        // rejects `attached_to_doctype` without a non-empty
-        // `attached_to_name` (file.py:151), so we can't ship `dt` alone.
-        //
-        // Relink path:
-        //   - Parent docs: Frappe's stock `attach_files_to_document`
-        //     (registered on `*.on_update` in apps/frappe/frappe/hooks.py)
-        //     finds unattached File rows by file_url and rewires them.
-        //   - Child rows: stock skips children (they save via raw
-        //     `db_update`, no lifecycle hooks). The mobile_control hook
-        //     `relink_mobile_files` walks the parent's child tables on
-        //     `*.on_update` and rewires per-child.
-        // Spec §5.3.
-        final resp = await uploader(
-          fileFromPath(p.localPath),
-          fileName: p.fileName,
-          isPrivate: p.isPrivate,
-        );
-        final fileUrl = resp['file_url'] as String;
-        final fileName = resp['name'] as String? ?? fileUrl;
+        if (fileUrl == null) {
+          // No `doctype` and no `docname` — File row is created fully
+          // unattached (all attached_to_* are NULL). v16's File controller
+          // rejects `attached_to_doctype` without a non-empty
+          // `attached_to_name` (file.py:151), so we can't ship `dt` alone.
+          //
+          // Relink path:
+          //   - Parent docs: Frappe's stock `attach_files_to_document`
+          //     (registered on `*.on_update` in apps/frappe/frappe/hooks.py)
+          //     finds unattached File rows by file_url and rewires them.
+          //   - Child rows: stock skips children (they save via raw
+          //     `db_update`, no lifecycle hooks). The mobile_control hook
+          //     `relink_mobile_files` walks the parent's child tables on
+          //     `*.on_update` and rewires per-child.
+          // Spec §5.3.
+          final resp = await uploader(
+            fileFromPath(p.localPath),
+            fileName: p.fileName,
+            isPrivate: p.isPrivate,
+          );
+          fileUrl = resp['file_url'] as String;
+          fileName = resp['name'] as String? ?? fileUrl;
+          // Persist the upload result BEFORE the done transition so a failure
+          // in markDone (below) does not cause a re-upload on the next try.
+          await dao.recordUpload(
+            p.id,
+            serverFileName: fileName,
+            serverFileUrl: fileUrl,
+          );
+        }
         await dao.markDone(
           p.id,
-          serverFileName: fileName,
+          serverFileName: fileName!,
           serverFileUrl: fileUrl,
         );
         return AttachmentUploadResult(fileName: fileName, fileUrl: fileUrl);

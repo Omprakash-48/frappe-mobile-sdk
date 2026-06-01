@@ -45,7 +45,12 @@ class Cursor {
       Cursor(modified: modified, name: name, complete: true, start: 0);
 
   Map<String, Object?>? toJson() {
-    if (isNull) return null;
+    // An incomplete cursor with no watermark (modified == name == null) has
+    // nothing to persist → null. But a *completed* empty cursor (zero-row
+    // doctype that drained fully) must serialize as {complete: true}, else
+    // PullEngine skips the write and re-runs a full initial pull every
+    // restart (PR#36 round-4 B3).
+    if (isNull && !complete) return null;
     return {
       'modified': modified,
       'name': name,

@@ -82,6 +82,13 @@ class FrappeSDK {
   /// finishes (success or failure); on failure callers can retry.
   Completer<void>? _initInFlight;
 
+  /// Coalesces concurrent [_initialMetaAndDataSync] runs. login(),
+  /// verifyLoginOtp(), and initialize() each fire it `unawaited`; two rapid
+  /// auth events (or a login racing an in-progress run) would otherwise
+  /// execute two concurrent meta+config+closure pulls, both writing
+  /// `doctype_meta`/`sdk_meta` with no ordering guarantee (PR#36 round-4 H5).
+  Completer<void>? _metaSyncInFlight;
+
   /// Set when [OfflineTransitionService.runDrainAndWipe] is fired
   /// in the background from [initialize] / [login]. [_runUpgradeClosurePull]
   /// awaits this before doing any per-doctype-table writes so a concurrent
@@ -368,8 +375,9 @@ class FrappeSDK {
         try {
           await syncSvc.pullSyncWaiting(doctype: doctype);
         } catch (e, st) {
-          // ignore: avoid_print
-          print('FrappeSDK: background pullSync($doctype) failed — $e\n$st');
+          debugPrint(
+            'FrappeSDK: background pullSync($doctype) failed — $e\n$st',
+          );
         }
       },
       metaResolver: metaFn,
@@ -959,8 +967,7 @@ class FrappeSDK {
         setAtMs: DateTime.now().millisecondsSinceEpoch,
       );
     } catch (e, st) {
-      // ignore: avoid_print
-      print('FrappeSDK: failed to persist offline_enabled — $e\n$st');
+      debugPrint('FrappeSDK: failed to persist offline_enabled — $e\n$st');
       return;
     }
 
@@ -1030,7 +1037,29 @@ class FrappeSDK {
   /// 1) Sync doctypes from login mobile_form_names (checkAndSyncDoctypes)
   /// 2) Resync configuration from server (mobile_auth.configuration)
   /// 3) Pull records for all mobile doctypes into the offline DB
-  Future<void> _initialMetaAndDataSync() async {
+  /// Guarded entry point: concurrent callers join the single in-flight run
+  /// instead of starting a parallel meta/data sync (PR#36 round-4 H5). The
+  /// guard lives here — not in initialize()'s [_initInFlight] — because
+  /// login()/verifyLoginOtp() reach the body directly, bypassing initialize().
+  Future<void> _initialMetaAndDataSync() {
+    final inFlight = _metaSyncInFlight;
+    if (inFlight != null) return inFlight.future;
+    final completer = Completer<void>();
+    _metaSyncInFlight = completer;
+    () async {
+      try {
+        await _runInitialMetaAndDataSync();
+        completer.complete();
+      } catch (e, st) {
+        completer.completeError(e, st);
+      } finally {
+        _metaSyncInFlight = null;
+      }
+    }();
+    return completer.future;
+  }
+
+  Future<void> _runInitialMetaAndDataSync() async {
     if (_metaService == null || _syncService == null) return;
 
     // Offline launch: every call below is pure-network and would block
@@ -1067,8 +1096,7 @@ class FrappeSDK {
           at: DateTime.now(),
         ),
       );
-      // ignore: avoid_print
-      print('FrappeSDK: boot sync — server unreachable: $e\n$st');
+      debugPrint('FrappeSDK: boot sync — server unreachable: $e\n$st');
       _setInitialSyncFlag(initialSyncNotifier, false);
       return;
     } catch (e, st) {
@@ -1079,8 +1107,7 @@ class FrappeSDK {
           at: DateTime.now(),
         ),
       );
-      // ignore: avoid_print
-      print('FrappeSDK: permissions.syncFromApi failed — $e\n$st');
+      debugPrint('FrappeSDK: permissions.syncFromApi failed — $e\n$st');
       // Non-network failure: continue with other steps so a partial
       // outage (e.g. one method 500) doesn't block the rest of boot.
     }
@@ -1088,22 +1115,19 @@ class FrappeSDK {
     try {
       await _translationService?.loadTranslations('en');
     } catch (e, st) {
-      // ignore: avoid_print
-      print('FrappeSDK: translations.loadTranslations failed — $e\n$st');
+      debugPrint('FrappeSDK: translations.loadTranslations failed — $e\n$st');
     }
 
     try {
       await _metaService!.checkAndSyncDoctypes();
     } catch (e, st) {
-      // ignore: avoid_print
-      print('FrappeSDK: meta.checkAndSyncDoctypes failed — $e\n$st');
+      debugPrint('FrappeSDK: meta.checkAndSyncDoctypes failed — $e\n$st');
     }
 
     try {
       await _metaService!.resyncMobileConfiguration();
     } catch (e, st) {
-      // ignore: avoid_print
-      print('FrappeSDK: meta.resyncMobileConfiguration failed — $e\n$st');
+      debugPrint('FrappeSDK: meta.resyncMobileConfiguration failed — $e\n$st');
     }
 
     // Online mode stops here — closure pull is offline-only.
@@ -1156,8 +1180,7 @@ class FrappeSDK {
         // Drain failure is surfaced via the transition stream; we just
         // need to know it has settled before writing to per-doctype tables.
         // Log so the failure mode is visible at the boot path too.
-        // ignore: avoid_print
-        print('FrappeSDK: pending drain awaited with error — $e\n$st');
+        debugPrint('FrappeSDK: pending drain awaited with error — $e\n$st');
       }
     }
     try {
@@ -1180,8 +1203,9 @@ class FrappeSDK {
           try {
             metasByDoctype[dt] = await _metaService!.getMeta(dt);
           } catch (e, st) {
-            // ignore: avoid_print
-            print('FrappeSDK: closure pull — getMeta($dt) failed — $e\n$st');
+            debugPrint(
+              'FrappeSDK: closure pull — getMeta($dt) failed — $e\n$st',
+            );
           }
         }
         try {
@@ -1190,8 +1214,7 @@ class FrappeSDK {
             childDoctypes: closure.childDoctypes,
           );
         } catch (e, st) {
-          // ignore: avoid_print
-          print(
+          debugPrint(
             'FrappeSDK: closure pull — ensureSchemaForClosure failed — $e\n$st',
           );
         }
@@ -1214,8 +1237,7 @@ class FrappeSDK {
         () => _pullEngine!.run(closure, allowedDoctypes: pullable),
       );
     } catch (e, st) {
-      // ignore: avoid_print
-      print('FrappeSDK: closure pull failed — $e\n$st');
+      debugPrint('FrappeSDK: closure pull failed — $e\n$st');
       return const <String>{};
     } finally {
       _syncCompleteController?.add(null);
@@ -1287,8 +1309,7 @@ class FrappeSDK {
         try {
           await dao.clearLastOkCursor(doctype);
         } catch (e, st) {
-          // ignore: avoid_print
-          print(
+          debugPrint(
             'FrappeSDK: forcePullAll cursor-clear($doctype) failed — $e\n$st',
           );
         }
@@ -1297,13 +1318,11 @@ class FrappeSDK {
       for (final entry in results.entries) {
         final err = entry.value.error;
         if (err != null && err.isNotEmpty) {
-          // ignore: avoid_print
-          print('FrappeSDK: forcePullAll(${entry.key}) failed — $err');
+          debugPrint('FrappeSDK: forcePullAll(${entry.key}) failed — $err');
         }
       }
     } catch (e, st) {
-      // ignore: avoid_print
-      print('FrappeSDK: forcePullAll failed — $e\n$st');
+      debugPrint('FrappeSDK: forcePullAll failed — $e\n$st');
     }
     _syncCompleteController?.add(null);
   }

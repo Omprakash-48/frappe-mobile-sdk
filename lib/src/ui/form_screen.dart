@@ -853,6 +853,12 @@ class _FormScreenState extends State<FormScreen> with WidgetsBindingObserver {
           widget.meta.name,
           widget.document!.serverId!,
         );
+        // The server doc is gone; drop the local docs__ mirror too, else it
+        // reappears in list screens until the next pull (PR#36 round-4 B5).
+        await widget.repository.hardDeleteLocalMirror(
+          doctype: widget.meta.name,
+          mobileUuid: widget.document!.localId,
+        );
       } else {
         await widget.repository.deleteDocument(
           doctype: widget.meta.name,

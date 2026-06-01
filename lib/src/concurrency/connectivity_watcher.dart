@@ -32,7 +32,16 @@ class ConnectivityWatcher {
     required Stream<bool> stream,
   }) {
     final w = ConnectivityWatcher._(initial);
-    w._sub = stream.listen(w._onEvent);
+    // Guard against errors on the source stream (e.g. connectivity_plus
+    // emitting a PlatformException when network-info permission is revoked
+    // on Android 13+). Without onError the error is uncaught and crashes the
+    // isolate; swallow + log and keep the watcher alive (PR#36 round-4 M1).
+    w._sub = stream.listen(
+      w._onEvent,
+      onError: (Object e, StackTrace st) {
+        debugPrint('ConnectivityWatcher: source stream error — $e\n$st');
+      },
+    );
     return w;
   }
 

@@ -148,20 +148,49 @@ class PushEngine {
     ],
   }) : dependencyScanner = dependencyScanner ?? _defaultDependencyScanner;
 
+  bool _running = false;
+  bool _rerunRequested = false;
+
   /// Drains the outbox once. Call this on user save (debounced), on
   /// connectivity restore, on app resume, or via SyncController.syncNow().
+  ///
+  /// Reentrancy guard: multiple triggers can fire concurrently (a user save
+  /// racing a connectivity restore racing syncNow). Without serialization
+  /// each call independently resets in_flight rows back to pending and
+  /// re-fetches the outbox, dispatching the same row twice in parallel
+  /// (PR#36 round-4 B1). A concurrent caller does not start a second drain;
+  /// it requests exactly one more drain after the current one finishes, so
+  /// work enqueued mid-drain is still picked up.
   Future<void> runOnce() async {
+    if (_running) {
+      _rerunRequested = true;
+      return;
+    }
+    _running = true;
     notifier.value = notifier.value.copyWith(isPushing: true);
     try {
-      // Resume any in_flight rows left over from a crash mid-dispatch.
-      await outboxDao.resetInFlightToPending();
+      do {
+        _rerunRequested = false;
+        await _drainOnce();
+      } while (_rerunRequested);
+    } finally {
+      _running = false;
+      notifier.value = notifier.value.copyWith(isPushing: false);
+    }
+  }
 
-      // Supersede pass — for any (doctype, mobile_uuid, operation) tuple
-      // with both a `failed` row AND a newer `pending` row, delete the
-      // older failed row directly. Keeps the outbox a true pending-work-
-      // only table (Invariant 2) and avoids a redundant retry that the
-      // newer pending row already covers.
-      await db.execute('''
+  /// One full drain pass over the outbox. Always invoked under the
+  /// [runOnce] reentrancy guard — never call directly.
+  Future<void> _drainOnce() async {
+    // Resume any in_flight rows left over from a crash mid-dispatch.
+    await outboxDao.resetInFlightToPending();
+
+    // Supersede pass — for any (doctype, mobile_uuid, operation) tuple
+    // with both a `failed` row AND a newer `pending` row, delete the
+    // older failed row directly. Keeps the outbox a true pending-work-
+    // only table (Invariant 2) and avoids a redundant retry that the
+    // newer pending row already covers.
+    await db.execute('''
         DELETE FROM outbox
          WHERE id IN (
            SELECT older.id
@@ -176,33 +205,28 @@ class PushEngine {
          )
       ''');
 
-      final pending = await outboxDao.findByState(OutboxState.pending);
-      if (pending.isEmpty) return;
+    final pending = await outboxDao.findByState(OutboxState.pending);
+    if (pending.isEmpty) return;
 
-      // Precompute real dependencies by scanning each pending row's
-      // `docs__<doctype>` mirror (+ children) for `<field>__is_local=1`
-      // Link values. Without this the default scanner returns `[]`
-      // (no `payload` column on outbox), and TierComputer collapses
-      // every row into tier 0 — racing parent INSERTs against dependent
-      // child INSERTs whose UuidRewriter then sees the parent's
-      // `server_name` as still-null and throws BlockedByUpstream.
-      final depsByRowId = <int, List<String>>{};
-      for (final row in pending) {
-        depsByRowId[row.id] = await _scanLocalDepsFor(row);
-      }
+    // Precompute real dependencies by scanning each pending row's
+    // `docs__<doctype>` mirror (+ children) for `<field>__is_local=1`
+    // Link values. Without this the default scanner returns `[]`
+    // (no `payload` column on outbox), and TierComputer collapses
+    // every row into tier 0 — racing parent INSERTs against dependent
+    // child INSERTs whose UuidRewriter then sees the parent's
+    // `server_name` as still-null and throws BlockedByUpstream.
+    final depsByRowId = <int, List<String>>{};
+    for (final row in pending) {
+      depsByRowId[row.id] = await _scanLocalDepsFor(row);
+    }
 
-      final tiers = TierComputer.compute(
-        rows: pending,
-        dependenciesForRow: (r) => depsByRowId[r.id] ?? dependencyScanner(r),
-      );
+    final tiers = TierComputer.compute(
+      rows: pending,
+      dependenciesForRow: (r) => depsByRowId[r.id] ?? dependencyScanner(r),
+    );
 
-      for (final tier in tiers) {
-        await Future.wait(
-          _dispatchUnits(tier).map((u) => pool.submit<void>(u)),
-        );
-      }
-    } finally {
-      notifier.value = notifier.value.copyWith(isPushing: false);
+    for (final tier in tiers) {
+      await Future.wait(_dispatchUnits(tier).map((u) => pool.submit<void>(u)));
     }
   }
 

@@ -8,6 +8,28 @@ void main() {
     expect(Cursor.empty.toJson(), isNull);
   });
 
+  test('completed empty cursor serializes (so zero-row doctypes persist)', () {
+    // B3 (PR#36 round-4): a doctype with no rows on the server drains
+    // immediately; markComplete() leaves modified/name null but complete=true.
+    // toJson() must NOT return null here — otherwise PullEngine's
+    // `if (cursorJson != null)` skips the write and the doctype is re-fetched
+    // as a full initial pull on every restart. Only an *incomplete* empty
+    // cursor (no watermark yet) should serialize as null.
+    final emptyComplete = Cursor.empty.markComplete();
+    expect(emptyComplete.isNull, isTrue);
+    expect(emptyComplete.complete, isTrue);
+
+    final json = emptyComplete.toJson();
+    expect(json, isNotNull);
+    expect(json!['complete'], isTrue);
+
+    final back = Cursor.fromJson(json);
+    expect(back.complete, isTrue, reason: 'persisted cursor stays INCREMENTAL');
+
+    // An incomplete empty cursor still serializes as null (no watermark).
+    expect(Cursor.empty.toJson(), isNull);
+  });
+
   test('round-trip with values', () {
     const c = Cursor(modified: '2026-01-01 00:00:00', name: 'SO-1');
     final json = jsonEncode(c.toJson());

@@ -92,6 +92,37 @@ void main() {
   });
 
   test(
+    'caller does not observe success when the outer transaction fails after the body runs',
+    () async {
+      // B2 (PR#36 round-4): completers were resolved INSIDE the
+      // db.transaction callback, before COMMIT. If the transaction then
+      // fails to commit, the write is rolled back but the caller already
+      // saw success — silent data loss with no observable error. The caller
+      // must instead observe the failure.
+      final q = WriteQueue(
+        db: _CommitFailDatabase(db),
+        doctype: 'X',
+        batchRows: 100,
+      );
+
+      await expectLater(
+        q.submit<void>((txn) async {
+          await txn.insert('t', {'id': 1, 'v': 'a'});
+        }),
+        throwsA(isA<_SimulatedCommitFailure>()),
+      );
+
+      // The transaction rolled back → the row must not be durable.
+      final rows = await db.query('t');
+      expect(
+        rows,
+        isEmpty,
+        reason: 'transaction failed to commit → write must not persist',
+      );
+    },
+  );
+
+  test(
     'failed task in batch does not commit its partial writes; siblings do',
     () async {
       // SIG-1: per-task isolation via SQLite savepoints. The outer
@@ -126,4 +157,32 @@ void main() {
       );
     },
   );
+}
+
+/// Wraps a real [Database] but forces the outer transaction to fail *after*
+/// the batch body has run (savepoints released), simulating a commit-time
+/// failure (disk full, lock timeout, DB closed at COMMIT). Only [transaction]
+/// is exercised by [WriteQueue]; any other member is unexpected.
+class _CommitFailDatabase implements Database {
+  _CommitFailDatabase(this._inner);
+  final Database _inner;
+
+  @override
+  Future<T> transaction<T>(
+    Future<T> Function(Transaction txn) action, {
+    bool? exclusive,
+  }) {
+    return _inner.transaction<T>((txn) async {
+      await action(txn);
+      throw _SimulatedCommitFailure();
+    }, exclusive: exclusive);
+  }
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
+}
+
+class _SimulatedCommitFailure implements Exception {
+  @override
+  String toString() => 'SimulatedCommitFailure';
 }
