@@ -1,6 +1,6 @@
 # Offline-First Architecture
 
-This document describes the offline-first data layer introduced in the 2.0 rewrite. It covers the two-store design, pull/push lifecycle, sync controller, and the new UI surface.
+This document describes the offline-first data layer introduced in the 2.0 rewrite. It covers the single-store (`docs__<doctype>`) design, pull/push lifecycle, sync controller, and the new UI surface.
 
 > **Note:** the entire offline-first layer described here can be turned
 > off per deployment via a server-side flag. See
@@ -12,14 +12,16 @@ This document describes the offline-first data layer introduced in the 2.0 rewri
 
 ## Overview
 
-The SDK maintains **two parallel stores** for every document:
+The SDK keeps a **single normalized store** for every document:
 
 | Store | Table | Purpose |
 |-------|-------|---------|
-| Legacy blob store | `documents` (JSON) | Source of truth for push; unchanged from v1 |
-| Per-doctype store | `docs__<doctype>` | Normalized columns; enables offline Link pickers, filter queries, and `fetch_from` |
+| Per-doctype store | `docs__<doctype>` | Normalized columns; source of truth for push, and enables offline Link pickers, filter queries, and `fetch_from` |
 
-Every form save writes to both stores (`OfflineRepository` + `LocalWriter`). The offline read path (`UnifiedResolver`) queries the per-doctype tables and falls back to a background API refresh when the device is online.
+Every form save writes to the per-doctype table (`OfflineRepository` + `LocalWriter`); the same row drives both push (via the outbox) and offline reads. The read path (`UnifiedResolver`) queries the per-doctype tables and falls back to a background API refresh when the device is online.
+
+> The legacy JSON blob `documents` table from v1 was dropped in the v2→v3
+> migration and is no longer maintained.
 
 ---
 
@@ -91,9 +93,7 @@ This endpoint must be present in the `frappe-mobile-control` companion app. When
 
 Before sending a document to the server, `SyncService` rewrites any `mobile_uuid`-shaped values in Link fields to their corresponding `server_name`. This prevents server-side "Document not found" errors for offline-created docs that reference other offline-created docs.
 
-Lookup order per UUID:
-1. Legacy `documents` table — `localId = uuid` with a non-null `serverId`.
-2. Per-doctype table — `mobile_uuid = uuid` with a non-null `server_name`.
+Resolution per UUID: the per-doctype table is queried for `mobile_uuid = uuid` with a non-null `server_name`.
 
 ---
 
@@ -222,14 +222,6 @@ Lists all failed / conflict / blocked outbox rows with retry and resolve actions
 
 ```dart
 SyncErrorsScreen(ctrl: sdk.syncController)
-```
-
-### `MigrationBlockedScreen`
-
-Shown when a pending DB schema migration cannot run (e.g. unsupported downgrade). Prompts the user to update the app.
-
-```dart
-MigrationBlockedScreen()
 ```
 
 ### `DocumentListFilterChip`

@@ -1,5 +1,6 @@
 import '../models/doc_field.dart';
 import '../models/doc_type_meta.dart';
+import '../utils/uuid_pattern.dart';
 import 'push_error.dart';
 
 typedef ResolveServerNameFn =
@@ -66,8 +67,20 @@ class UuidRewriter {
 
       if (field != null &&
           (field.fieldtype == 'Link' || field.fieldtype == 'Dynamic Link')) {
-        final isLocal = (payload['${key}__is_local'] as int?) == 1;
-        if (!isLocal || value == null) {
+        // A Link value needs server-name resolution when EITHER the form
+        // marked it local (`__is_local == 1`) OR the value itself is shaped
+        // like a `mobile_uuid` (v4 UUID). The shape check is the complete
+        // detector — Frappe server names are never UUID-shaped, and SDK
+        // `mobile_uuid`s always are — so it catches local refs populated by
+        // paths that never fire `onIsLocalChanged` (fetch_from, defaults,
+        // programmatic prefill, back-reference Links). Relying on the flag
+        // alone let those raw UUIDs reach the server, which rejects them as
+        // unknown names. Mirrors the read-path guard in
+        // `form_screen.dart` (`looksLikeMobileUuid`). The flag is kept as a
+        // redundant OR for safety.
+        final flaggedLocal = (payload['${key}__is_local'] as int?) == 1;
+        final looksLocal = looksLikeMobileUuid(value?.toString());
+        if ((!flaggedLocal && !looksLocal) || value == null) {
           out[key] = value;
           continue;
         }

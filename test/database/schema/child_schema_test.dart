@@ -10,8 +10,7 @@ void main() {
   group('buildChildSchemaDDL', () {
     test('creates table with child FK system columns', () {
       final meta = DocTypeMeta(name: 'Order Item', fields: const []);
-      final ddl =
-          buildChildSchemaDDL(meta, tableName: 'docs__order_item');
+      final ddl = buildChildSchemaDDL(meta, tableName: 'docs__order_item');
       final createStmt = ddl.firstWhere((s) => s.startsWith('CREATE TABLE'));
       expect(createStmt, contains('mobile_uuid TEXT PRIMARY KEY'));
       expect(createStmt, contains('server_name TEXT'));
@@ -32,21 +31,23 @@ void main() {
           f('rate', 'Currency'),
         ],
       );
-      final ddl =
-          buildChildSchemaDDL(meta, tableName: 'docs__order_item');
+      final ddl = buildChildSchemaDDL(meta, tableName: 'docs__order_item');
       final createStmt = ddl.firstWhere((s) => s.startsWith('CREATE TABLE'));
-      expect(createStmt, contains('item_code TEXT'));
-      expect(createStmt, contains('qty INTEGER'));
-      expect(createStmt, contains('rate REAL'));
+      expect(createStmt, contains('"item_code" TEXT'));
+      expect(createStmt, contains('"qty" INTEGER'));
+      expect(createStmt, contains('"rate" REAL'));
     });
 
     test('emits unique partial index on server_name', () {
       final meta = DocTypeMeta(name: 'C', fields: const []);
       final ddl = buildChildSchemaDDL(meta, tableName: 'docs__c');
       expect(
-        ddl.any((s) => s.contains('UNIQUE INDEX') &&
-            s.contains('server_name') &&
-            s.contains('WHERE server_name IS NOT NULL')),
+        ddl.any(
+          (s) =>
+              s.contains('UNIQUE INDEX') &&
+              s.contains('server_name') &&
+              s.contains('WHERE server_name IS NOT NULL'),
+        ),
         isTrue,
       );
     });
@@ -55,10 +56,13 @@ void main() {
       final meta = DocTypeMeta(name: 'C', fields: const []);
       final ddl = buildChildSchemaDDL(meta, tableName: 'docs__c');
       expect(
-        ddl.any((s) => s.contains('UNIQUE INDEX') &&
-            s.contains('parent_uuid') &&
-            s.contains('parentfield') &&
-            s.contains('idx')),
+        ddl.any(
+          (s) =>
+              s.contains('UNIQUE INDEX') &&
+              s.contains('parent_uuid') &&
+              s.contains('parentfield') &&
+              s.contains('idx'),
+        ),
         isTrue,
       );
     });

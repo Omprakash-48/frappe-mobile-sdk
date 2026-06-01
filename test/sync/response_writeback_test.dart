@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:frappe_mobile_sdk/src/sync/response_writeback.dart';
 import 'package:frappe_mobile_sdk/src/database/schema/system_tables.dart';
@@ -219,6 +220,54 @@ void main() {
       final rows = await db.query('docs__so_item', orderBy: 'idx ASC');
       expect(rows[0]['server_name'], 'A');
       expect(rows[1]['server_name'], 'B');
+    },
+  );
+
+  test(
+    'warns when a server child matches no local row (double-miss)',
+    () async {
+      // No echoed mobile_uuid and no local row at the fallback position →
+      // both the mobile_uuid match and the (parent_uuid, parentfield, idx)
+      // fallback return 0. The writeback for this child is silently dropped;
+      // surface it so it is not invisible (H2).
+      final logs = <String>[];
+      final original = debugPrint;
+      debugPrint = (String? message, {int? wrapWidth}) {
+        if (message != null) logs.add(message);
+      };
+      final outboxRow = (await outbox.findByState(OutboxState.pending)).first;
+      try {
+        await ResponseWriteback.apply(
+          db: db,
+          row: outboxRow,
+          parentTable: 'docs__sales_order',
+          childTablesByFieldname: const {'items': 'docs__so_item'},
+          response: {
+            'name': 'SO',
+            'modified': '2026-02-01',
+            'items': [
+              // pos 0 → matches local idx 0 (c-1): no warning.
+              {'name': 'A', 'idx': 0, 'modified': '2026-02-01'},
+              // pos 1 → no echoed uuid, no local idx=1 row: double-miss.
+              {'name': 'ORPHAN', 'idx': 99, 'modified': '2026-02-01'},
+            ],
+          },
+        );
+      } finally {
+        debugPrint = original;
+      }
+      // The matched row still got its server_name.
+      final matched = (await db.query(
+        'docs__so_item',
+        where: 'mobile_uuid = ?',
+        whereArgs: ['c-1'],
+      )).first;
+      expect(matched['server_name'], 'A');
+      // The orphan child produced exactly one warning naming it.
+      final warnings = logs
+          .where((l) => l.contains('ResponseWriteback') && l.contains('ORPHAN'))
+          .toList();
+      expect(warnings, hasLength(1));
     },
   );
 

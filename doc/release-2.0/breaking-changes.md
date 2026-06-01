@@ -50,7 +50,7 @@ final id = await dao.create(doctype: 'Customer', data: {...});
 
 ```dart
 // 2.0
-final result = await sdk.unifiedResolver.resolve(doctype: 'Customer');
+final result = await sdk.resolver.resolve(doctype: 'Customer');
 final docs = result.rows;
 final mobileUuid = await sdk.offlineRepository.saveDocument(
   doctype: 'Customer',
@@ -83,7 +83,7 @@ final data = docs.first.dataJson; // Map<String, dynamic>
 
 ```dart
 // 2.0 — Map-shaped rows
-final result = await sdk.unifiedResolver.resolve(doctype: 'Customer');
+final result = await sdk.resolver.resolve(doctype: 'Customer');
 final List<Map<String, Object?>> docs = result.rows;
 final uuid = docs.first['mobile_uuid'] as String;
 final customerName = docs.first['customer_name'] as String?;
@@ -130,7 +130,7 @@ LinkOptionService(client)
 ```dart
 // 2.0
 LinkOptionService(
-  unifiedResolver,
+  resolver,
   metaResolver, // MetaResolverFn — typically `(doctype) => metaService.get(doctype)`
 )
 ```

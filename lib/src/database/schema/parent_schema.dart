@@ -45,14 +45,17 @@ List<String> buildParentSchemaDDL(
     final sqlType = sqliteColumnTypeFor(type);
     if (sqlType == null) continue;
 
-    cols.add('$name $sqlType');
+    // Quote identifiers — Frappe meta can expose a column whose
+    // fieldname is a SQL reserved word (e.g. `create`, `delete`).
+    // Unquoted, CREATE TABLE fails parse and the migration aborts.
+    cols.add('"$name" $sqlType');
 
     if (isLinkFieldType(type)) {
-      cols.add('${name}__is_local INTEGER');
+      cols.add('"${name}__is_local" INTEGER');
     }
 
     if (normFields.contains(name) && sqlType == 'TEXT') {
-      cols.add('${name}__norm TEXT');
+      cols.add('"${name}__norm" TEXT');
     }
   }
 
@@ -87,7 +90,7 @@ List<String> buildParentSchemaDDL(
   for (final col in additional) {
     ddl.add(
       'CREATE INDEX IF NOT EXISTS ix_${suffix}_${_sanitizeColName(col)} '
-      'ON $tableName($col)',
+      'ON $tableName("$col")',
     );
   }
 

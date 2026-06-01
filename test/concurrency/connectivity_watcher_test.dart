@@ -73,6 +73,33 @@ void main() {
     await c.close();
   });
 
+  test('source-stream errors are handled, not thrown as uncaught', () async {
+    // M1 (PR#36 round-4): connectivity_plus can emit a stream error (e.g.
+    // network-info permission revoked on Android 13+). Without onError on the
+    // subscription, that error is uncaught and crashes the isolate. The
+    // watcher must swallow it and keep working.
+    final controller = StreamController<bool>();
+    final w = ConnectivityWatcher.fromStream(
+      initial: false,
+      stream: controller.stream,
+    );
+    final seen = <bool>[];
+    final sub = w.onChange.listen(seen.add);
+
+    controller.addError(Exception('network permission revoked'));
+    await Future<void>.delayed(Duration.zero);
+
+    // Still functional after the error — a real edge still propagates.
+    controller.add(true);
+    await Future<void>.delayed(Duration.zero);
+    expect(w.isOnline, isTrue);
+    expect(seen, [true]);
+
+    await sub.cancel();
+    await w.dispose();
+    await controller.close();
+  });
+
   test('dispose cancels subscription and closes controller', () async {
     final controller = StreamController<bool>();
     final w = ConnectivityWatcher.fromStream(

@@ -19,6 +19,20 @@ class _PendingWrite<T> {
   _PendingWrite(this.task);
 }
 
+/// A single task's outcome inside a batch, buffered until the outer
+/// transaction resolves so completers are never resolved before COMMIT.
+class _Outcome {
+  final _PendingWrite<Object?> pending;
+  final Object? result;
+  final Object? error;
+  final StackTrace? stackTrace;
+
+  _Outcome.ok(this.pending, this.result) : error = null, stackTrace = null;
+  _Outcome.err(this.pending, this.error, this.stackTrace) : result = null;
+
+  bool get isError => error != null;
+}
+
 /// Per-doctype serial write queue. Submits run inside a single sqflite
 /// `db.transaction(...)` block, with consecutive submits batched into the
 /// same transaction up to [batchRows]. Different doctypes use independent
@@ -55,6 +69,15 @@ class WriteQueue {
     Future<void>(() async {
       try {
         while (_queue.isNotEmpty) {
+          // No Completer is resolved inside the transaction — neither
+          // successes nor per-task failures. A task's writes are not durable
+          // until the outer `db.transaction` COMMITs, and resolving mid-
+          // transaction lets the caller's microtask advance (cursor moved,
+          // outbox row marked done) before the data is durable; a subsequent
+          // commit failure then loses the write with no observable error
+          // (PR#36 round-4 B2). Per-task outcomes are collected here and
+          // replayed in order only after the transaction resolves.
+          final batch = <_Outcome>[];
           try {
             await db.transaction((txn) async {
               var count = 0;
@@ -65,10 +88,12 @@ class WriteQueue {
                   await txn.execute('SAVEPOINT $sp');
                   final r = await p.task(txn);
                   await txn.execute('RELEASE SAVEPOINT $sp');
-                  p.completer.complete(r);
+                  batch.add(_Outcome.ok(p, r));
                 } catch (e, st) {
                   // Roll back this task's partial writes; sibling tasks
-                  // inside the same outer transaction are unaffected.
+                  // inside the same outer transaction are unaffected. The
+                  // failure is recorded and reported after the transaction
+                  // resolves, alongside the successes.
                   try {
                     await txn.execute('ROLLBACK TO SAVEPOINT $sp');
                     await txn.execute('RELEASE SAVEPOINT $sp');
@@ -78,19 +103,36 @@ class WriteQueue {
                       'WriteQueue: ROLLBACK TO SAVEPOINT $sp failed — $rollbackErr\n$rollbackSt',
                     );
                   }
-                  p.completer.completeError(e, st);
+                  batch.add(_Outcome.err(p, e, st));
                 }
                 count++;
               }
             });
+            // COMMIT succeeded — the batch's writes are durable. Replay each
+            // task's outcome now (outside the transaction).
+            for (final o in batch) {
+              if (o.isError) {
+                o.pending.completer.completeError(o.error!, o.stackTrace);
+              } else {
+                o.pending.completer.complete(o.result);
+              }
+            }
           } catch (e, st) {
             // Outer `db.transaction` itself failed (e.g. database closed,
-            // disk full, lock timeout). Items already removed inside the
-            // inner loop were completed via the per-task savepoint
-            // try/catch. Items still queued would otherwise hang forever
-            // on `submit()` — drain them with the same error so callers
-            // observe the failure and can recover or surface it.
+            // disk full, lock timeout) — nothing in this batch committed.
+            // Tasks that failed their own savepoint still report their own
+            // error; successful tasks whose writes were rolled back, and any
+            // tasks still queued (which would otherwise hang on `submit()`),
+            // get the outer failure so every caller observes it.
             debugPrint('WriteQueue: outer transaction failed — $e\n$st');
+            for (final o in batch) {
+              if (o.pending.completer.isCompleted) continue;
+              if (o.isError) {
+                o.pending.completer.completeError(o.error!, o.stackTrace);
+              } else {
+                o.pending.completer.completeError(e, st);
+              }
+            }
             while (_queue.isNotEmpty) {
               _queue.removeFirst().completer.completeError(e, st);
             }

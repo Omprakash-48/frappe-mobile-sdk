@@ -79,6 +79,29 @@ class PendingAttachmentDao {
     );
   }
 
+  /// Persists the uploaded File identifiers WITHOUT transitioning to `done`.
+  /// Called immediately after a successful upload so that if the subsequent
+  /// [markDone] write fails (or the process is interrupted), a later attempt
+  /// reuses the already-uploaded binary instead of re-uploading it and
+  /// creating a duplicate File row (PR#36 round-4 H3). The row stays in
+  /// `uploading` so it is still picked up by [findPendingForTopParent].
+  Future<void> recordUpload(
+    int id, {
+    required String serverFileName,
+    required String serverFileUrl,
+  }) async {
+    await _db.update(
+      'pending_attachments',
+      <String, Object?>{
+        'server_file_name': serverFileName,
+        'server_file_url': serverFileUrl,
+        'last_attempt_at': DateTime.now().toUtc().millisecondsSinceEpoch,
+      },
+      where: 'id = ?',
+      whereArgs: [id],
+    );
+  }
+
   Future<void> markDone(
     int id, {
     required String serverFileName,

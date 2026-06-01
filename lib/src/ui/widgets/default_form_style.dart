@@ -23,10 +23,12 @@ class DefaultFormStyle {
     sectionMargin: const EdgeInsets.symmetric(vertical: 6, horizontal: 6),
     sectionPadding: const EdgeInsets.all(16),
     fieldPadding: const EdgeInsets.only(bottom: 16),
+    // `labelText` and `helperText` are intentionally omitted: the outer
+    // label (above the box, via `base_field.dart`) and the outer
+    // description (below the box) already render them. Including the
+    // Material floating label / helper here produced duplicated text.
     fieldDecoration: (field) => InputDecoration(
-      labelText: field.label ?? field.fieldname,
       hintText: field.placeholder,
-      helperText: field.description,
       border: OutlineInputBorder(borderRadius: BorderRadius.circular(8)),
       enabledBorder: OutlineInputBorder(
         borderRadius: BorderRadius.circular(8),
