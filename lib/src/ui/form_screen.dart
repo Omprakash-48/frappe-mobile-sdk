@@ -25,6 +25,7 @@ import 'widgets/form_builder.dart'
         OnButtonPressedCallback,
         FieldChangeHandler,
         FormValidator;
+import '../utils/sdk_log.dart';
 
 /// Visual customization for [FormScreen] action area.
 class FormScreenStyle {
@@ -284,8 +285,7 @@ class _FormScreenState extends State<FormScreen> with WidgetsBindingObserver {
     } catch (e, st) {
       // Banner is best-effort; a query failure should never block the
       // form from rendering.
-      // ignore: avoid_print
-      print('FormScreen: _loadSyncErrors failed — $e\n$st');
+      sdkLog('FormScreen: _loadSyncErrors failed — $e\n$st');
     }
   }
 
@@ -295,8 +295,7 @@ class _FormScreenState extends State<FormScreen> with WidgetsBindingObserver {
     try {
       await controller.retry(outboxId);
     } catch (e, st) {
-      // ignore: avoid_print
-      print('FormScreen: retry($outboxId) failed — $e\n$st');
+      sdkLog('FormScreen: retry($outboxId) failed — $e\n$st');
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
@@ -318,8 +317,7 @@ class _FormScreenState extends State<FormScreen> with WidgetsBindingObserver {
     try {
       await svc.pushSync(doctype: widget.meta.name);
     } catch (e, st) {
-      // ignore: avoid_print
-      print('FormScreen: pushSync failed — $e\n$st');
+      sdkLog('FormScreen: pushSync failed — $e\n$st');
       if (mounted) {
         showStatusSnackBar(
           context,
@@ -533,8 +531,7 @@ class _FormScreenState extends State<FormScreen> with WidgetsBindingObserver {
       );
       if (row != null) return row;
     } catch (e, st) {
-      // ignore: avoid_print
-      print(
+      sdkLog(
         'FormScreen: getRowFromPerDoctypeTable($linkedDoctype, $docName) '
         'failed — $e\n$st',
       );
@@ -551,8 +548,7 @@ class _FormScreenState extends State<FormScreen> with WidgetsBindingObserver {
       try {
         return await widget.api!.doctype.getByName(linkedDoctype, docName);
       } catch (e, st) {
-        // ignore: avoid_print
-        print(
+        sdkLog(
           'FormScreen: api.doctype.getByName($linkedDoctype, $docName) '
           'failed — $e\n$st',
         );
@@ -830,6 +826,12 @@ class _FormScreenState extends State<FormScreen> with WidgetsBindingObserver {
         await widget.api!.document.deleteDocument(
           widget.meta.name,
           widget.document!.serverId!,
+        );
+        // The server doc is gone; drop the local docs__ mirror too, else it
+        // reappears in list screens until the next pull (PR#36 round-4 B5).
+        await widget.repository.hardDeleteLocalMirror(
+          doctype: widget.meta.name,
+          mobileUuid: widget.document!.localId,
         );
       } else {
         await widget.repository.deleteDocument(

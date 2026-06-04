@@ -11,6 +11,7 @@ import '../models/offline_mode.dart';
 import '../models/offline_mode_notifier.dart';
 import '../sync/cursor.dart';
 import 'offline_repository.dart';
+import '../utils/sdk_log.dart';
 
 /// Per-doctype sync phase observable from outside the SDK. Drives UX:
 /// `initial` → blocking "preparing offline data" screen,
@@ -53,6 +54,12 @@ class SyncService {
   /// pipeline. Wired by `FrappeSDK` to `PushEngine.runOnce()`.
   final Future<void> Function()? _pushRunner;
 
+  /// Optional. Returns true when a push is active (pending/in-flight outbox
+  /// rows) for the given doctype. When non-null, [_pullOneInternal] defers a
+  /// pull for that doctype — parity with `PullEngine`'s existing guard
+  /// (`pull_engine.dart:133`). Null in tests / when unwired → no defer.
+  final Future<bool> Function(String doctype)? _hasActivePush;
+
   SyncService(
     this._client,
     this._repository,
@@ -64,9 +71,11 @@ class SyncService {
     ),
     OfflineModeNotifier? offlineModeNotifier,
     Future<void> Function()? pushRunner,
+    Future<bool> Function(String doctype)? hasActivePush,
   }) : _getMobileUuid = getMobileUuid,
        _modeNotifier = offlineModeNotifier ?? OfflineModeNotifier(offlineMode),
-       _pushRunner = pushRunner;
+       _pushRunner = pushRunner,
+       _hasActivePush = hasActivePush;
 
   /// Check if device is online.
   /// Returns false when offline mode is disabled, regardless of connectivity,
@@ -100,18 +109,16 @@ class SyncService {
       online = await isOnline();
     } catch (e, st) {
       // Platform-channel failure (e.g. headless test environment without
-      // connectivity_plus mocks). Treat as offline; surface the failure
-      // mode in logs rather than silently swallowing it.
-      // ignore: avoid_print
-      print('SyncService.pushSync: isOnline() threw — $e\n$st');
+      // connectivity_plus mocks). Treat as offline; log the failure mode
+      // in debug builds (sdkLog is a no-op in release).
+      sdkLog('SyncService.pushSync: isOnline() threw — $e\n$st');
     }
     if (!online) {
       return SyncResult.noConnectivity();
     }
     final runner = _pushRunner;
     if (runner == null) {
-      // ignore: avoid_print
-      print(
+      sdkLog(
         'SyncService.pushSync: pushRunner not wired; returning empty result',
       );
       return SyncResult.empty();
@@ -152,8 +159,7 @@ class SyncService {
           : DoctypePullPhase.resume;
     } catch (e, st) {
       // Corrupted cursor reads as INITIAL — the next pull will refresh it.
-      // ignore: avoid_print
-      print('SyncService.getPullPhase: corrupted cursor — $e\n$st');
+      sdkLog('SyncService.getPullPhase: corrupted cursor — $e\n$st');
       return DoctypePullPhase.initial;
     }
   }
@@ -258,8 +264,7 @@ class SyncService {
             try {
               out[dt] = await _pullOneInternal(doctype: dt);
             } catch (e, st) {
-              // ignore: avoid_print
-              print('SyncService.pullSyncMany($dt) failed — $e\n$st');
+              sdkLog('SyncService.pullSyncMany($dt) failed — $e\n$st');
               out[dt] = SyncResult(
                 0,
                 0,
@@ -353,6 +358,10 @@ class SyncService {
   @visibleForTesting
   Future<bool> isChildTableForTest(String doctype) => _isChildTable(doctype);
 
+  @visibleForTesting
+  Future<SyncResult> pullOneInternalForTest({required String doctype}) =>
+      _pullOneInternal(doctype: doctype);
+
   /// Reads and parses the persisted meta JSON for [doctype], returning
   /// null when the row is absent, empty, or fails to decode. The empty
   /// sentinel `'{}'` is treated as absent (legacy rows from earlier
@@ -368,8 +377,7 @@ class SyncService {
       if (parsed.isEmpty) return null;
       return DocTypeMeta.fromJson(parsed);
     } catch (e, st) {
-      // ignore: avoid_print
-      print('SyncService.$where($doctype) parse failed — $e\n$st');
+      sdkLog('SyncService.$where($doctype) parse failed — $e\n$st');
       return null;
     }
   }
@@ -386,6 +394,15 @@ class SyncService {
     // Child-table guard: see _isChildTable for rationale.
     if (await _isChildTable(doctype)) {
       return SyncResult(0, 0, 0, null, errors: const []);
+    }
+
+    // Active-push defer (parity with PullEngine, pull_engine.dart:133):
+    // skip the pull while this doctype has pending/in-flight outbox rows so
+    // we don't pull stale server state over local edits in flight. The
+    // doctype is retried on the next sync cycle.
+    final hasActivePush = _hasActivePush;
+    if (hasActivePush != null && await hasActivePush(doctype)) {
+      return SyncResult.empty(status: SyncStatus.deferredActivePush);
     }
 
     int success = 0;
@@ -412,8 +429,7 @@ class SyncService {
         cursorComplete = cv == true;
       } catch (e, st) {
         // Corrupted cursor — treat as fresh INITIAL pull.
-        // ignore: avoid_print
-        print('SyncService.pullSync: corrupted cursor — $e\n$st');
+        sdkLog('SyncService.pullSync: corrupted cursor — $e\n$st');
       }
     }
 
@@ -526,8 +542,7 @@ class SyncService {
           pageLastModified = modifiedAt;
           pageLastName = serverId;
         } catch (e, st) {
-          // ignore: avoid_print
-          print(
+          sdkLog(
             'SyncService.pullSync applyServerDocument($doctype/$serverId) failed — $e\n$st',
           );
           failed++;
@@ -652,6 +667,11 @@ enum SyncStatus {
   /// Another sync was already running and the mutex rejected this call.
   /// `error` is non-null with "Sync already in progress".
   busy,
+
+  /// A push was active (pending/in-flight outbox rows) for this doctype, so
+  /// the pull was skipped this cycle to avoid racing the push. The doctype
+  /// is picked up on the next sync. `success/failed/total` are zero.
+  deferredActivePush,
 
   /// The sync executed. `success/failed/total` carry actual row counts;
   /// when `failed > 0`, `errors` lists per-row details. Note that a

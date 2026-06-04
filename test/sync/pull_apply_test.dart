@@ -685,4 +685,80 @@ void main() {
       );
     },
   );
+
+  test('pull matches existing local row by mobile_uuid when server_name not '
+      'yet stamped — no duplicate parent row', () async {
+    // Local row exists from an in-flight INSERT: mobile_uuid set, server_name
+    // still NULL (writeback hasn't run yet), sync_status synced.
+    await db.insert('docs__sales_order', {
+      'mobile_uuid': 'uuid-A',
+      'server_name': null,
+      'sync_status': 'synced',
+      'local_modified': 0,
+      'customer': 'Old Cust',
+    });
+
+    // Server returns the same doc: it now HAS a server_name, and carries the
+    // same mobile_uuid the device assigned.
+    await PullApply.applyPage(
+      db: db,
+      parentMeta: parentMeta,
+      parentTable: 'docs__sales_order',
+      childMetasByFieldname: const {},
+      rows: [
+        {
+          'name': 'SO-001',
+          'mobile_uuid': 'uuid-A',
+          'modified': '2026-02-01 10:00:00.000000',
+          'customer': 'New Cust',
+        },
+      ],
+    );
+
+    final all = await db.query('docs__sales_order');
+    expect(all.length, 1, reason: 'must update in place, not insert a dup');
+    expect(all.first['mobile_uuid'], 'uuid-A');
+    expect(all.first['server_name'], 'SO-001');
+    expect(all.first['customer'], 'New Cust');
+  });
+
+  test('pull reconciles (no conflict) when matched by mobile_uuid and local '
+      'server_name is NULL — our own INSERT round-tripping', () async {
+    // Local row is locally-dirty (push pending) with NO server_name yet.
+    await db.insert('docs__sales_order', {
+      'mobile_uuid': 'uuid-B',
+      'server_name': null,
+      'sync_status': 'dirty',
+      'local_modified': 0,
+      'modified': '2026-01-01 09:00:00.000000',
+      'customer': 'Draft',
+    });
+
+    await PullApply.applyPage(
+      db: db,
+      parentMeta: parentMeta,
+      parentTable: 'docs__sales_order',
+      childMetasByFieldname: const {},
+      rows: [
+        {
+          'name': 'SO-002',
+          'mobile_uuid': 'uuid-B',
+          'modified': '2026-02-01 10:00:00.000000',
+          'customer': 'Draft',
+        },
+      ],
+    );
+
+    final row = (await db.query(
+      'docs__sales_order',
+      where: 'mobile_uuid = ?',
+      whereArgs: ['uuid-B'],
+    )).single;
+    expect(
+      row['sync_status'],
+      'synced',
+      reason: 'reconciled — our own INSERT came back, not a server edit',
+    );
+    expect(row['server_name'], 'SO-002');
+  });
 }

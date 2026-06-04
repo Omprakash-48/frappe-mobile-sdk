@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart';
 import 'package:sqflite/sqflite.dart';
 
 import '../models/outbox_row.dart';
@@ -150,11 +151,26 @@ class ResponseWriteback {
           );
         }
         if (updated == 0) {
-          await txn.update(
+          updated = await txn.update(
             tableName,
             values,
             where: 'parent_uuid = ? AND parentfield = ? AND idx = ?',
             whereArgs: [row.mobileUuid, fieldname, pos],
+          );
+        }
+        if (updated == 0) {
+          // Neither the mobile_uuid match nor the positional fallback found a
+          // local row — the server echoed a child we cannot tie back to local
+          // state (mobile_uuid not round-tripped AND response order diverged
+          // from local idx). Its server_name writeback is dropped, so the row
+          // looks unsynced and re-pushes next drain. Should never happen for a
+          // row the server just echoed; surface it instead of failing silently
+          // (PR#36 round-4 H2).
+          debugPrint(
+            'ResponseWriteback: no local row matched server child '
+            "'${cm['name']}' (parentfield=$fieldname, pos=$pos, "
+            'mobile_uuid=$childMobileUuid) under parent ${row.mobileUuid}; '
+            'server_name writeback dropped — row will re-push next sync.',
           );
         }
       }

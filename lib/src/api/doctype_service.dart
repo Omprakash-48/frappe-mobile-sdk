@@ -6,6 +6,7 @@ import 'dart:math' as math;
 
 import 'package:flutter/foundation.dart';
 
+import '../sync/sync_details.dart';
 import 'exceptions.dart';
 import 'rest_helper.dart';
 import 'utils.dart';
@@ -185,6 +186,33 @@ class DoctypeService {
       for (final row in message)
         if (row is Map) Map<String, dynamic>.from(row),
     ];
+  }
+
+  /// Pre-flight manifest (#49). Posts the INCREMENTAL doctypes about to be
+  /// pulled, each with its own `since` watermark, and returns per-doctype
+  /// change info. Returns null on ANY failure (network, 404, missing endpoint,
+  /// malformed body) so the caller falls back to a full pull.
+  Future<SyncDetailsResponse?> getSyncDetails(
+    List<Map<String, String>> doctypeSince,
+  ) async {
+    if (doctypeSince.isEmpty) return null;
+    try {
+      final response = await _restHelper.post(
+        '/api/method/mobile_sync.sync_details',
+        body: {'doctypes': doctypeSince},
+      );
+      final dynamic message = response is Map<String, dynamic>
+          ? response['message']
+          : response;
+      if (message is! Map) return null;
+      return SyncDetailsResponse.fromJson(Map<String, dynamic>.from(message));
+    } catch (e, st) {
+      debugPrint(
+        'DoctypeService.getSyncDetails failed — falling back to full pull — '
+        '$e\n$st',
+      );
+      return null;
+    }
   }
 
   /// Pages through `frappe.client.get_list` for names, then bulk-fetches

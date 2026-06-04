@@ -119,7 +119,7 @@ export 'src/services/atomic_wipe.dart' show AtomicWipe, OnCreateFn;
 export 'src/services/retry_priority.dart' show RetryPriority;
 export 'src/services/session_user_service.dart' show SessionUserService;
 export 'src/services/sync_controller.dart'
-    show SyncController, ConflictAction, DeleteCascadePlan, RunFn;
+    show SyncController, ConflictAction, DeleteCascadePlan;
 export 'src/sync/sync_state.dart'
     show SyncState, DoctypeSyncState, QueueSummary, SyncErrorSummary;
 export 'src/sync/sync_state_notifier.dart' show SyncStateNotifier;

@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter_test/flutter_test.dart';
 import 'package:frappe_mobile_sdk/src/sync/push_engine.dart';
 import 'package:frappe_mobile_sdk/src/sync/sync_state_notifier.dart';
@@ -159,6 +161,37 @@ void main() {
       expect(remaining, isEmpty);
     },
   );
+
+  test('concurrent runOnce() does not double-dispatch the same row', () async {
+    // B1 (PR#36 round-4): runOnce() had no reentrancy guard. Two concurrent
+    // callers (user save, connectivity restore, syncNow) each reset in_flight
+    // rows back to pending and re-fetch the outbox, so a single pending row is
+    // dispatched twice in parallel. Park the first dispatch on a gate so the
+    // second call races in while the first is still in flight.
+    var sendCount = 0;
+    final gate = Completer<void>();
+    final engine = buildEngine(
+      send: (method, payload, serverName) async {
+        sendCount++;
+        if (sendCount == 1) await gate.future; // hold the first dispatch
+        return {'name': 'CUST-1', 'modified': '2026-01-01 00:00:00'};
+      },
+    );
+
+    final a = engine.runOnce();
+    final b = engine.runOnce();
+    // Let both calls run through resetInFlightToPending + outbox fetch.
+    await Future<void>.delayed(const Duration(milliseconds: 50));
+    gate.complete();
+    await a.catchError((_) {});
+    await b.catchError((_) {});
+
+    expect(
+      sendCount,
+      1,
+      reason: 'a concurrent runOnce must coalesce, not re-dispatch in flight',
+    );
+  });
 
   test('UPDATE: writes back, marks synced', () async {
     await db.update(

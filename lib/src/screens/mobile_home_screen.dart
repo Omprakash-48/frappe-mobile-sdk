@@ -7,6 +7,7 @@ import '../sdk/frappe_sdk.dart';
 import '../ui/document_list_screen.dart';
 import '../ui/widgets/form_builder.dart' show FieldChangeHandler, FormValidator;
 import '../ui/widgets/screen_helpers.dart';
+import '../utils/sdk_log.dart';
 
 /// Generic home screen that renders doctype groups from the SDK's Mobile Configuration.
 ///
@@ -161,8 +162,7 @@ class _MobileHomeScreenState extends State<MobileHomeScreen>
           counts[doctype] = results[0];
           dirtyCounts[doctype] = results[1];
         } catch (e, st) {
-          // ignore: avoid_print
-          print('MobileHomeScreen: count load for $doctype failed — $e\n$st');
+          sdkLog('MobileHomeScreen: count load for $doctype failed — $e\n$st');
           counts[doctype] = 0;
           dirtyCounts[doctype] = 0;
         }
@@ -179,8 +179,7 @@ class _MobileHomeScreenState extends State<MobileHomeScreen>
             errorCounts[r.doctype] = (errorCounts[r.doctype] ?? 0) + 1;
           }
         } catch (e, st) {
-          // ignore: avoid_print
-          print('MobileHomeScreen: pendingErrors load failed — $e\n$st');
+          sdkLog('MobileHomeScreen: pendingErrors load failed — $e\n$st');
         }
       }
 
@@ -194,8 +193,7 @@ class _MobileHomeScreenState extends State<MobileHomeScreen>
         });
       }
     } catch (e, st) {
-      // ignore: avoid_print
-      print('MobileHomeScreen: _load failed — $e\n$st');
+      sdkLog('MobileHomeScreen: _load failed — $e\n$st');
       if (mounted) setState(() => _loading = false);
     }
   }
@@ -211,16 +209,14 @@ class _MobileHomeScreenState extends State<MobileHomeScreen>
         try {
           await widget.sdk.sync.pushSync();
         } catch (e, st) {
-          // ignore: avoid_print
-          print('MobileHomeScreen: manual pushSync failed — $e\n$st');
+          sdkLog('MobileHomeScreen: manual pushSync failed — $e\n$st');
         }
         final doctypes = await widget.sdk.meta.getMobileFormDoctypeNames();
         for (final dt in doctypes) {
           try {
             await widget.sdk.sync.pullSync(doctype: dt);
           } catch (e, st) {
-            // ignore: avoid_print
-            print('MobileHomeScreen: manual pullSync($dt) failed — $e\n$st');
+            sdkLog('MobileHomeScreen: manual pullSync($dt) failed — $e\n$st');
           }
         }
       }
@@ -529,8 +525,7 @@ class _MobileHomeScreenState extends State<MobileHomeScreen>
     try {
       await widget.sdk.logout();
     } catch (e, st) {
-      // ignore: avoid_print
-      print('MobileHomeScreen: logout failed — $e\n$st');
+      sdkLog('MobileHomeScreen: logout failed — $e\n$st');
       if (mounted) {
         showStatusSnackBar(
           context,
@@ -566,8 +561,7 @@ class _MobileHomeScreenState extends State<MobileHomeScreen>
     try {
       await widget.sdk.forcePullAll();
     } catch (e, st) {
-      // ignore: avoid_print
-      print('MobileHomeScreen: forcePullAll failed — $e\n$st');
+      sdkLog('MobileHomeScreen: forcePullAll failed — $e\n$st');
       if (mounted) {
         showStatusSnackBar(
           context,
@@ -595,8 +589,9 @@ class _MobileHomeScreenState extends State<MobileHomeScreen>
       try {
         await widget.sdk.sync.pullSync(doctype: doctype);
       } catch (e, st) {
-        // ignore: avoid_print
-        print('MobileHomeScreen: navigate pullSync($doctype) failed — $e\n$st');
+        sdkLog(
+          'MobileHomeScreen: navigate pullSync($doctype) failed — $e\n$st',
+        );
       }
 
       if (mounted) {
@@ -627,8 +622,7 @@ class _MobileHomeScreenState extends State<MobileHomeScreen>
         _load();
       }
     } catch (e, st) {
-      // ignore: avoid_print
-      print('MobileHomeScreen: _navigateToDoctype failed — $e\n$st');
+      sdkLog('MobileHomeScreen: _navigateToDoctype failed — $e\n$st');
       if (mounted) {
         ScaffoldMessenger.of(context).hideCurrentSnackBar();
         showStatusSnackBar(

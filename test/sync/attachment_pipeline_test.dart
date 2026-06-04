@@ -15,6 +15,29 @@ class _FakeFile implements File {
   noSuchMethod(Invocation i) => super.noSuchMethod(i);
 }
 
+/// Throws on the FIRST markDone call (simulating a DB write failure after a
+/// successful upload), then delegates to the real implementation.
+class _MarkDoneFailsOnceDao extends PendingAttachmentDao {
+  _MarkDoneFailsOnceDao(super.db);
+  int markDoneCalls = 0;
+  @override
+  Future<void> markDone(
+    int id, {
+    required String serverFileName,
+    required String serverFileUrl,
+  }) async {
+    markDoneCalls++;
+    if (markDoneCalls == 1) {
+      throw Exception('simulated done-state write failure');
+    }
+    return super.markDone(
+      id,
+      serverFileName: serverFileName,
+      serverFileUrl: serverFileUrl,
+    );
+  }
+}
+
 void main() {
   setUpAll(() {
     sqfliteFfiInit();
@@ -115,6 +138,46 @@ void main() {
       final result = await pipeline.uploadPendingForTopParent('P');
       expect(result.keys, containsAll(<int>{id1, id2}));
       expect(result[id1]!.fileUrl, contains('/files'));
+    },
+  );
+
+  test(
+    'a failed done-state write does not trigger a re-upload (no duplicate File)',
+    () async {
+      // H3 (PR#36 round-4): uploader() and markDone() were in the same try.
+      // When the upload succeeds but markDone throws, the retry loop
+      // re-uploaded the binary — Frappe's attach hook then creates a second
+      // File row. After the fix, the uploaded url is persisted before the
+      // done transition, so a retry reuses it instead of re-uploading.
+      final failDao = _MarkDoneFailsOnceDao(db);
+      await failDao.enqueue(
+        parentDoctype: 'O',
+        parentUuid: 'P',
+        parentFieldname: 'a',
+        topParentUuid: 'P',
+        topParentDoctype: 'O',
+        localPath: '/tmp/z.jpg',
+      );
+      var uploads = 0;
+      final pipeline = AttachmentPipeline(
+        dao: failDao,
+        uploader: (file, {doctype, docname, isPrivate = true, fileName}) async {
+          uploads++;
+          return {'name': 'FILE-1', 'file_url': '/private/files/z.jpg'};
+        },
+        backoff: const [Duration.zero, Duration.zero, Duration.zero],
+        fileFromPath: (p) => _FakeFile(p),
+      );
+
+      final result = await pipeline.uploadPendingForTopParent('P');
+
+      expect(
+        uploads,
+        1,
+        reason: 'a markDone failure must not re-upload the binary',
+      );
+      expect(result.values.single.fileUrl, '/private/files/z.jpg');
+      expect(failDao.markDoneCalls, greaterThanOrEqualTo(2));
     },
   );
 
