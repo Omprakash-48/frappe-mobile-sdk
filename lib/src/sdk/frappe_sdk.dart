@@ -2,8 +2,10 @@
 // For license information, please see license.txt
 
 import 'dart:async';
+import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
+import 'package:http/http.dart' as http;
 
 import '../api/client.dart';
 import '../api/exceptions.dart';
@@ -11,6 +13,7 @@ import '../concurrency/concurrency_pool.dart';
 import '../concurrency/connectivity_watcher.dart';
 import '../database/app_database.dart';
 import '../database/daos/doctype_meta_dao.dart';
+import '../database/daos/outbox_dao.dart';
 import '../database/daos/sdk_meta_dao.dart';
 import '../models/doc_type_meta.dart';
 import '../models/offline_mode.dart';
@@ -29,8 +32,10 @@ import '../services/offline_repository.dart';
 import '../services/offline_transition_service.dart';
 import '../services/link_option_service.dart';
 import '../services/translation_service.dart';
+import '../sync/cursor.dart';
 import '../sync/pull_engine.dart';
 import '../sync/push_engine.dart';
+import '../sync/sync_details.dart';
 import '../sync/sync_state.dart';
 import '../sync/sync_state_notifier.dart';
 
@@ -164,13 +169,16 @@ class FrappeSDK {
       enabled: true,
       isPersisted: true,
     ),
+    http.Client? httpClient,
   }) : databaseAppName = null {
     _database = database;
     _modeNotifier = OfflineModeNotifier(offlineMode);
     _syncCompleteController = StreamController<void>.broadcast();
     // Create FrappeClient directly — avoids AuthService.initialize() which
     // writes to FlutterSecureStorage and is unavailable in widget tests.
-    _client = FrappeClient(baseUrl);
+    // [httpClient] lets tests stub the transport (e.g. the /sync_details
+    // pre-flight) without a real network.
+    _client = FrappeClient(baseUrl, httpClient: httpClient);
     // Use AuthService.forTesting so the client and database are wired up
     // without touching FlutterSecureStorage. This means sdk.auth methods
     // (e.g. getOrCreateMobileUuid, restoreSession) won't throw "not
@@ -348,6 +356,11 @@ class FrappeSDK {
       getMobileUuid: _resolveMobileUuid,
       offlineModeNotifier: _modeNotifier!,
       pushRunner: () => _pushEngine!.runOnce(),
+      // Parity with PullEngine's guard: SyncService's pull paths
+      // (pullSyncWaiting, pullSyncMany, forcePullAll) defer a doctype while a
+      // push is active for it, so a pull can't insert a duplicate over an
+      // in-flight push INSERT (#43). OutboxDao is a thin wrapper over rawDb.
+      hasActivePush: (doctype) => OutboxDao(rawDb).hasActivePushFor(doctype),
     );
     // Build UnifiedResolver — single read path for all offline queries.
     // Probe connectivity once here AND subscribe to the platform
@@ -1230,11 +1243,52 @@ class FrappeSDK {
         pullable.add(doctype);
       }
       if (pullable.isEmpty) return const <String>{};
+
+      // #49 pre-flight: ask the server which INCREMENTAL doctypes actually
+      // changed, and skip pulling the rest. Only doctypes with a complete
+      // (delta-ready) cursor are eligible — INITIAL/RESUME doctypes have no
+      // trustworthy watermark and are always pulled. Any failure (missing
+      // endpoint, network) leaves `allowed == pullable` → full pull.
+      var allowed = pullable;
+      final eligible = <String, String>{}; // doctype -> since (cursor.modified)
+      for (final dt in pullable) {
+        try {
+          final raw = await _database!.doctypeMetaDao.getLastOkCursor(dt);
+          if (raw == null || raw.isEmpty) continue;
+          final cursor = Cursor.fromJson(
+            jsonDecode(raw) as Map<String, dynamic>,
+          );
+          if (cursor.complete && cursor.modified != null) {
+            eligible[dt] = cursor.modified!;
+          }
+        } catch (e, st) {
+          debugPrint(
+            'FrappeSDK: sync_details cursor read($dt) failed — $e\n$st',
+          );
+        }
+      }
+      if (eligible.isNotEmpty) {
+        final manifest = await _client!.doctype.getSyncDetails([
+          for (final entry in eligible.entries)
+            {'doctype': entry.key, 'since': entry.value},
+        ]);
+        if (manifest != null) {
+          final skip = doctypesToSkip(eligible.keys.toSet(), manifest);
+          if (skip.isNotEmpty) {
+            allowed = pullable.difference(skip);
+            debugPrint(
+              'FrappeSDK: sync_details skipped ${skip.length}/'
+              '${eligible.length} unchanged doctypes',
+            );
+          }
+        }
+      }
+
       // Hold the SyncMutex for the entire closure pull so concurrent
       // single-doctype callers (pullSync, pullSyncWaiting) serialise
       // behind it — same contract as the former pullSyncMany call path.
       return await _syncService!.protect(
-        () => _pullEngine!.run(closure, allowedDoctypes: pullable),
+        () => _pullEngine!.run(closure, allowedDoctypes: allowed),
       );
     } catch (e, st) {
       debugPrint('FrappeSDK: closure pull failed — $e\n$st');
