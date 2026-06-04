@@ -24,6 +24,7 @@ import 'widgets/form_builder.dart'
         FieldChangeHandler,
         FormValidator;
 import 'widgets/sync_error_banner.dart' show humanizeOutboxError;
+import '../utils/sdk_log.dart';
 
 /// Layout variants for [DocumentListScreen].
 enum DocumentListLayout { list, card }
@@ -276,8 +277,7 @@ class _DocumentListScreenState extends State<DocumentListScreen> {
         try {
           await widget.syncService.pullSync(doctype: widget.doctype);
         } catch (e, st) {
-          // ignore: avoid_print
-          print(
+          sdkLog(
             'DocumentListScreen: pullSync(${widget.doctype}) failed — $e\n$st',
           );
           if (mounted) {
@@ -294,8 +294,7 @@ class _DocumentListScreenState extends State<DocumentListScreen> {
       await _refreshErrorIndex();
       if (mounted) setState(() => _documents = docs);
     } catch (e, st) {
-      // ignore: avoid_print
-      print('DocumentListScreen: _pullDocuments failed — $e\n$st');
+      sdkLog('DocumentListScreen: _pullDocuments failed — $e\n$st');
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
@@ -326,8 +325,7 @@ class _DocumentListScreenState extends State<DocumentListScreen> {
         _errorsByUuid.putIfAbsent(r.mobileUuid, () => <OutboxRow>[]).add(r);
       }
     } catch (e, st) {
-      // ignore: avoid_print
-      print('DocumentListScreen: pendingErrors load failed — $e\n$st');
+      sdkLog('DocumentListScreen: pendingErrors load failed — $e\n$st');
     }
   }
 
@@ -660,8 +658,7 @@ class _DocumentListScreenState extends State<DocumentListScreen> {
           );
         } catch (e, st) {
           // Mirror is best-effort; the fresh data still drives the form.
-          // ignore: avoid_print
-          print(
+          sdkLog(
             'document_list_screen: applyServerDocument mirror failed for '
             '${widget.doctype}/${doc.serverId} — $e\n$st',
           );

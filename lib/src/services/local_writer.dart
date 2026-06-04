@@ -9,6 +9,7 @@ import '../database/table_name.dart';
 import '../models/doc_type_meta.dart';
 import '../models/meta_resolver.dart';
 import '../sync/child_table_info.dart';
+import '../utils/sdk_log.dart';
 
 /// Writes a form-save payload to the per-doctype `docs__<doctype>` parent
 /// table and `docs__<child_doctype>` child tables in a single transaction.
@@ -60,8 +61,7 @@ class LocalWriter {
         try {
           childMetasByDoctype[opt] = await _metaResolver(opt);
         } catch (e, st) {
-          // ignore: avoid_print
-          print(
+          sdkLog(
             'LocalWriter.writeParent: child meta pre-resolve failed for '
             '$opt — $e\n$st',
           );
@@ -144,8 +144,7 @@ class LocalWriter {
           try {
             cm = await _metaResolver(opt);
           } catch (e, st) {
-            // ignore: avoid_print
-            print(
+            sdkLog(
               'LocalWriter.writeParentInTxn: child meta resolve failed for '
               '$opt — $e\n$st',
             );
