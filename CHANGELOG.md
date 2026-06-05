@@ -115,6 +115,8 @@ Major release: offline-first foundation, server-driven offline-mode toggle, and 
 - `system_tables.dart` — all `CREATE TABLE` statements use `IF NOT EXISTS`; `sdk_meta` seed uses `INSERT OR IGNORE` for migration idempotency.
 - `pull_apply.dart` — conflict flag now only fires when the server `modified` timestamp is strictly after the local `modified` (previously flagged any dirty row unconditionally).
 - `SyncController.pause()` / `resume()` — `syncNow` now checks the `isPaused` flag before running.
+- `BaseField` — wrap field labels in `Expanded` and use `CrossAxisAlignment.start` to prevent horizontal `RenderFlex` overflows when field labels contain long text (Issue #52).
+- `FrappeFormBuilder` — replace `SingleTickerProviderStateMixin` with `TickerProviderStateMixin` to prevent "Multiple Tickers" crashes, and utilize `mapEquals` deep comparison for `initialData` in `didUpdateWidget` to avoid unnecessary controller teardowns and state resets (Issue #72).
 
 ### Notes for upgraders
 

@@ -64,19 +64,22 @@ abstract class BaseField extends StatelessWidget {
           Padding(
             padding: const EdgeInsets.only(bottom: 8.0),
             child: Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text(
-                  style?.translate != null
-                      ? style!.translate!(field.displayLabel)
-                      : field.displayLabel,
-                  style:
-                      style?.labelStyle ??
-                      TextStyle(
-                        fontWeight: field.reqd
-                            ? FontWeight.bold
-                            : FontWeight.normal,
-                        fontSize: 14,
-                      ),
+                Expanded(
+                  child: Text(
+                    style?.translate != null
+                        ? style!.translate!(field.displayLabel)
+                        : field.displayLabel,
+                    style:
+                        style?.labelStyle ??
+                        TextStyle(
+                          fontWeight: field.reqd
+                              ? FontWeight.bold
+                              : FontWeight.normal,
+                          fontSize: 14,
+                        ),
+                  ),
                 ),
                 if (field.reqd)
                   const Padding(

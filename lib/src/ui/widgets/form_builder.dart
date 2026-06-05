@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:io';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_form_builder/flutter_form_builder.dart';
 import '../../models/doc_type_meta.dart';
@@ -259,7 +260,7 @@ class _FormColumn {
 }
 
 class _FrappeFormBuilderState extends State<FrappeFormBuilder>
-    with SingleTickerProviderStateMixin {
+    with TickerProviderStateMixin {
   late GlobalKey<FormBuilderState> _formKey;
   late final FieldFactory _fieldFactory;
   LinkFieldCoordinator? _linkFieldCoordinator;
@@ -275,6 +276,8 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
   /// builder is a top-level form (not a child-row form).
   Map<String, dynamic> get effectiveParentFormData =>
       widget.parentFormData ?? _formData;
+
+  TabController get tabController => _tabController;
 
   void _attachTabControllerListener() {
     _tabController.addListener(() {
@@ -1185,8 +1188,9 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
   @override
   void didUpdateWidget(FrappeFormBuilder oldWidget) {
     super.didUpdateWidget(oldWidget);
-    if (oldWidget.initialData != widget.initialData ||
-        oldWidget.meta != widget.meta) {
+    final initialDataChanged = !mapEquals(oldWidget.initialData, widget.initialData);
+    final metaChanged = oldWidget.meta.name != widget.meta.name;
+    if (initialDataChanged || metaChanged) {
       _progressSubscription?.cancel();
       _linkFieldCoordinator?.dispose();
       _linkFieldCoordinator = null;
