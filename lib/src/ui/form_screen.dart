@@ -16,6 +16,7 @@ import '../services/sync_controller.dart';
 import '../services/sync_service.dart';
 import '../services/workflow_service.dart';
 import '../utils/uuid_pattern.dart';
+import 'widgets/screen_helpers.dart';
 import 'widgets/sync_error_banner.dart';
 import 'widgets/form_builder.dart'
     show
@@ -24,6 +25,7 @@ import 'widgets/form_builder.dart'
         OnButtonPressedCallback,
         FieldChangeHandler,
         FormValidator;
+import '../utils/sdk_log.dart';
 
 /// Visual customization for [FormScreen] action area.
 class FormScreenStyle {
@@ -283,8 +285,7 @@ class _FormScreenState extends State<FormScreen> with WidgetsBindingObserver {
     } catch (e, st) {
       // Banner is best-effort; a query failure should never block the
       // form from rendering.
-      // ignore: avoid_print
-      print('FormScreen: _loadSyncErrors failed — $e\n$st');
+      sdkLog('FormScreen: _loadSyncErrors failed — $e\n$st');
     }
   }
 
@@ -294,8 +295,7 @@ class _FormScreenState extends State<FormScreen> with WidgetsBindingObserver {
     try {
       await controller.retry(outboxId);
     } catch (e, st) {
-      // ignore: avoid_print
-      print('FormScreen: retry($outboxId) failed — $e\n$st');
+      sdkLog('FormScreen: retry($outboxId) failed — $e\n$st');
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
@@ -317,14 +317,12 @@ class _FormScreenState extends State<FormScreen> with WidgetsBindingObserver {
     try {
       await svc.pushSync(doctype: widget.meta.name);
     } catch (e, st) {
-      // ignore: avoid_print
-      print('FormScreen: pushSync failed — $e\n$st');
+      sdkLog('FormScreen: pushSync failed — $e\n$st');
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('Push failed: ${toUserFriendlyMessage(e)}'),
-            backgroundColor: Colors.red,
-          ),
+        showStatusSnackBar(
+          context,
+          'Push failed: ${toUserFriendlyMessage(e)}',
+          severity: SnackBarSeverity.error,
         );
       }
       return;
@@ -334,12 +332,11 @@ class _FormScreenState extends State<FormScreen> with WidgetsBindingObserver {
     await _loadSyncErrors();
     if (!mounted) return;
     final stuck = _syncErrorRows.isNotEmpty;
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text(stuck ? 'Push completed with errors' : 'Pushed'),
-        backgroundColor: stuck ? Colors.orange : Colors.green,
-        duration: const Duration(seconds: 2),
-      ),
+    showStatusSnackBar(
+      context,
+      stuck ? 'Push completed with errors' : 'Pushed',
+      severity: stuck ? SnackBarSeverity.warning : SnackBarSeverity.success,
+      duration: const Duration(seconds: 2),
     );
   }
 
@@ -392,22 +389,20 @@ class _FormScreenState extends State<FormScreen> with WidgetsBindingObserver {
         _isFormDirty.value = false;
         await _loadWorkflowTransitions();
         if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(
-              content: Text('Workflow: $action'),
-              backgroundColor: Colors.green,
-            ),
+          showStatusSnackBar(
+            context,
+            'Workflow: $action',
+            severity: SnackBarSeverity.success,
           );
         }
       }
     } catch (e, st) {
       debugPrint('FormScreen._applyWorkflowAction($action) failed — $e\n$st');
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text(toUserFriendlyMessage(e)),
-            backgroundColor: Colors.red,
-          ),
+        showStatusSnackBar(
+          context,
+          toUserFriendlyMessage(e),
+          severity: SnackBarSeverity.error,
         );
       }
     }
@@ -481,15 +476,11 @@ class _FormScreenState extends State<FormScreen> with WidgetsBindingObserver {
     final method = field.options?.trim();
     if (method == null || method.isEmpty) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text(
-              '${field.displayLabel}: Action not configured for mobile. '
-              'This button may use client-side logic only available on web.',
-            ),
-            backgroundColor: Colors.orange,
-            duration: const Duration(seconds: 4),
-          ),
+        showStatusSnackBar(
+          context,
+          '${field.displayLabel}: Action not configured for mobile. '
+          'This button may use client-side logic only available on web.',
+          severity: SnackBarSeverity.warning,
         );
       }
       return;
@@ -497,11 +488,10 @@ class _FormScreenState extends State<FormScreen> with WidgetsBindingObserver {
 
     if (widget.api == null) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('Action unavailable offline'),
-            backgroundColor: Colors.orange,
-          ),
+        showStatusSnackBar(
+          context,
+          'Action unavailable offline',
+          severity: SnackBarSeverity.warning,
         );
       }
       return;
@@ -510,21 +500,19 @@ class _FormScreenState extends State<FormScreen> with WidgetsBindingObserver {
     try {
       await widget.api!.call(method, args: {'doc': formData});
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('Action completed'),
-            backgroundColor: Colors.green,
-          ),
+        showStatusSnackBar(
+          context,
+          'Action completed',
+          severity: SnackBarSeverity.success,
         );
       }
     } catch (e, st) {
       debugPrint('FormScreen.action($method) failed — $e\n$st');
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text(toUserFriendlyMessage(e)),
-            backgroundColor: Colors.red,
-          ),
+        showStatusSnackBar(
+          context,
+          toUserFriendlyMessage(e),
+          severity: SnackBarSeverity.error,
         );
       }
     }
@@ -543,8 +531,7 @@ class _FormScreenState extends State<FormScreen> with WidgetsBindingObserver {
       );
       if (row != null) return row;
     } catch (e, st) {
-      // ignore: avoid_print
-      print(
+      sdkLog(
         'FormScreen: getRowFromPerDoctypeTable($linkedDoctype, $docName) '
         'failed — $e\n$st',
       );
@@ -561,8 +548,7 @@ class _FormScreenState extends State<FormScreen> with WidgetsBindingObserver {
       try {
         return await widget.api!.doctype.getByName(linkedDoctype, docName);
       } catch (e, st) {
-        // ignore: avoid_print
-        print(
+        sdkLog(
           'FormScreen: api.doctype.getByName($linkedDoctype, $docName) '
           'failed — $e\n$st',
         );
@@ -746,11 +732,10 @@ class _FormScreenState extends State<FormScreen> with WidgetsBindingObserver {
             _baselineFormData = savedData!;
           });
           _isFormDirty.value = false;
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(
-              content: Text('Saved successfully'),
-              backgroundColor: Colors.green,
-            ),
+          showStatusSnackBar(
+            context,
+            'Saved successfully',
+            severity: SnackBarSeverity.success,
           );
           widget.onSaveSuccess?.call();
         }
@@ -788,11 +773,10 @@ class _FormScreenState extends State<FormScreen> with WidgetsBindingObserver {
           _baselineFormData = savedData;
         });
         _isFormDirty.value = false;
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('Document saved successfully'),
-            backgroundColor: Colors.green,
-          ),
+        showStatusSnackBar(
+          context,
+          'Document saved successfully',
+          severity: SnackBarSeverity.success,
         );
         widget.onSaveSuccess?.call();
       }
@@ -820,22 +804,12 @@ class _FormScreenState extends State<FormScreen> with WidgetsBindingObserver {
   Future<void> _handleDelete() async {
     if (widget.document == null) return;
 
-    final confirmed = await showDialog<bool>(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('Delete Document'),
-        content: const Text('Are you sure you want to delete this document?'),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context, false),
-            child: const Text('Cancel'),
-          ),
-          TextButton(
-            onPressed: () => Navigator.pop(context, true),
-            child: const Text('Delete', style: TextStyle(color: Colors.red)),
-          ),
-        ],
-      ),
+    final confirmed = await showConfirmDialog(
+      context,
+      title: 'Delete Document',
+      content: 'Are you sure you want to delete this document?',
+      confirmLabel: 'Delete',
+      confirmColor: Colors.red,
     );
 
     if (confirmed != true) return;
@@ -867,11 +841,10 @@ class _FormScreenState extends State<FormScreen> with WidgetsBindingObserver {
       }
 
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('Document deleted'),
-            backgroundColor: Colors.orange,
-          ),
+        showStatusSnackBar(
+          context,
+          'Document deleted',
+          severity: SnackBarSeverity.warning,
         );
         Navigator.pop(context);
         widget.onSaveSuccess?.call();
@@ -983,23 +956,7 @@ class _FormScreenState extends State<FormScreen> with WidgetsBindingObserver {
                   onRetry: widget.syncController == null ? null : _retrySyncRow,
                 ),
               if (_errorMessage != null)
-                Container(
-                  width: double.infinity,
-                  padding: const EdgeInsets.all(12),
-                  color: Colors.red[50],
-                  child: Row(
-                    children: [
-                      const Icon(Icons.error, color: Colors.red),
-                      const SizedBox(width: 8),
-                      Expanded(
-                        child: Text(
-                          _errorMessage!,
-                          style: const TextStyle(color: Colors.red),
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
+                ErrorMessageBanner(message: _errorMessage!),
               if (widget.meta.hasWorkflow &&
                   widget.document != null &&
                   widget.api != null)

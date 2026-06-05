@@ -21,6 +21,7 @@ import '../sync/payload_serializer.dart';
 import '../sync/pull_apply.dart';
 import 'local_writer.dart';
 import 'meta_migration.dart';
+import '../utils/sdk_log.dart';
 
 /// Repository for offline document operations
 class OfflineRepository {
@@ -144,11 +145,7 @@ class OfflineRepository {
           final ddls = isChild
               ? buildChildSchemaDDL(meta, tableName: tableName)
               : buildParentSchemaDDL(meta, tableName: tableName);
-          await db.transaction((txn) async {
-            for (final stmt in ddls) {
-              await txn.execute(stmt);
-            }
-          });
+          await _executeDDL(ddls);
           try {
             await _database.doctypeMetaDao.setTableName(doctype, tableName);
           } catch (e, st) {
@@ -257,8 +254,7 @@ class OfflineRepository {
           serverName: serverName,
         );
       } catch (e, st) {
-        // ignore: avoid_print
-        print(
+        sdkLog(
           'OfflineRepository.reconcileServerSave: markSynced failed for '
           '$doctype/$mobileUuid → $serverName — $e\n$st',
         );
@@ -269,8 +265,7 @@ class OfflineRepository {
         _database.rawDatabase,
       ).cancelPendingFor(doctype: doctype, mobileUuid: mobileUuid);
     } catch (e, st) {
-      // ignore: avoid_print
-      print(
+      sdkLog(
         'OfflineRepository.reconcileServerSave: outbox cancelPendingFor '
         'failed for $doctype/$mobileUuid — $e\n$st',
       );
@@ -345,8 +340,7 @@ class OfflineRepository {
         );
         doctypes = rows.map((r) => r['doctype'] as String).toList();
       } on DatabaseException catch (e, st) {
-        // ignore: avoid_print
-        print(
+        sdkLog(
           'OfflineRepository.getDirtyDocuments: doctype_meta scan failed '
           '— $e\n$st',
         );
@@ -368,8 +362,7 @@ class OfflineRepository {
           out.add(Document.fromResolverRow(dt, r));
         }
       } on DatabaseException catch (e, st) {
-        // ignore: avoid_print
-        print(
+        sdkLog(
           'OfflineRepository.getDirtyDocuments: query failed for $dt '
           '— $e\n$st',
         );
@@ -431,7 +424,19 @@ class OfflineRepository {
             opt != null &&
             opt.isNotEmpty) {
           final cm = await _loadMeta(opt);
-          if (cm != null) childMetasByDoctype[opt] = cm;
+          if (cm != null) {
+            childMetasByDoctype[opt] = cm;
+          } else {
+            // Match LocalWriter.writeParent's loud-on-failure pattern —
+            // a missing child meta means the save will silently drop the
+            // child rows, and visibility into that is critical when
+            // debugging "child data went missing" reports.
+            developer.log(
+              'OfflineRepository.saveDocument: child meta missing for '
+              '$opt (skipping child rows for this fieldtype)',
+              name: 'OfflineRepository',
+            );
+          }
         }
       }
     }
@@ -448,8 +453,7 @@ class OfflineRepository {
       existing = rows.isEmpty ? null : rows.first;
     } on DatabaseException catch (e, st) {
       // Per-doctype table not provisioned yet — proceed with INSERT.
-      // ignore: avoid_print
-      print(
+      sdkLog(
         'OfflineRepository.saveDocument: existing-row probe failed for '
         '$doctype/$mobileUuid (table likely missing) — $e\n$st',
       );
@@ -555,8 +559,7 @@ class OfflineRepository {
       try {
         await db.delete(table, where: where, whereArgs: [mobileUuid]);
       } on DatabaseException catch (e, st) {
-        // ignore: avoid_print
-        print(
+        sdkLog(
           'OfflineRepository.hardDeleteLocalMirror: $table cleanup failed '
           'for $doctype/$mobileUuid (best-effort) — $e\n$st',
         );
@@ -651,8 +654,7 @@ class OfflineRepository {
                 // success — PR#36 round-4 H8). Only a benignly absent child
                 // table is skipped.
                 if (!_isBenignSchemaAbsence(e)) rethrow;
-                // ignore: avoid_print
-                print(
+                sdkLog(
                   'OfflineRepository.deleteDocument: child table absent for '
                   '$childDoctype (stale schema) — skipping cascade. $e\n$st',
                 );
@@ -664,8 +666,7 @@ class OfflineRepository {
           // delete back; only a benignly absent parent table is skipped.
           // (A child cascade rethrow also lands here — propagate it.)
           if (!_isBenignSchemaAbsence(e)) rethrow;
-          // ignore: avoid_print
-          print(
+          sdkLog(
             'OfflineRepository.deleteDocument: parent table absent for '
             '$doctype/$mobileUuid (stale schema) — $e\n$st',
           );
@@ -691,8 +692,7 @@ class OfflineRepository {
           whereArgs: [mobileUuid],
         );
       } on DatabaseException catch (e, st) {
-        // ignore: avoid_print
-        print(
+        sdkLog(
           'OfflineRepository.deleteDocument: tombstone update failed for '
           '$doctype/$mobileUuid — $e\n$st',
         );
@@ -731,6 +731,20 @@ class OfflineRepository {
       childMetasByFieldname: childMetas,
       rows: [data],
     );
+  }
+
+  /// Runs a list of DDL statements inside a single SQLite transaction.
+  /// Shared by [ensureSchemaForClosure], [_resolveChildMetas] (child-table
+  /// fallback create), and [_ensurePerDoctypeTable] so any future change
+  /// to DDL execution (retry, logging, savepoint wrapping) only needs to
+  /// happen in one place.
+  Future<void> _executeDDL(List<String> ddls) async {
+    final db = _database.rawDatabase;
+    await db.transaction((txn) async {
+      for (final stmt in ddls) {
+        await txn.execute(stmt);
+      }
+    });
   }
 
   Future<DocTypeMeta?> _loadMeta(String doctype) async {
@@ -798,12 +812,9 @@ class OfflineRepository {
       if (!_ensuredTables.contains(childTable)) {
         final db = _database.rawDatabase;
         if (!await sqliteTableExists(db, childTable)) {
-          final ddls = buildChildSchemaDDL(childMeta, tableName: childTable);
-          await db.transaction((txn) async {
-            for (final stmt in ddls) {
-              await txn.execute(stmt);
-            }
-          });
+          await _executeDDL(
+            buildChildSchemaDDL(childMeta, tableName: childTable),
+          );
         }
         _ensuredTables.add(childTable);
       }
@@ -823,12 +834,7 @@ class OfflineRepository {
     if (_ensuredTables.contains(tableName)) return;
     final db = _database.rawDatabase;
     if (!await sqliteTableExists(db, tableName)) {
-      final ddls = buildParentSchemaDDL(meta, tableName: tableName);
-      await db.transaction((txn) async {
-        for (final stmt in ddls) {
-          await txn.execute(stmt);
-        }
-      });
+      await _executeDDL(buildParentSchemaDDL(meta, tableName: tableName));
       // Persist the table-name mapping so future code (UnifiedResolver
       // etc.) can route through DoctypeMetaDao.getTableName(...).
       try {

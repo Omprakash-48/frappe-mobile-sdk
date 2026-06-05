@@ -2,6 +2,7 @@
 // For license information, please see license.txt
 
 import 'rest_helper.dart';
+import '../utils/sdk_log.dart';
 
 abstract class SessionStorage {
   Future<void> saveSession(String sid);
@@ -41,8 +42,7 @@ class AuthService {
     try {
       await _restHelper.post('/api/method/mobile_auth.logout');
     } catch (e, st) {
-      // ignore: avoid_print
-      print(
+      sdkLog(
         'AuthApi: server logout failed (continuing local cleanup) — $e\n$st',
       );
     } finally {

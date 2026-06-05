@@ -96,3 +96,8 @@ PLANS-INDEX.md
 
 # stray local sqlite scratch
 *.sqlite
+
+# Local dev tooling (not part of the package)
+.mcp.json
+devtools_options.yaml
+/scripts/
