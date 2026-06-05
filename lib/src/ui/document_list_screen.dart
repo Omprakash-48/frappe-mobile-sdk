@@ -738,6 +738,11 @@ class _RowSyncErrorBadge extends StatelessWidget {
         icon = Icons.error_outline;
         color = const Color(0xFFC62828);
         break;
+      case OutboxState.paused:
+        // Parked pending a user correction (terminal server rejection).
+        icon = Icons.pause_circle_outline;
+        color = const Color(0xFFB35900);
+        break;
       case OutboxState.pending:
       case OutboxState.inFlight:
       case OutboxState.done:

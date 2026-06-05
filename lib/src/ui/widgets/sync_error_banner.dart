@@ -94,6 +94,10 @@ OutboxErrorText humanizeOutboxError(OutboxRow row) {
           : raw;
       break;
 
+    case OutboxState.paused:
+    // A paused row is a terminal server rejection (e.g. validation): it
+    // carries the same server message as a failed row, so reuse that copy —
+    // "open and edit to fix" is exactly the right call to action.
     case OutboxState.failed:
       // Prefer the server's own one-liner whenever we got one — it is
       // far more actionable ("Could not find Row #1: Name of Learner: …")
@@ -184,6 +188,14 @@ OutboxErrorText humanizeOutboxError(OutboxRow row) {
         bg: const Color(0xFFFFEBEE),
         fg: const Color(0xFFC62828),
         icon: Icons.error_outline,
+      );
+    case OutboxState.paused:
+      // Parked out of auto-retry pending a user correction — amber "needs
+      // you" cue, distinct from failed's red (which the drain still retries).
+      return (
+        bg: const Color(0xFFFFF3E0),
+        fg: const Color(0xFFB35900),
+        icon: Icons.pause_circle_outline,
       );
     case OutboxState.pending:
     case OutboxState.inFlight:

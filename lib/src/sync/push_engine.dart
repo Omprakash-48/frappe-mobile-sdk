@@ -322,11 +322,24 @@ class PushEngine {
         errorMessage: e.message,
       );
     } on ServerRejection catch (e) {
-      await outboxDao.markFailed(
-        row.id,
-        errorCode: e.toErrorCode(),
-        errorMessage: e.message,
-      );
+      // #53: a terminal rejection (validation/mandatory/permission/link) can
+      // never succeed on retry. Park it in `paused` (the drain reads only
+      // `pending`, so it won't loop) instead of `failed`, which the user/retry
+      // flow may re-attempt. A re-save of the corrected record re-queues it.
+      final code = e.toErrorCode();
+      if (code.isTerminal) {
+        await outboxDao.markPaused(
+          row.id,
+          errorCode: code,
+          errorMessage: e.message,
+        );
+      } else {
+        await outboxDao.markFailed(
+          row.id,
+          errorCode: code,
+          errorMessage: e.message,
+        );
+      }
     } catch (e, st) {
       debugPrint(
         'PushEngine: row(${row.id}, ${row.doctype}/${row.mobileUuid}) failed with unknown error — $e\n$st',
