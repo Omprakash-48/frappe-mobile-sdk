@@ -90,3 +90,9 @@ test/.test_coverage.dart
 # FVM Version Cache
 .fvm/
 /docs
+# Local implementation plans (not part of SDK distribution)
+PLAN-*.md
+PLANS-INDEX.md
+
+# stray local sqlite scratch
+*.sqlite
