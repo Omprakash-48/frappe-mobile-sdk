@@ -15,6 +15,7 @@ import '../database/app_database.dart';
 import '../database/daos/doctype_meta_dao.dart';
 import '../database/daos/outbox_dao.dart';
 import '../database/daos/sdk_meta_dao.dart';
+import '../database/daos/translation_dao.dart';
 import '../models/closure_result.dart';
 import '../models/doc_type_meta.dart';
 import '../models/offline_mode.dart';
@@ -208,7 +209,8 @@ class FrappeSDK {
       metaFetcher: testMetaFn,
     );
     _permissionService = PermissionService(_client!, _database!);
-    _translationService = TranslationService(_client!);
+    final translationDao = TranslationDao();
+    _translationService = TranslationService(_client!)..injectDao(translationDao);
     _syncService = SyncService(
       _client!,
       _repository!,
@@ -314,7 +316,8 @@ class FrappeSDK {
       metaFetcher: metaFn,
     );
     _permissionService = PermissionService(_client!, _database!);
-    _translationService = TranslationService(_client!);
+    final translationDao = TranslationDao();
+    _translationService = TranslationService(_client!)..injectDao(translationDao);
     // Build the sync engine pack (PushEngine + PullEngine + SyncController +
     // shared SyncStateNotifier + two ConcurrencyPools). PushEngine becomes
     // the production push driver. SyncService below holds a closure that
@@ -442,6 +445,16 @@ class FrappeSDK {
     // Best-effort: re-hydrate any persisted SessionUser from the previous
     // app run. Idempotent — no-op when sdk_meta.session_user_json is null.
     await _sessionUserService!.restoreFromDb();
+
+    // If a persisted SessionUser carries a language preference, warm the
+    // translation cache from SQLite before the UI renders. This is a fast
+    // read (<5 ms) — no network. Currently inert because
+    // _setSessionUserFromLoginResponse does not yet persist language; it
+    // becomes effective once app-level locale persistence lands (Task 5).
+    final restoredLang = _sessionUserService?.current?.language;
+    if (restoredLang != null && restoredLang.isNotEmpty) {
+      await _translationService?.setLocale(restoredLang);
+    }
 
     _initialized = true;
 
@@ -1123,11 +1136,7 @@ class FrappeSDK {
       // outage (e.g. one method 500) doesn't block the rest of boot.
     }
 
-    try {
-      await _translationService?.loadTranslations('en');
-    } catch (e, st) {
-      debugPrint('FrappeSDK: translations.loadTranslations failed — $e\n$st');
-    }
+    _translationService?.refreshAsync(_translationService?.currentLang ?? 'en');
 
     try {
       await _metaService!.checkAndSyncDoctypes();
