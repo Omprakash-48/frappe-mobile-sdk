@@ -247,34 +247,11 @@ class _HomeScreenState extends State<HomeScreen> {
       return;
     }
 
-    // Initialize services if not already done
-    _metaService ??= MetaService(_authService!.client!, _database!);
-    _repository ??= OfflineRepository(_database!);
-    _syncService ??= SyncService(
-      _authService!.client!,
-      _repository!,
-      _database!,
-    );
-    if (_linkOptionService == null) {
-      final metaSvc = _metaService!;
-      final syncSvc = _syncService!;
-      final rawDb = _database!.rawDatabase;
-      Future<DocTypeMeta> metaFn(String dt) => metaSvc.getMeta(dt);
-      final resolver = UnifiedResolver(
-        db: rawDb,
-        metaDao: DoctypeMetaDao(rawDb),
-        isOnline: () => true,
-        backgroundFetch: (doctype, _) async {
-          try {
-            await syncSvc.pullSync(doctype: doctype);
-          } catch (_) {}
-        },
-        metaResolver: metaFn,
-      );
-      _linkOptionService = LinkOptionService(resolver, metaFn);
-    }
-
-    // Initial metadata + data sync for mobile forms
+    // Services are wired once by sdk.initialize() in _initialize() and exposed
+    // via sdk.meta / sdk.repository / sdk.sync / sdk.linkOptions. Do NOT rebuild
+    // them here — a hand-rolled graph diverges from the SDK's wiring (offline
+    // mode, connectivity-aware resolver, push runner) and would run alongside
+    // the SDK's own instances. Just run the post-login data sync.
     await _initialMetaAndDataSync();
 
     setState(() {
@@ -388,43 +365,18 @@ class _HomeScreenState extends State<HomeScreen> {
       );
     }
 
-    // Initialize services if not already done (should happen in _handleLoginSuccess, but double-check)
+    // Services are wired once by sdk.initialize() in _initialize(). If any is
+    // missing (initialize() failed), surface that rather than rebuilding a
+    // divergent service graph.
     if (_metaService == null ||
         _repository == null ||
         _syncService == null ||
         _linkOptionService == null) {
-      if (_database != null && _authService!.client != null) {
-        _metaService = MetaService(_authService!.client!, _database!);
-        _repository = OfflineRepository(_database!);
-        _syncService = SyncService(
-          _authService!.client!,
-          _repository!,
-          _database!,
-          getMobileUuid: () => _authService!.getOrCreateMobileUuid(),
-        );
-        final metaSvc = _metaService!;
-        final syncSvc = _syncService!;
-        final rawDb = _database!.rawDatabase;
-        Future<DocTypeMeta> metaFn(String dt) => metaSvc.getMeta(dt);
-        final resolver = UnifiedResolver(
-          db: rawDb,
-          metaDao: DoctypeMetaDao(rawDb),
-          isOnline: () => true,
-          backgroundFetch: (doctype, _) async {
-            try {
-              await syncSvc.pullSync(doctype: doctype);
-            } catch (_) {}
-          },
-          metaResolver: metaFn,
-        );
-        _linkOptionService = LinkOptionService(resolver, metaFn);
-      } else {
-        return const Scaffold(
-          body: Center(
-            child: Text('Services not initialized. Please restart the app.'),
-          ),
-        );
-      }
+      return const Scaffold(
+        body: Center(
+          child: Text('Services not initialized. Please restart the app.'),
+        ),
+      );
     }
 
     if (_appConfig == null) {
