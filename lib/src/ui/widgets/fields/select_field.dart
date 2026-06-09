@@ -17,7 +17,7 @@ class SelectField extends BaseField {
   /// Raw (untranslated) option keys — used as stored document values.
   List<String> _getRawOptions() {
     if (field.options == null || field.options!.isEmpty) return [];
-    return field.options!.split('\n').where((e) => e.isNotEmpty).toList();
+    return field.options!.split('\n').map((e) => e.trim()).where((e) => e.isNotEmpty).toList();
   }
 
   /// Translated display labels — used only for rendering.
