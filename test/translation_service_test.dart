@@ -87,4 +87,41 @@ void main() {
       await svc.dao.close();
     });
   });
+
+  group('dispose safety', () {
+    test('no StateError when dispose is called before onChanged emits', () async {
+      final svc = _service();
+      await svc.dao.bulkUpsert('hi', {'Yes': 'हाँ'});
+
+      final errors = <Object>[];
+      await runZonedGuarded(
+        () async {
+          // loadFromCache awaits the DAO, then emits onChanged — the guard
+          // must prevent a StateError if the controller is already closed.
+          await svc.loadFromCache('hi');
+          await svc.dispose(); // closes the StreamController
+          // Give the event loop a turn; no emission should follow dispose.
+          await Future<void>.delayed(const Duration(milliseconds: 10));
+        },
+        (e, _) => errors.add(e),
+      );
+
+      expect(errors, isEmpty,
+          reason: 'No StateError or other error should be thrown after dispose');
+    });
+
+    test('onChanged stream is closed after dispose and emits no further events',
+        () async {
+      final svc = _service();
+      await svc.dao.bulkUpsert('hi', {'Yes': 'हाँ'});
+      await svc.loadFromCache('hi'); // prime the cache + first emission
+      await svc.dispose();
+
+      var extraEvents = 0;
+      // Listening to a closed broadcast stream is harmless but receives nothing.
+      svc.onChanged.listen((_) => extraEvents++);
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+      expect(extraEvents, 0);
+    });
+  });
 }

@@ -47,7 +47,7 @@ class TranslationService {
       final map = await _dao!.readAll(lang);
       if (map.isEmpty) return;
       _cache[lang] = map;
-      _changedController.add(null);
+      if (!_changedController.isClosed) _changedController.add(null);
     } catch (e, st) {
       debugPrint('TranslationService.loadFromCache($lang) failed — $e\n$st');
     }
@@ -67,7 +67,7 @@ class TranslationService {
     } catch (e, st) {
       debugPrint('TranslationService._doRefresh($lang) persist failed — $e\n$st');
     }
-    _changedController.add(null);
+    if (!_changedController.isClosed) _changedController.add(null);
   }
 
   /// Set the active language. Loads from SQLite cache first (instant),

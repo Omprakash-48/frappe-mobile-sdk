@@ -209,7 +209,7 @@ class FrappeSDK {
       metaFetcher: testMetaFn,
     );
     _permissionService = PermissionService(_client!, _database!);
-    final translationDao = TranslationDao();
+    final translationDao = TranslationDao.forTesting();
     _translationService = TranslationService(_client!)..injectDao(translationDao);
     _syncService = SyncService(
       _client!,
