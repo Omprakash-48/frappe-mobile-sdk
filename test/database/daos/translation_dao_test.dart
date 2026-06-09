@@ -24,7 +24,11 @@ void main() {
     });
 
     test('bulkUpsert then readAll round-trips all entries', () async {
-      await dao.bulkUpsert('hi', {'Yes': 'हाँ', 'No': 'नहीं', 'Father': 'पिता'});
+      await dao.bulkUpsert('hi', {
+        'Yes': 'हाँ',
+        'No': 'नहीं',
+        'Father': 'पिता',
+      });
       final result = await dao.readAll('hi');
       expect(result, {'Yes': 'हाँ', 'No': 'नहीं', 'Father': 'पिता'});
     });

@@ -6,12 +6,15 @@ import 'package:frappe_mobile_sdk/src/models/outbox_row.dart';
 
 void main() {
   group('ErrorCode.isTerminal (#53)', () {
-    test('user/permission errors are terminal (no auto-retry can fix them)', () {
-      expect(ErrorCode.VALIDATION.isTerminal, isTrue);
-      expect(ErrorCode.MANDATORY.isTerminal, isTrue);
-      expect(ErrorCode.PERMISSION_DENIED.isTerminal, isTrue);
-      expect(ErrorCode.LINK_EXISTS.isTerminal, isTrue);
-    });
+    test(
+      'user/permission errors are terminal (no auto-retry can fix them)',
+      () {
+        expect(ErrorCode.VALIDATION.isTerminal, isTrue);
+        expect(ErrorCode.MANDATORY.isTerminal, isTrue);
+        expect(ErrorCode.PERMISSION_DENIED.isTerminal, isTrue);
+        expect(ErrorCode.LINK_EXISTS.isTerminal, isTrue);
+      },
+    );
 
     test('transient/system errors are NOT terminal (retryable)', () {
       expect(ErrorCode.NETWORK.isTerminal, isFalse);
@@ -23,15 +26,15 @@ void main() {
 
   group('OutboxRow.isTerminal (#53)', () {
     OutboxRow row({ErrorCode? code}) => OutboxRow(
-          id: 1,
-          doctype: 'X',
-          mobileUuid: 'u1',
-          operation: OutboxOperation.insert,
-          state: OutboxState.failed,
-          retryCount: 0,
-          errorCode: code,
-          createdAt: DateTime.utc(2026),
-        );
+      id: 1,
+      doctype: 'X',
+      mobileUuid: 'u1',
+      operation: OutboxOperation.insert,
+      state: OutboxState.failed,
+      retryCount: 0,
+      errorCode: code,
+      createdAt: DateTime.utc(2026),
+    );
 
     test('derives from errorCode', () {
       expect(row(code: ErrorCode.VALIDATION).isTerminal, isTrue);

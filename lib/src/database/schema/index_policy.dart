@@ -11,11 +11,7 @@ List<String> chooseIndexes(
   int maxIndexes = 7,
   Map<String, int>? linkEdgeCount,
 }) {
-  final chosen = <String>[
-    'server_name',
-    'modified',
-    'sync_status',
-  ];
+  final chosen = <String>['server_name', 'modified', 'sync_status'];
 
   void add(String col) {
     if (chosen.length >= maxIndexes) return;

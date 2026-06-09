@@ -51,11 +51,11 @@ class TranslationDao {
     await db.transaction((txn) async {
       final batch = txn.batch();
       for (final e in map.entries) {
-        batch.insert(
-          _tableName,
-          {'lang': lang, 'src': e.key, 'tgt': e.value},
-          conflictAlgorithm: ConflictAlgorithm.replace,
-        );
+        batch.insert(_tableName, {
+          'lang': lang,
+          'src': e.key,
+          'tgt': e.value,
+        }, conflictAlgorithm: ConflictAlgorithm.replace);
       }
       await batch.commit(noResult: true);
     });

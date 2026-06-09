@@ -12,16 +12,16 @@ class DepEdge {
   });
 
   Map<String, Object?> toJson() => {
-        'field': field,
-        'target': targetDoctype,
-        'kind': kind.name,
-      };
+    'field': field,
+    'target': targetDoctype,
+    'kind': kind.name,
+  };
 
   factory DepEdge.fromJson(Map<String, dynamic> j) => DepEdge(
-        field: j['field'] as String,
-        targetDoctype: j['target'] as String,
-        kind: DepEdgeKind.values.firstWhere((k) => k.name == j['kind']),
-      );
+    field: j['field'] as String,
+    targetDoctype: j['target'] as String,
+    kind: DepEdgeKind.values.firstWhere((k) => k.name == j['kind']),
+  );
 }
 
 class DepGraph {
@@ -38,22 +38,22 @@ class DepGraph {
   });
 
   Map<String, Object?> toJson() => {
-        'doctype': doctype,
-        'tier': tier,
-        'outgoing': outgoing.map((e) => e.toJson()).toList(),
-        'incoming': incoming.map((e) => e.toJson()).toList(),
-      };
+    'doctype': doctype,
+    'tier': tier,
+    'outgoing': outgoing.map((e) => e.toJson()).toList(),
+    'incoming': incoming.map((e) => e.toJson()).toList(),
+  };
 
   factory DepGraph.fromJson(Map<String, dynamic> j) => DepGraph(
-        doctype: j['doctype'] as String,
-        tier: (j['tier'] as num).toInt(),
-        outgoing: ((j['outgoing'] as List?) ?? const [])
-            .map((e) => DepEdge.fromJson(e as Map<String, dynamic>))
-            .toList(),
-        incoming: ((j['incoming'] as List?) ?? const [])
-            .map((e) => DepEdge.fromJson(e as Map<String, dynamic>))
-            .toList(),
-      );
+    doctype: j['doctype'] as String,
+    tier: (j['tier'] as num).toInt(),
+    outgoing: ((j['outgoing'] as List?) ?? const [])
+        .map((e) => DepEdge.fromJson(e as Map<String, dynamic>))
+        .toList(),
+    incoming: ((j['incoming'] as List?) ?? const [])
+        .map((e) => DepEdge.fromJson(e as Map<String, dynamic>))
+        .toList(),
+  );
 
   /// Counts per outgoing Link field (child edges excluded). Used by
   /// chooseIndexes() to rank Link columns for index slots.

@@ -40,9 +40,9 @@ class TierComputer {
       final thisTier = <OutboxRow>[];
       final nextRemaining = <OutboxRow>[];
       for (final r in remaining) {
-        final deps = dependenciesForRow(r)
-            .where((u) => pendingUuids.contains(u) && u != r.mobileUuid)
-            .toSet();
+        final deps = dependenciesForRow(
+          r,
+        ).where((u) => pendingUuids.contains(u) && u != r.mobileUuid).toSet();
         if (deps.every(settled.contains)) {
           thisTier.add(r);
         } else {

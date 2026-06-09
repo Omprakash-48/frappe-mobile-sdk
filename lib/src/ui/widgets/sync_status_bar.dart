@@ -16,11 +16,7 @@ class SyncStatusBar extends StatelessWidget {
   final SyncStateNotifier notifier;
   final double height;
 
-  const SyncStatusBar({
-    super.key,
-    required this.notifier,
-    this.height = 24,
-  });
+  const SyncStatusBar({super.key, required this.notifier, this.height = 24});
 
   @override
   Widget build(BuildContext context) {
@@ -54,8 +50,10 @@ class SyncStatusBar extends StatelessWidget {
     }
     if (s.isUploading) return 'Uploading';
     if (s.isPulling) {
-      final total = s.perDoctype.values
-          .fold<int>(0, (acc, v) => acc + v.pulledCount);
+      final total = s.perDoctype.values.fold<int>(
+        0,
+        (acc, v) => acc + v.pulledCount,
+      );
       return total > 0 ? 'Pulling $total' : 'Pulling';
     }
     return null;

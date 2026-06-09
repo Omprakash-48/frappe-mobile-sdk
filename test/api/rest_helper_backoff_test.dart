@@ -22,15 +22,21 @@ void main() {
       }
     });
 
-    test('is randomised — successive draws for the same attempt can differ', () {
-      final rnd = Random(42);
-      final samples = <int>{
-        for (var i = 0; i < 20; i++)
-          retryBackoffDelay(3, random: rnd).inMilliseconds,
-      };
-      expect(samples.length, greaterThan(1),
-          reason: 'jitter must vary, not be deterministic per attempt');
-    });
+    test(
+      'is randomised — successive draws for the same attempt can differ',
+      () {
+        final rnd = Random(42);
+        final samples = <int>{
+          for (var i = 0; i < 20; i++)
+            retryBackoffDelay(3, random: rnd).inMilliseconds,
+        };
+        expect(
+          samples.length,
+          greaterThan(1),
+          reason: 'jitter must vary, not be deterministic per attempt',
+        );
+      },
+    );
 
     test('is deterministic under a seeded RNG (reproducible)', () {
       final a = retryBackoffDelay(4, random: Random(7)).inMilliseconds;

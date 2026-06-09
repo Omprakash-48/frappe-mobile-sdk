@@ -30,8 +30,7 @@ Future<LogoutGuardAction> showLogoutGuardDialog(
           child: const Text('Cancel'),
         ),
         TextButton(
-          onPressed: () =>
-              Navigator.pop(c, LogoutGuardAction.logoutAnyway),
+          onPressed: () => Navigator.pop(c, LogoutGuardAction.logoutAnyway),
           style: TextButton.styleFrom(foregroundColor: Colors.red),
           child: const Text('Log out anyway'),
         ),

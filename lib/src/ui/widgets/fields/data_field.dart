@@ -35,6 +35,7 @@ class DataField extends BaseField {
       name: field.fieldname ?? '',
       initialValue: initialValue,
       enabled: enabled && !field.readOnly,
+      inputFormatters: style?.inputFormatters,
       keyboardType: isPhone ? TextInputType.phone : TextInputType.text,
       decoration:
           style?.decoration ??

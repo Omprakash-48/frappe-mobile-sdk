@@ -17,10 +17,7 @@ class TimespanRange {
 typedef ClockFn = DateTime Function();
 
 class FrappeTimespan {
-  static TimespanRange resolve(
-    String keyword, {
-    ClockFn now = _defaultNow,
-  }) {
+  static TimespanRange resolve(String keyword, {ClockFn now = _defaultNow}) {
     final n = now();
     final lk = keyword.toLowerCase().trim();
 

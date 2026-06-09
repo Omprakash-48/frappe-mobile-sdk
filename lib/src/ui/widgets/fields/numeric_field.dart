@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_form_builder/flutter_form_builder.dart';
 import 'base_field.dart';
 import 'field_helpers.dart';
@@ -25,6 +26,13 @@ class NumericField extends BaseField {
       name: field.fieldname ?? '',
       initialValue: value?.toString() ?? field.defaultValue ?? '',
       enabled: enabled && !field.readOnly,
+      inputFormatters: [
+        ...?style?.inputFormatters,
+        if (isInt)
+          FilteringTextInputFormatter.allow(RegExp(r'[0-9\-]'))
+        else
+          FilteringTextInputFormatter.allow(RegExp(r'[0-9.\-]')),
+      ],
       keyboardType: TextInputType.numberWithOptions(decimal: !isInt),
       decoration:
           style?.decoration ??

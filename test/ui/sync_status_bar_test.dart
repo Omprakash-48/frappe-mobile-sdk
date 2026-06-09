@@ -8,7 +8,9 @@ void main() {
     final n = SyncStateNotifier();
     n.value = n.value.copyWith(isOnline: true);
     await tester.pumpWidget(
-      MaterialApp(home: Scaffold(body: SyncStatusBar(notifier: n))),
+      MaterialApp(
+        home: Scaffold(body: SyncStatusBar(notifier: n)),
+      ),
     );
     expect(find.text('Offline'), findsNothing);
     expect(find.text('Paused'), findsNothing);
@@ -19,7 +21,9 @@ void main() {
     final n = SyncStateNotifier();
     n.value = n.value.copyWith(isOnline: false);
     await tester.pumpWidget(
-      MaterialApp(home: Scaffold(body: SyncStatusBar(notifier: n))),
+      MaterialApp(
+        home: Scaffold(body: SyncStatusBar(notifier: n)),
+      ),
     );
     expect(find.text('Offline'), findsOneWidget);
   });
@@ -32,7 +36,9 @@ void main() {
       isPulling: true,
     );
     await tester.pumpWidget(
-      MaterialApp(home: Scaffold(body: SyncStatusBar(notifier: n))),
+      MaterialApp(
+        home: Scaffold(body: SyncStatusBar(notifier: n)),
+      ),
     );
     expect(find.text('Offline'), findsOneWidget);
     expect(find.text('Paused'), findsNothing);
@@ -40,10 +46,11 @@ void main() {
 
   testWidgets('shows Paused when online + paused', (tester) async {
     final n = SyncStateNotifier();
-    n.value =
-        n.value.copyWith(isOnline: true, isPaused: true, isPulling: true);
+    n.value = n.value.copyWith(isOnline: true, isPaused: true, isPulling: true);
     await tester.pumpWidget(
-      MaterialApp(home: Scaffold(body: SyncStatusBar(notifier: n))),
+      MaterialApp(
+        home: Scaffold(body: SyncStatusBar(notifier: n)),
+      ),
     );
     expect(find.text('Paused'), findsOneWidget);
   });
@@ -56,7 +63,9 @@ void main() {
       isPushing: true,
     );
     await tester.pumpWidget(
-      MaterialApp(home: Scaffold(body: SyncStatusBar(notifier: n))),
+      MaterialApp(
+        home: Scaffold(body: SyncStatusBar(notifier: n)),
+      ),
     );
     expect(find.text('Initial sync'), findsOneWidget);
   });
@@ -65,7 +74,9 @@ void main() {
     final n = SyncStateNotifier();
     n.value = n.value.copyWith(isOnline: true, isPushing: true);
     await tester.pumpWidget(
-      MaterialApp(home: Scaffold(body: SyncStatusBar(notifier: n))),
+      MaterialApp(
+        home: Scaffold(body: SyncStatusBar(notifier: n)),
+      ),
     );
     expect(find.textContaining('Syncing'), findsOneWidget);
   });
@@ -74,7 +85,9 @@ void main() {
     final n = SyncStateNotifier();
     n.value = n.value.copyWith(isOnline: true, isPulling: true);
     await tester.pumpWidget(
-      MaterialApp(home: Scaffold(body: SyncStatusBar(notifier: n))),
+      MaterialApp(
+        home: Scaffold(body: SyncStatusBar(notifier: n)),
+      ),
     );
     expect(find.textContaining('Pulling'), findsOneWidget);
   });
@@ -87,7 +100,9 @@ void main() {
       isPulling: true,
     );
     await tester.pumpWidget(
-      MaterialApp(home: Scaffold(body: SyncStatusBar(notifier: n))),
+      MaterialApp(
+        home: Scaffold(body: SyncStatusBar(notifier: n)),
+      ),
     );
     expect(find.text('Uploading'), findsOneWidget);
     expect(find.textContaining('Pulling'), findsNothing);

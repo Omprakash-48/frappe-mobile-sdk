@@ -23,7 +23,10 @@ void main() {
         DocField(fieldname: 'age', fieldtype: 'Int', label: 'A'),
       ],
     );
-    for (final stmt in buildParentSchemaDDL(meta, tableName: 'docs__customer')) {
+    for (final stmt in buildParentSchemaDDL(
+      meta,
+      tableName: 'docs__customer',
+    )) {
       await db.execute(stmt);
     }
     dao = DoctypeDao(db, tableName: 'docs__customer');
@@ -47,8 +50,10 @@ void main() {
 
   test('upsertByServerName — updates if exists', () async {
     await dao.insert({
-      'mobile_uuid': 'u1', 'server_name': 'SRV-1',
-      'sync_status': 'synced', 'local_modified': 1000,
+      'mobile_uuid': 'u1',
+      'server_name': 'SRV-1',
+      'sync_status': 'synced',
+      'local_modified': 1000,
       'customer_name': 'Old',
     });
     await dao.upsertByServerName('SRV-1', <String, Object?>{
@@ -61,25 +66,32 @@ void main() {
     expect(row['mobile_uuid'], 'u1', reason: 'mobile_uuid stays stable');
   });
 
-  test('upsertByServerName — inserts when absent (generates mobile_uuid)', () async {
-    await dao.upsertByServerName('SRV-NEW', <String, Object?>{
-      'customer_name': 'Fresh',
-      'sync_status': 'synced',
-      'modified': '2026-01-01 00:00:00',
-      'local_modified': 2000,
-    });
-    final row = await dao.findByServerName('SRV-NEW');
-    expect(row, isNotNull);
-    expect(row!['mobile_uuid'], isNotNull);
-    expect(row['customer_name'], 'Fresh');
-  });
+  test(
+    'upsertByServerName — inserts when absent (generates mobile_uuid)',
+    () async {
+      await dao.upsertByServerName('SRV-NEW', <String, Object?>{
+        'customer_name': 'Fresh',
+        'sync_status': 'synced',
+        'modified': '2026-01-01 00:00:00',
+        'local_modified': 2000,
+      });
+      final row = await dao.findByServerName('SRV-NEW');
+      expect(row, isNotNull);
+      expect(row!['mobile_uuid'], isNotNull);
+      expect(row['customer_name'], 'Fresh');
+    },
+  );
 
   test('findByStatus filters correctly', () async {
     await dao.insert({
-      'mobile_uuid': 'a', 'sync_status': 'dirty', 'local_modified': 1
+      'mobile_uuid': 'a',
+      'sync_status': 'dirty',
+      'local_modified': 1,
     });
     await dao.insert({
-      'mobile_uuid': 'b', 'sync_status': 'synced', 'local_modified': 2
+      'mobile_uuid': 'b',
+      'sync_status': 'synced',
+      'local_modified': 2,
     });
     final dirty = await dao.findByStatus('dirty');
     expect(dirty.length, 1);
@@ -88,7 +100,9 @@ void main() {
 
   test('updateByMobileUuid applies partial patch', () async {
     await dao.insert({
-      'mobile_uuid': 'u1', 'sync_status': 'dirty', 'local_modified': 1,
+      'mobile_uuid': 'u1',
+      'sync_status': 'dirty',
+      'local_modified': 1,
       'customer_name': 'X',
     });
     await dao.updateByMobileUuid('u1', {'customer_name': 'Y'});

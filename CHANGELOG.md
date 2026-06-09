@@ -77,11 +77,15 @@ Major release: offline-first foundation, server-driven offline-mode toggle, and 
 - `FormScreen` offline-first save — checks connectivity before save; treats `serverId == null` docs as INSERT when going back online.
 - `ApiTracer` — debug-mode tracing utility for API calls.
 - `extractErrorMessage` / `toUserFriendlyMessage` — shared helpers for error-string normalization across the SDK.
+- `LinkFieldPickerMode` enum (`inline` and `dialog` modes) to support alternative full-modal lookup dialogs for Link and Table MultiSelect fields, configurable globally via `FrappeFormStyle`.
+- `SearchableSelectDialog` widget rendering a modal dialog with a dedicated search filter, checkboxes for multi-select, and checkmarks for single-select.
 
 ### Changed
 
 - **Single read path.** All list reads route through `UnifiedResolver`. DB-first with background refresh on connectivity; Link decoration via `LinkDecorator`.
+- `SearchableSelect` updated to support launching `SearchableSelectDialog` when `pickerMode` is `LinkFieldPickerMode.dialog`.
 - **`pullSync` guards child doctypes.** Doctypes with `istable=1` are skipped at the entrypoint — `frappe.client.get_list` does not permit listing them, and children arrive embedded in parent pulls.
+
 - **Form-level cascade clears.** When a Link field changes, the SDK auto-clears dependent Link fields whose `linkFilters` contain `eval:doc.{fieldname}` references. Consumer `FieldChangeHandler` callbacks should add value-derivation only — the form owns cascade cleanup.
 - **Local UUID resolution.** Values matching the v4-UUID shape resolve from `docs__*` only; the SDK never calls `getByName(...)` for UUID-shaped values, since server names never match the UUID pattern.
 - **Conflict surfaces.** When a pulled row is newer than a local dirty/failed row, `PullApply` sets `sync_status = 'conflict'`. Resolve via `SyncController.resolveConflict()` with two actions: `pullAndOverwriteLocal` (apply server snapshot) or `keepLocalAndRetry` (requeue; runs `ThreeWayMerge` against the pre-edit base).

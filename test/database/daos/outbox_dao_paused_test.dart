@@ -53,50 +53,69 @@ void main() {
       mobileUuid: 'u1',
       operation: OutboxOperation.insert,
     );
-    await dao.markPaused(id,
-        errorCode: ErrorCode.VALIDATION, errorMessage: 'bad');
+    await dao.markPaused(
+      id,
+      errorCode: ErrorCode.VALIDATION,
+      errorMessage: 'bad',
+    );
     final pending = await dao.findByState(OutboxState.pending);
-    expect(pending, isEmpty,
-        reason: 'a paused row must never be auto-retried by the drain');
+    expect(
+      pending,
+      isEmpty,
+      reason: 'a paused row must never be auto-retried by the drain',
+    );
   });
 
-  test('a paused row does not count as an active push (cannot block pulls)',
-      () async {
-    final id = await dao.insertPending(
-      doctype: 'X',
-      mobileUuid: 'u1',
-      operation: OutboxOperation.insert,
-    );
-    await dao.markPaused(id,
-        errorCode: ErrorCode.VALIDATION, errorMessage: 'bad');
-    expect(await dao.hasActivePushFor('X'), isFalse);
-  });
-
-  test('re-saving the record resets the paused row to pending (resume)',
-      () async {
-    final id = await dao.insertPending(
-      doctype: 'X',
-      mobileUuid: 'u1',
-      operation: OutboxOperation.insert,
-    );
-    await dao.markPaused(id,
-        errorCode: ErrorCode.VALIDATION, errorMessage: 'bad');
-
-    // User edits + saves again → same (doctype, uuid), INSERT.
-    // recordSave must run in a transaction (collapse invariant).
-    final result = await db.transaction(
-      (txn) => OutboxDao(txn).recordSave(
+  test(
+    'a paused row does not count as an active push (cannot block pulls)',
+    () async {
+      final id = await dao.insertPending(
         doctype: 'X',
         mobileUuid: 'u1',
         operation: OutboxOperation.insert,
-      ),
-    );
+      );
+      await dao.markPaused(
+        id,
+        errorCode: ErrorCode.VALIDATION,
+        errorMessage: 'bad',
+      );
+      expect(await dao.hasActivePushFor('X'), isFalse);
+    },
+  );
 
-    expect(result, RecordSaveResult.enqueued);
-    final row = await dao.findById(id);
-    expect(row!.state, OutboxState.pending,
-        reason: 'a corrected re-save must re-queue the paused row');
-    expect(row.errorCode, isNull);
-    expect(row.errorMessage, isNull);
-  });
+  test(
+    're-saving the record resets the paused row to pending (resume)',
+    () async {
+      final id = await dao.insertPending(
+        doctype: 'X',
+        mobileUuid: 'u1',
+        operation: OutboxOperation.insert,
+      );
+      await dao.markPaused(
+        id,
+        errorCode: ErrorCode.VALIDATION,
+        errorMessage: 'bad',
+      );
+
+      // User edits + saves again → same (doctype, uuid), INSERT.
+      // recordSave must run in a transaction (collapse invariant).
+      final result = await db.transaction(
+        (txn) => OutboxDao(txn).recordSave(
+          doctype: 'X',
+          mobileUuid: 'u1',
+          operation: OutboxOperation.insert,
+        ),
+      );
+
+      expect(result, RecordSaveResult.enqueued);
+      final row = await dao.findById(id);
+      expect(
+        row!.state,
+        OutboxState.pending,
+        reason: 'a corrected re-save must re-queue the paused row',
+      );
+      expect(row.errorCode, isNull);
+      expect(row.errorMessage, isNull);
+    },
+  );
 }

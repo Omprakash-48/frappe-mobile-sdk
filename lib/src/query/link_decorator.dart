@@ -76,8 +76,7 @@ class LinkDecorator {
         out['${name}__display'] = v;
       } else {
         final title = targetRows.first[titleCol];
-        out['${name}__display'] =
-            title ?? targetRows.first['server_name'] ?? v;
+        out['${name}__display'] = title ?? targetRows.first['server_name'] ?? v;
       }
     }
     return out;

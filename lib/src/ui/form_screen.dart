@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import '../api/client.dart';
 import '../api/exceptions.dart';
 import '../api/utils.dart';
+import '../utils/translate.dart';
 import '../models/doc_field.dart';
 import '../models/doc_type_meta.dart';
 import '../models/document.dart';
@@ -105,6 +106,12 @@ class FormScreen extends StatefulWidget {
   /// no push engine wired.
   final SyncController? syncController;
 
+  final void Function(void Function() submit)? registerSubmit;
+  final bool hideAppBarActions;
+  final void Function(bool isSaving)? onSaveStateChanged;
+  final void Function(bool isDirty)? onFormDirtyChanged;
+  final Widget? bottomNavigationBar;
+
   const FormScreen({
     super.key,
     required this.meta,
@@ -129,6 +136,11 @@ class FormScreen extends StatefulWidget {
     this.useLinkFieldCoordinator = true,
     this.screenStyle,
     this.syncController,
+    this.registerSubmit,
+    this.hideAppBarActions = false,
+    this.onSaveStateChanged,
+    this.onFormDirtyChanged,
+    this.bottomNavigationBar,
   });
 
   @override
@@ -209,10 +221,22 @@ class _FormScreenState extends State<FormScreen> with WidgetsBindingObserver {
     return true;
   }
 
+  void _setSaving(bool value) {
+    if (mounted) {
+      setState(() {
+        _isSaving = value;
+      });
+      widget.onSaveStateChanged?.call(value);
+    }
+  }
+
   void _onFormDataChanged(Map<String, dynamic> currentData) {
     final baseline = _baselineFormData ?? _currentDocData;
     final dirty = !_formDataEquals(currentData, baseline, widget.meta);
-    if (mounted) _isFormDirty.value = dirty;
+    if (mounted) {
+      _isFormDirty.value = dirty;
+      widget.onFormDirtyChanged?.call(dirty);
+    }
   }
 
   @override
@@ -223,6 +247,7 @@ class _FormScreenState extends State<FormScreen> with WidgetsBindingObserver {
     _baselineFormData = Map<String, dynamic>.from(_currentDocData);
     _loadWorkflowTransitions();
     _loadSyncErrors();
+    widget.onFormDirtyChanged?.call(false);
   }
 
   @override
@@ -262,6 +287,7 @@ class _FormScreenState extends State<FormScreen> with WidgetsBindingObserver {
           : null;
       _baselineFormData = Map<String, dynamic>.from(_currentDocData);
       _isFormDirty.value = false;
+      widget.onFormDirtyChanged?.call(false);
       _loadWorkflowTransitions();
       _loadSyncErrors();
     }
@@ -299,7 +325,7 @@ class _FormScreenState extends State<FormScreen> with WidgetsBindingObserver {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
-            content: Text('Retry failed: ${toUserFriendlyMessage(e)}'),
+            content: Text(tr('Retry failed: {0}', [toUserFriendlyMessage(e)])),
             backgroundColor: Colors.red,
           ),
         );
@@ -334,7 +360,7 @@ class _FormScreenState extends State<FormScreen> with WidgetsBindingObserver {
     final stuck = _syncErrorRows.isNotEmpty;
     showStatusSnackBar(
       context,
-      stuck ? 'Push completed with errors' : 'Pushed',
+      stuck ? tr('Push completed with errors') : tr('Pushed'),
       severity: stuck ? SnackBarSeverity.warning : SnackBarSeverity.success,
       duration: const Duration(seconds: 2),
     );
@@ -448,7 +474,7 @@ class _FormScreenState extends State<FormScreen> with WidgetsBindingObserver {
                         ? widget.translate!(
                             'No workflow actions available for this state.',
                           )
-                        : 'No workflow actions available for this state.',
+                        : tr('No workflow actions available for this state.'),
                     style: Theme.of(context).textTheme.bodyMedium,
                   ),
                 )
@@ -478,8 +504,10 @@ class _FormScreenState extends State<FormScreen> with WidgetsBindingObserver {
       if (mounted) {
         showStatusSnackBar(
           context,
-          '${field.displayLabel}: Action not configured for mobile. '
-          'This button may use client-side logic only available on web.',
+          tr(
+            '{0}: Action not configured for mobile. This button may use client-side logic only available on web.',
+            [field.displayLabel],
+          ),
           severity: SnackBarSeverity.warning,
         );
       }
@@ -490,7 +518,7 @@ class _FormScreenState extends State<FormScreen> with WidgetsBindingObserver {
       if (mounted) {
         showStatusSnackBar(
           context,
-          'Action unavailable offline',
+          tr('Action unavailable offline'),
           severity: SnackBarSeverity.warning,
         );
       }
@@ -502,7 +530,7 @@ class _FormScreenState extends State<FormScreen> with WidgetsBindingObserver {
       if (mounted) {
         showStatusSnackBar(
           context,
-          'Action completed',
+          tr('Action completed'),
           severity: SnackBarSeverity.success,
         );
       }
@@ -596,8 +624,8 @@ class _FormScreenState extends State<FormScreen> with WidgetsBindingObserver {
       }
     }
 
+    _setSaving(true);
     setState(() {
-      _isSaving = true;
       _errorMessage = null;
     });
 
@@ -734,7 +762,7 @@ class _FormScreenState extends State<FormScreen> with WidgetsBindingObserver {
           _isFormDirty.value = false;
           showStatusSnackBar(
             context,
-            'Saved successfully',
+            tr('Saved successfully'),
             severity: SnackBarSeverity.success,
           );
           widget.onSaveSuccess?.call();
@@ -775,7 +803,7 @@ class _FormScreenState extends State<FormScreen> with WidgetsBindingObserver {
         _isFormDirty.value = false;
         showStatusSnackBar(
           context,
-          'Document saved successfully',
+          tr('Document saved successfully'),
           severity: SnackBarSeverity.success,
         );
         widget.onSaveSuccess?.call();
@@ -790,11 +818,7 @@ class _FormScreenState extends State<FormScreen> with WidgetsBindingObserver {
         });
       }
     } finally {
-      if (mounted) {
-        setState(() {
-          _isSaving = false;
-        });
-      }
+      _setSaving(false);
       // Either branch above may have queued a fresh outbox row or
       // resolved an existing one; refresh the persistent banner.
       _loadSyncErrors();
@@ -806,17 +830,15 @@ class _FormScreenState extends State<FormScreen> with WidgetsBindingObserver {
 
     final confirmed = await showConfirmDialog(
       context,
-      title: 'Delete Document',
-      content: 'Are you sure you want to delete this document?',
-      confirmLabel: 'Delete',
+      title: tr('Delete Document'),
+      content: tr('Are you sure you want to delete this document?'),
+      confirmLabel: tr('Delete'),
       confirmColor: Colors.red,
     );
 
     if (confirmed != true) return;
 
-    setState(() {
-      _isSaving = true;
-    });
+    _setSaving(true);
 
     try {
       final offlineEnabled = widget.repository.offlineMode.enabled;
@@ -843,7 +865,7 @@ class _FormScreenState extends State<FormScreen> with WidgetsBindingObserver {
       if (mounted) {
         showStatusSnackBar(
           context,
-          'Document deleted',
+          tr('Document deleted'),
           severity: SnackBarSeverity.warning,
         );
         Navigator.pop(context);
@@ -859,11 +881,7 @@ class _FormScreenState extends State<FormScreen> with WidgetsBindingObserver {
         });
       }
     } finally {
-      if (mounted) {
-        setState(() {
-          _isSaving = false;
-        });
-      }
+      _setSaving(false);
     }
   }
 
@@ -887,6 +905,7 @@ class _FormScreenState extends State<FormScreen> with WidgetsBindingObserver {
     final effectiveReadOnly = _isSaving || widget.readOnly || _isSubmitted;
 
     return Scaffold(
+      bottomNavigationBar: widget.bottomNavigationBar,
       appBar: AppBar(
         backgroundColor: widget.screenStyle?.appBarBackgroundColor,
         title: Text(
@@ -899,7 +918,9 @@ class _FormScreenState extends State<FormScreen> with WidgetsBindingObserver {
             valueListenable: _isFormDirty,
             builder: (context, dirty, _) {
               final showSave = allowSave && (dirty || widget.document == null);
-              if (!showSave) return const SizedBox.shrink();
+              if (!showSave || widget.hideAppBarActions) {
+                return const SizedBox.shrink();
+              }
               return TextButton.icon(
                 key: const Key('form_save_button'),
                 style: widget.screenStyle?.saveButtonStyle,
@@ -911,13 +932,14 @@ class _FormScreenState extends State<FormScreen> with WidgetsBindingObserver {
                         child: CircularProgressIndicator(strokeWidth: 2),
                       )
                     : const Icon(Icons.save),
-                label: const Text('Save'),
+                label: Text(tr('Save')),
               );
             },
           ),
           if (widget.repository.offlineMode.enabled &&
               widget.syncService != null &&
-              !widget.readOnly)
+              !widget.readOnly &&
+              !widget.hideAppBarActions)
             ValueListenableBuilder<bool>(
               valueListenable: _isSyncing,
               builder: (context, syncing, _) {
@@ -931,18 +953,18 @@ class _FormScreenState extends State<FormScreen> with WidgetsBindingObserver {
                         )
                       : const Icon(Icons.cloud_upload),
                   onPressed: syncing || _isSaving ? null : _handlePushRecord,
-                  tooltip: 'Push to server',
+                  tooltip: tr('Push to server'),
                 );
               },
             ),
-          if (allowDelete)
+          if (allowDelete && !widget.hideAppBarActions)
             IconButton(
               icon: Icon(
                 Icons.delete,
                 color: widget.screenStyle?.deleteIconColor,
               ),
               onPressed: _isSaving ? null : _handleDelete,
-              tooltip: 'Delete',
+              tooltip: tr('Delete'),
             ),
         ],
       ),
@@ -997,7 +1019,10 @@ class _FormScreenState extends State<FormScreen> with WidgetsBindingObserver {
                   getMeta: widget.metaService != null
                       ? (doctype) => widget.metaService!.getMeta(doctype)
                       : null,
-                  registerSubmit: (trigger) => _triggerSubmit = trigger,
+                  registerSubmit: (trigger) {
+                    _triggerSubmit = trigger;
+                    widget.registerSubmit?.call(trigger);
+                  },
                   onButtonPressed: widget.onButtonPressed != null
                       ? (field, formData) => widget.onButtonPressed!(
                           field,
@@ -1032,7 +1057,7 @@ class _FormScreenState extends State<FormScreen> with WidgetsBindingObserver {
                             ),
                             const SizedBox(height: 16),
                             Text(
-                              'Saving...',
+                              tr('Saving...'),
                               style: Theme.of(context).textTheme.titleMedium,
                             ),
                           ],

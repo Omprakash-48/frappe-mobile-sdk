@@ -1,0 +1,1 @@
+enum LinkFieldPickerMode { inline, dialog }

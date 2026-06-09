@@ -99,6 +99,7 @@ export 'src/ui/widgets/fields/button_field.dart';
 export 'src/ui/widgets/fields/numeric_field.dart';
 export 'src/ui/widgets/fields/link_field.dart';
 export 'src/ui/widgets/fields/phone_field.dart';
+export 'src/ui/widgets/fields/link_field_picker_mode.dart';
 export 'src/ui/widgets/fields/child_table_field.dart'
     show ChildTableFormBuilder;
 
@@ -142,3 +143,4 @@ export 'src/ui/dialogs/force_logout_confirm.dart' show showForceLogoutConfirm;
 // Utils (debug tracer + user-friendly errors)
 export 'src/api/utils.dart' show extractErrorMessage, toUserFriendlyMessage;
 export 'src/utils/api_tracer.dart' show ApiTracer;
+export 'src/utils/translate.dart';

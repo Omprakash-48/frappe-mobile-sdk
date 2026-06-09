@@ -11,13 +11,12 @@ DocTypeMeta meta({
   List<DocField> fields = const [],
   String? titleField,
   List<String>? searchFields,
-}) =>
-    DocTypeMeta(
-      name: name,
-      fields: fields,
-      titleField: titleField,
-      searchFields: searchFields,
-    );
+}) => DocTypeMeta(
+  name: name,
+  fields: fields,
+  titleField: titleField,
+  searchFields: searchFields,
+);
 
 void main() {
   group('MetaDiffer.diff', () {
@@ -47,10 +46,7 @@ void main() {
 
     test('added field that is in searchFields → __norm + backfill', () {
       final a = meta(fields: const [], searchFields: null);
-      final b = meta(
-        fields: [f('email', 'Data')],
-        searchFields: ['email'],
-      );
+      final b = meta(fields: [f('email', 'Data')], searchFields: ['email']);
       final d = MetaDiffer.diff(oldMeta: a, newMeta: b);
       expect(d.addedNormFor, contains('email'));
     });

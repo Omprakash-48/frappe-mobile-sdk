@@ -32,21 +32,17 @@ class SessionUserService {
 
   Future<void> set(SessionUser u) async {
     _current = u;
-    await _db.update(
-      'sdk_meta',
-      <String, Object?>{'session_user_json': jsonEncode(u.toJson())},
-      where: 'id = 1',
-    );
+    await _db.update('sdk_meta', <String, Object?>{
+      'session_user_json': jsonEncode(u.toJson()),
+    }, where: 'id = 1');
     _controller.add(u);
   }
 
   Future<void> clear() async {
     _current = null;
-    await _db.update(
-      'sdk_meta',
-      <String, Object?>{'session_user_json': null},
-      where: 'id = 1',
-    );
+    await _db.update('sdk_meta', <String, Object?>{
+      'session_user_json': null,
+    }, where: 'id = 1');
     _controller.add(null);
   }
 
@@ -55,8 +51,7 @@ class SessionUserService {
     if (rows.isEmpty) return;
     final raw = rows.first['session_user_json'] as String?;
     if (raw == null || raw.isEmpty) return;
-    _current =
-        SessionUser.fromJson(jsonDecode(raw) as Map<String, dynamic>);
+    _current = SessionUser.fromJson(jsonDecode(raw) as Map<String, dynamic>);
   }
 
   Future<void> dispose() => _controller.close();

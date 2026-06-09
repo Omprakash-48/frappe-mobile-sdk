@@ -25,8 +25,16 @@ String _extractFirstUsefulLine(String raw) {
   var s = raw;
 
   // Cut off the structured trailer Frappe attaches after the first
-  // sentence: ". Errors: {...}" or "\nTraceback...".
-  for (final sep in const ['. Errors:', '\nTraceback', '. Traceback']) {
+  // sentence: ". Errors: {...}", "\nTraceback...", or the compact
+  // single-line format ", exc_type: MandatoryError, exc: [...]".
+  for (final sep in const [
+    '. Errors:',
+    '\nTraceback',
+    '. Traceback',
+    ', exc_type:',
+    ', exc:',
+    ' Errors:',
+  ]) {
     final idx = s.indexOf(sep);
     if (idx >= 0) {
       s = s.substring(0, idx);
@@ -45,6 +53,8 @@ String _extractFirstUsefulLine(String raw) {
     'LinkValidationError: ',
     'frappe.exceptions.LinkValidationError: ',
     'frappe.exceptions.ValidationError: ',
+    'frappe.exceptions.MandatoryError: ',
+    'frappe.exceptions.PermissionError: ',
     'MandatoryError: ',
     'PermissionError: ',
     'TimestampMismatchError: ',
@@ -279,6 +289,8 @@ class _SyncErrorBannerState extends State<SyncErrorBanner> {
                   Expanded(
                     child: Text(
                       text.headline,
+                      maxLines: 3,
+                      overflow: TextOverflow.ellipsis,
                       style: TextStyle(
                         color: p.fg,
                         fontWeight: FontWeight.w600,

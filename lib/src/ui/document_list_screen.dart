@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 
 import '../api/client.dart';
 import '../api/utils.dart';
+import '../utils/translate.dart';
 import '../models/doc_type_meta.dart';
 import '../models/document.dart';
 import '../models/link_filter_result.dart';
@@ -354,7 +355,7 @@ class _DocumentListScreenState extends State<DocumentListScreen> {
         actions: [
           PopupMenuButton<String>(
             icon: const Icon(Icons.sort),
-            tooltip: 'Sort',
+            tooltip: tr('Sort'),
             onSelected: (value) {
               setState(() {
                 if (value == _sortField) {
@@ -422,7 +423,7 @@ class _DocumentListScreenState extends State<DocumentListScreen> {
                     child: TextField(
                       controller: _searchController,
                       decoration: InputDecoration(
-                        hintText: 'Search...',
+                        hintText: tr('Search...'),
                         prefixIcon: const Icon(Icons.search),
                         border: OutlineInputBorder(
                           borderRadius: BorderRadius.circular(8),
@@ -458,10 +459,10 @@ class _DocumentListScreenState extends State<DocumentListScreen> {
         children: [
           const Icon(Icons.inbox, size: 64, color: Colors.grey),
           const SizedBox(height: 16),
-          const Text('No documents found'),
+          Text(tr('No documents found')),
           const SizedBox(height: 8),
           Text(
-            'Pull down to refresh or create a new document',
+            tr('Pull down to refresh or create a new document'),
             style: Theme.of(context).textTheme.bodySmall,
             textAlign: TextAlign.center,
           ),
@@ -470,7 +471,7 @@ class _DocumentListScreenState extends State<DocumentListScreen> {
             onPressed: _pullDocuments,
             style: listStyle.primaryButtonStyle,
             icon: const Icon(Icons.refresh),
-            label: const Text('Refresh from Server'),
+            label: Text(tr('Refresh from Server')),
           ),
           if (_canCreate) ...[
             const SizedBox(height: 16),
@@ -478,7 +479,7 @@ class _DocumentListScreenState extends State<DocumentListScreen> {
               onPressed: () => _openForm(null),
               style: listStyle.primaryButtonStyle,
               icon: const Icon(Icons.add),
-              label: const Text('Create New'),
+              label: Text(tr('Create New')),
             ),
           ],
         ],
@@ -504,11 +505,11 @@ class _DocumentListScreenState extends State<DocumentListScreen> {
             itemBuilder: (context, index) {
               final doc = pageList[index];
               final titleText = _docTitle(doc).isEmpty
-                  ? 'Untitled'
+                  ? tr('Untitled')
                   : _docTitle(doc);
               final idText = doc.serverId != null
-                  ? 'ID: ${doc.serverId}'
-                  : 'Local (not synced)';
+                  ? tr('ID: {0}', [doc.serverId!])
+                  : tr('Local (not synced)');
               final hasStatusField = widget.meta.getField('status') != null;
               final statusValue = hasStatusField
                   ? doc.data['status']?.toString()
@@ -586,7 +587,7 @@ class _DocumentListScreenState extends State<DocumentListScreen> {
                   onPressed: _page > 0 ? () => setState(() => _page--) : null,
                 ),
                 Text(
-                  'Page ${_page + 1} of $totalPages',
+                  tr('Page {0} of {1}', [_page + 1, totalPages]),
                   style: Theme.of(context).textTheme.bodySmall,
                 ),
                 IconButton(

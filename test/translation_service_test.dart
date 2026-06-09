@@ -10,12 +10,12 @@ void main() {
     databaseFactory = databaseFactoryFfi;
   });
 
-  TranslationService _service() =>
+  TranslationService makeService() =>
       TranslationService.forTesting()..injectDao(TranslationDao.forTesting());
 
   group('loadFromCache', () {
     test('populates _cache from DAO', () async {
-      final svc = _service();
+      final svc = makeService();
       await svc.dao.bulkUpsert('hi', {'Yes': 'हाँ', 'No': 'नहीं'});
       await svc.loadFromCache('hi');
       expect(svc.translate('Yes'), 'Yes'); // currentLang is 'en', not 'hi' yet
@@ -26,7 +26,7 @@ void main() {
     });
 
     test('no-op when DAO has no rows for lang', () async {
-      final svc = _service();
+      final svc = makeService();
       await svc.loadFromCache('hi');
       svc.setCurrentLangForTesting('hi');
       expect(svc.translate('Yes'), 'Yes'); // falls back to source
@@ -48,7 +48,7 @@ void main() {
 
   group('onChanged stream', () {
     test('emits after loadFromCache when rows present', () async {
-      final svc = _service();
+      final svc = makeService();
       await svc.dao.bulkUpsert('hi', {'Yes': 'हाँ'});
       final events = <void>[];
       svc.onChanged.listen((_) => events.add(null));
@@ -59,7 +59,7 @@ void main() {
     });
 
     test('does not emit after loadFromCache when DAO is empty', () async {
-      final svc = _service();
+      final svc = makeService();
       final events = <void>[];
       svc.onChanged.listen((_) => events.add(null));
       await svc.loadFromCache('hi');
@@ -71,57 +71,66 @@ void main() {
 
   group('setLocale', () {
     test('updates currentLang immediately', () async {
-      final svc = _service();
+      final svc = makeService();
       await svc.setLocale('hi');
       expect(svc.currentLang, 'hi');
-      await Future<void>.delayed(Duration.zero); // drain background refreshAsync
+      await Future<void>.delayed(
+        Duration.zero,
+      ); // drain background refreshAsync
       await svc.dao.close();
     });
 
     test('loads from cache when DB has rows', () async {
-      final svc = _service();
+      final svc = makeService();
       await svc.dao.bulkUpsert('hi', {'Yes': 'हाँ'});
       await svc.setLocale('hi');
       expect(svc.translate('Yes'), 'हाँ');
-      await Future<void>.delayed(Duration.zero); // drain background refreshAsync
+      await Future<void>.delayed(
+        Duration.zero,
+      ); // drain background refreshAsync
       await svc.dao.close();
     });
   });
 
   group('dispose safety', () {
-    test('no StateError when dispose is called before onChanged emits', () async {
-      final svc = _service();
-      await svc.dao.bulkUpsert('hi', {'Yes': 'हाँ'});
+    test(
+      'no StateError when dispose is called before onChanged emits',
+      () async {
+        final svc = makeService();
+        await svc.dao.bulkUpsert('hi', {'Yes': 'हाँ'});
 
-      final errors = <Object>[];
-      await runZonedGuarded(
-        () async {
+        final errors = <Object>[];
+        await runZonedGuarded(() async {
           // loadFromCache awaits the DAO, then emits onChanged — the guard
           // must prevent a StateError if the controller is already closed.
           await svc.loadFromCache('hi');
           await svc.dispose(); // closes the StreamController
           // Give the event loop a turn; no emission should follow dispose.
           await Future<void>.delayed(const Duration(milliseconds: 10));
-        },
-        (e, _) => errors.add(e),
-      );
+        }, (e, _) => errors.add(e));
 
-      expect(errors, isEmpty,
-          reason: 'No StateError or other error should be thrown after dispose');
-    });
+        expect(
+          errors,
+          isEmpty,
+          reason: 'No StateError or other error should be thrown after dispose',
+        );
+      },
+    );
 
-    test('onChanged stream is closed after dispose and emits no further events',
-        () async {
-      final svc = _service();
-      await svc.dao.bulkUpsert('hi', {'Yes': 'हाँ'});
-      await svc.loadFromCache('hi'); // prime the cache + first emission
-      await svc.dispose();
+    test(
+      'onChanged stream is closed after dispose and emits no further events',
+      () async {
+        final svc = makeService();
+        await svc.dao.bulkUpsert('hi', {'Yes': 'हाँ'});
+        await svc.loadFromCache('hi'); // prime the cache + first emission
+        await svc.dispose();
 
-      var extraEvents = 0;
-      // Listening to a closed broadcast stream is harmless but receives nothing.
-      svc.onChanged.listen((_) => extraEvents++);
-      await Future<void>.delayed(const Duration(milliseconds: 10));
-      expect(extraEvents, 0);
-    });
+        var extraEvents = 0;
+        // Listening to a closed broadcast stream is harmless but receives nothing.
+        svc.onChanged.listen((_) => extraEvents++);
+        await Future<void>.delayed(const Duration(milliseconds: 10));
+        expect(extraEvents, 0);
+      },
+    );
   });
 }

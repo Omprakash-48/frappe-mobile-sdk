@@ -93,10 +93,7 @@ void main() {
 
     test('layout fieldtypes are never indexed', () {
       final meta = metaWith(
-        fields: [
-          field('break1', 'Section Break'),
-          field('useful', 'Link'),
-        ],
+        fields: [field('break1', 'Section Break'), field('useful', 'Link')],
       );
       final cols = chooseIndexes(meta, maxIndexes: 5);
       expect(cols, isNot(contains('break1')));

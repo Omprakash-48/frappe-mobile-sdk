@@ -44,19 +44,13 @@ void main() {
   });
 
   test('setDepGraphJson + getDepGraphJson', () async {
-    await db.insert('doctype_meta', {
-      'doctype': 'X',
-      'metaJson': '{}',
-    });
+    await db.insert('doctype_meta', {'doctype': 'X', 'metaJson': '{}'});
     await dao.setDepGraphJson('X', '{"nodes":[]}');
     expect(await dao.getDepGraphJson('X'), '{"nodes":[]}');
   });
 
   test('setLastOkCursor + getLastOkCursor', () async {
-    await db.insert('doctype_meta', {
-      'doctype': 'X',
-      'metaJson': '{}',
-    });
+    await db.insert('doctype_meta', {'doctype': 'X', 'metaJson': '{}'});
     await dao.setLastOkCursor(
       'X',
       '{"modified":"2026-01-01 00:00:00","name":"A"}',
@@ -68,10 +62,7 @@ void main() {
   });
 
   test('markEntryPoint sets is_entry_point=1', () async {
-    await db.insert('doctype_meta', {
-      'doctype': 'X',
-      'metaJson': '{}',
-    });
+    await db.insert('doctype_meta', {'doctype': 'X', 'metaJson': '{}'});
     await dao.markEntryPoint('X', true);
     final rows = await db.query(
       'doctype_meta',
@@ -82,19 +73,13 @@ void main() {
   });
 
   test('setMetaWatermark + getMetaWatermark', () async {
-    await db.insert('doctype_meta', {
-      'doctype': 'X',
-      'metaJson': '{}',
-    });
+    await db.insert('doctype_meta', {'doctype': 'X', 'metaJson': '{}'});
     await dao.setMetaWatermark('X', '2026-04-25 12:00:00');
     expect(await dao.getMetaWatermark('X'), '2026-04-25 12:00:00');
   });
 
   test('markChildTable sets is_child_table=1', () async {
-    await db.insert('doctype_meta', {
-      'doctype': 'X',
-      'metaJson': '{}',
-    });
+    await db.insert('doctype_meta', {'doctype': 'X', 'metaJson': '{}'});
     await dao.markChildTable('X', true);
     final rows = await db.query(
       'doctype_meta',

@@ -25,6 +25,7 @@ class TextFieldWidget extends BaseField {
       name: field.fieldname ?? '',
       initialValue: value?.toString() ?? field.defaultValue ?? '',
       enabled: enabled && !field.readOnly,
+      inputFormatters: style?.inputFormatters,
       decoration: baseFieldDecoration(field, style: style),
       maxLines: maxLines,
       maxLength: (field.length != null && field.length! > 0)

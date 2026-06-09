@@ -43,27 +43,23 @@ class PhoneField extends BaseField {
   /// without the country code. Returns '' for an empty / code-only value.
   static String numberFromStored(String? stored) {
     if (stored == null || stored.isEmpty) return '';
+    if (stored.startsWith(_defaultDialCode)) {
+      return stored
+          .substring(_defaultDialCode.length)
+          .replaceAll(RegExp(r'[^\d]'), '');
+    }
     final digits = _digitsOnly(stored);
     const codeDigits = '91';
     if (digits == codeDigits || digits.isEmpty) return '';
-    // A stored value is country-code + 10 digits = 12 digits. Only strip the
-    // leading 91 when the length indicates a code prefix; a bare 10-digit
-    // number that happens to start with 91 (e.g. 9112345678) is left intact.
     if (digits.length > 10 && digits.startsWith(codeDigits)) {
       return digits.substring(codeDigits.length);
     }
     return digits;
   }
 
-  /// Build the stored value: `+91` + 10 number digits.
-  ///
-  /// **Idempotent** (defense-in-depth): applying it to an already-stored value
-  /// returns the same value rather than re-prefixing, so an accidental echo can
-  /// never compound the country code.
+  /// Build the stored value: 10 number digits.
   static String toStored(String numberDigits) {
-    final number = numberFromStored(numberDigits);
-    if (number.isEmpty) return '';
-    return '$_defaultDialCode$number';
+    return numberFromStored(numberDigits);
   }
 
   String? _validate(dynamic stored) {

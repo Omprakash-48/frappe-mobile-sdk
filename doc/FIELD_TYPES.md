@@ -57,7 +57,21 @@ Table MultiSelect fields.
 - Option loading is the caller's responsibility; the widget is purely
   presentational
 
+### Picker Modes (Inline vs Dialog)
+
+By default, the SDK renders the search interface inline. This behavior can be controlled using the `linkFieldPickerMode` property on `FrappeFormStyle`:
+
+- **Inline Mode** (`LinkFieldPickerMode.inline`):
+  - Renders a dropdown suggestion list directly beneath the input field as the user types.
+  - Good for quick, simple selections.
+- **Dialog Mode** (`LinkFieldPickerMode.dialog`):
+  - Tapping the field opens a modal popup (`SearchableSelectDialog`).
+  - Contains a dedicated search input.
+  - Displays choices in a list. For single-select, selecting an option automatically commits it and dismisses the dialog. For multi-select, it displays checkboxes alongside options and requires tapping "Done" to commit.
+  - Useful when options need more screen space or for cleaner form presentation.
+
 ### Usage
+
 
 SearchableSelect is not typically used directly by app code. It is used
 internally by `LinkField` and `TableMultiSelectFieldBase`. If you need a

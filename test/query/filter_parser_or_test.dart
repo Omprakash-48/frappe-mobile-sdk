@@ -7,10 +7,7 @@ DocField f(String n, String t) =>
     DocField(fieldname: n, fieldtype: t, label: n);
 
 void main() {
-  final meta = DocTypeMeta(
-    name: 'X',
-    fields: [f('a', 'Data'), f('b', 'Data')],
-  );
+  final meta = DocTypeMeta(name: 'X', fields: [f('a', 'Data'), f('b', 'Data')]);
 
   test('AND + OR combined', () {
     final pq = FilterParser.toSql(

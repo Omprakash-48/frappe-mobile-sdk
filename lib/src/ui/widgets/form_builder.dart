@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_form_builder/flutter_form_builder.dart';
 import '../../models/doc_type_meta.dart';
 import '../../models/doc_field.dart';
@@ -14,6 +15,8 @@ import '../../utils/field_normalizer.dart';
 import 'fields/field_factory.dart';
 import 'fields/base_field.dart';
 import 'default_form_style.dart';
+
+export 'fields/link_field_picker_mode.dart';
 
 /// Simple 2-arg callback for Button field. Used by [FrappeFormBuilder] and [renderForm].
 typedef ButtonPressedCallback =
@@ -125,6 +128,11 @@ class FrappeFormStyle {
   /// Optional section card color.
   final Color? sectionCardColor;
 
+  /// Custom input formatters builder for text fields
+  final List<TextInputFormatter>? Function(DocField field)? inputFormatters;
+
+  final LinkFieldPickerMode linkFieldPickerMode;
+
   const FrappeFormStyle({
     this.fieldDecoration,
     this.labelStyle,
@@ -140,6 +148,8 @@ class FrappeFormStyle {
     this.showFieldLabel = true,
     this.showFieldDescription = true,
     this.sectionCardColor,
+    this.inputFormatters,
+    this.linkFieldPickerMode = LinkFieldPickerMode.inline,
   });
 }
 
@@ -650,6 +660,8 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
       translate: widget.translate,
       showLabel: formStyle.showFieldLabel,
       showDescription: formStyle.showFieldDescription,
+      inputFormatters: formStyle.inputFormatters?.call(field),
+      linkFieldPickerMode: formStyle.linkFieldPickerMode,
     );
 
     final fieldWithEffectiveProps = DocField(
@@ -1088,7 +1100,10 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
   @override
   void didUpdateWidget(FrappeFormBuilder oldWidget) {
     super.didUpdateWidget(oldWidget);
-    final initialDataChanged = !mapEquals(oldWidget.initialData, widget.initialData);
+    final initialDataChanged = !mapEquals(
+      oldWidget.initialData,
+      widget.initialData,
+    );
     final metaChanged = oldWidget.meta.name != widget.meta.name;
     if (initialDataChanged || metaChanged) {
       _progressSubscription?.cancel();
@@ -1153,11 +1168,13 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
     final isValid = state.saveAndValidate();
     if (!isValid) {
       // Switch to tab containing the first invalid field so user sees the error.
+      String? firstInvalidField;
       for (final field in widget.meta.fields) {
         final name = field.fieldname;
         if (name == null || name.isEmpty) continue;
         final fieldState = state.fields[name];
         if (fieldState != null && fieldState.hasError) {
+          firstInvalidField = name;
           final tabIndex = _fieldTabIndex[name];
           if (tabIndex != null && _tabs.length > 1) {
             setState(() {
@@ -1167,6 +1184,38 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
           break;
         }
       }
+
+      // Smooth scroll to the first invalid field element
+      if (firstInvalidField != null) {
+        Future.delayed(const Duration(milliseconds: 150), () {
+          if (!mounted) return;
+          Element? errorElement;
+          void findErrorRecursive(Element element) {
+            if (errorElement != null) return;
+            final state = element is StatefulElement ? element.state : null;
+            if (state is FormFieldState && state.hasError) {
+              errorElement = element;
+              return;
+            }
+            element.visitChildren(findErrorRecursive);
+          }
+
+          context.visitChildElements(findErrorRecursive);
+
+          if (errorElement != null) {
+            final renderObject = errorElement!.renderObject;
+            if (renderObject != null && renderObject.attached) {
+              Scrollable.ensureVisible(
+                errorElement!,
+                duration: const Duration(milliseconds: 400),
+                curve: Curves.easeInOutCubic,
+                alignment: 0.2, // 20% offset from top
+              );
+            }
+          }
+        });
+      }
+
       widget.onValidationFailed?.call();
       return;
     }

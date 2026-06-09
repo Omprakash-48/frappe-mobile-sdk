@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_form_builder/flutter_form_builder.dart';
+import '../../../utils/translate.dart';
 import 'base_field.dart';
 import 'field_helpers.dart';
 
@@ -17,7 +18,11 @@ class SelectField extends BaseField {
   /// Raw (untranslated) option keys — used as stored document values.
   List<String> _getRawOptions() {
     if (field.options == null || field.options!.isEmpty) return [];
-    return field.options!.split('\n').map((e) => e.trim()).where((e) => e.isNotEmpty).toList();
+    return field.options!
+        .split('\n')
+        .map((e) => e.trim())
+        .where((e) => e.isNotEmpty)
+        .toList();
   }
 
   /// Translated display labels — used only for rendering.
@@ -59,7 +64,7 @@ class SelectField extends BaseField {
         decoration:
             style?.decoration ??
             InputDecoration(
-              hintText: 'No options available',
+              hintText: tr('No options available'),
               border: const OutlineInputBorder(),
               filled: true,
               fillColor: Colors.grey[200],
@@ -93,7 +98,8 @@ class SelectField extends BaseField {
         decoration:
             style?.decoration ??
             InputDecoration(
-              labelText: field.placeholder ?? 'Select ${field.displayLabel}',
+              labelText:
+                  field.placeholder ?? tr('Select {0}', [field.displayLabel]),
               border: const OutlineInputBorder(),
               filled: field.readOnly,
               fillColor: field.readOnly ? Colors.grey[200] : null,
@@ -141,7 +147,8 @@ class SelectField extends BaseField {
       decoration:
           style?.decoration ??
           InputDecoration(
-            hintText: field.placeholder ?? 'Select ${field.displayLabel}',
+            hintText:
+                field.placeholder ?? tr('Select {0}', [field.displayLabel]),
             border: const OutlineInputBorder(),
             filled: field.readOnly,
             fillColor: field.readOnly ? Colors.grey[200] : null,

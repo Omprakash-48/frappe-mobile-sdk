@@ -210,7 +210,8 @@ class FrappeSDK {
     );
     _permissionService = PermissionService(_client!, _database!);
     final translationDao = TranslationDao.forTesting();
-    _translationService = TranslationService(_client!)..injectDao(translationDao);
+    _translationService = TranslationService(_client!)
+      ..injectDao(translationDao);
     _syncService = SyncService(
       _client!,
       _repository!,
@@ -317,7 +318,8 @@ class FrappeSDK {
     );
     _permissionService = PermissionService(_client!, _database!);
     final translationDao = TranslationDao();
-    _translationService = TranslationService(_client!)..injectDao(translationDao);
+    _translationService = TranslationService(_client!)
+      ..injectDao(translationDao);
     // Build the sync engine pack (PushEngine + PullEngine + SyncController +
     // shared SyncStateNotifier + two ConcurrencyPools). PushEngine becomes
     // the production push driver. SyncService below holds a closure that

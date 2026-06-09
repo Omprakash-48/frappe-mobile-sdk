@@ -1,5 +1,10 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import '../../../models/doc_field.dart';
+import '../../../utils/translate.dart';
+import 'link_field_picker_mode.dart';
+
+export 'link_field_picker_mode.dart';
 
 /// Customization options for field styling
 class FieldStyle {
@@ -16,6 +21,11 @@ class FieldStyle {
   /// When false, hides the external description rendered below the field widget.
   final bool showDescription;
 
+  /// Keystroke-level input formatters for text inputs
+  final List<TextInputFormatter>? inputFormatters;
+
+  final LinkFieldPickerMode linkFieldPickerMode;
+
   const FieldStyle({
     this.labelStyle,
     this.descriptionStyle,
@@ -28,6 +38,8 @@ class FieldStyle {
     // so this default only affects external consumers.
     this.showLabel = true,
     this.showDescription = true,
+    this.inputFormatters,
+    this.linkFieldPickerMode = LinkFieldPickerMode.inline,
   });
 }
 
@@ -119,7 +131,7 @@ abstract class BaseField extends StatelessWidget {
       final label = style?.translate != null
           ? style!.translate!(field.displayLabel)
           : field.displayLabel;
-      return '$label is required';
+      return tr('{0} is required', [label]);
     }
     return null;
   }

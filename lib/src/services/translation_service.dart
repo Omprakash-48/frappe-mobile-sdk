@@ -8,6 +8,9 @@ class TranslationService {
 
   TranslationDao? _dao;
 
+  /// Optional external delegate to intercept/override translations (e.g. static host app ARB strings).
+  String Function(String source, [List<Object>? args])? translateDelegate;
+
   /// In-memory cache: lang -> (source -> translated)
   final Map<String, Map<String, String>> _cache = {};
 
@@ -60,12 +63,16 @@ class TranslationService {
   }
 
   Future<void> _doRefresh(String lang) async {
-    final map = await loadTranslations(lang); // fetches + populates _cache[lang]
+    final map = await loadTranslations(
+      lang,
+    ); // fetches + populates _cache[lang]
     if (map.isEmpty) return;
     try {
       await _dao?.bulkUpsert(lang, map);
     } catch (e, st) {
-      debugPrint('TranslationService._doRefresh($lang) persist failed — $e\n$st');
+      debugPrint(
+        'TranslationService._doRefresh($lang) persist failed — $e\n$st',
+      );
     }
     if (!_changedController.isClosed) _changedController.add(null);
   }
@@ -115,6 +122,17 @@ class TranslationService {
   /// Returns [source] unchanged if no translation is found.
   String translate(String source, [List<Object>? args]) {
     if (source.isEmpty) return source;
+    if (translateDelegate != null) {
+      final ext = translateDelegate!(source, args);
+      if (ext != source) {
+        return ext;
+      }
+    }
+    return translateLocal(source, args);
+  }
+
+  /// Looks up translation locally in SQLite cache / in-memory cache.
+  String translateLocal(String source, [List<Object>? args]) {
     final map = _cache[_currentLang];
     String text = (map != null ? map[source] : null) ?? source;
     if (args != null && args.isNotEmpty) {

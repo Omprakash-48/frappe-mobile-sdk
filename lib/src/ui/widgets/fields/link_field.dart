@@ -103,20 +103,35 @@ class LinkField extends BaseField {
     if (field.options != null &&
         field.options!.isNotEmpty &&
         effectiveService != null) {
-      return _LinkFieldDropdown(
-        field: field,
-        value: value,
-        onChanged: onChanged,
-        enabled: enabled,
-        linkOptionService: effectiveService,
-        linkFieldCoordinator: linkFieldCoordinator,
-        linkedDoctype: field.options!,
-        linkFilters: field.linkFilters,
-        formData: formData ?? {},
-        parentFormData: parentFormData,
-        getLinkFilterBuilder: getLinkFilterBuilder,
-        style: style,
-        onIsLocalChanged: onIsLocalChanged,
+      return FormBuilderField<String>(
+        key: ValueKey('linkfield_${field.fieldname}'),
+        name: field.fieldname ?? '',
+        initialValue: value?.toString() ?? field.defaultValue?.toString(),
+        enabled: enabled && !field.readOnly,
+        validator: field.reqd
+            ? (val) => requiredValidator(val, field.displayLabel)
+            : null,
+        builder: (state) {
+          return _LinkFieldDropdown(
+            field: field,
+            value: state.value,
+            onChanged: (val) {
+              state.didChange(val);
+              onChanged?.call(val);
+            },
+            enabled: enabled && !field.readOnly,
+            linkOptionService: effectiveService,
+            linkFieldCoordinator: linkFieldCoordinator,
+            linkedDoctype: field.options!,
+            linkFilters: field.linkFilters,
+            formData: formData ?? {},
+            parentFormData: parentFormData,
+            getLinkFilterBuilder: getLinkFilterBuilder,
+            style: style,
+            onIsLocalChanged: onIsLocalChanged,
+            errorText: state.errorText,
+          );
+        },
       );
     }
 
@@ -157,6 +172,7 @@ class _LinkFieldDropdown extends StatefulWidget {
   getLinkFilterBuilder;
   final FieldStyle? style;
   final ValueChanged<bool>? onIsLocalChanged;
+  final String? errorText;
 
   const _LinkFieldDropdown({
     required this.field,
@@ -172,6 +188,7 @@ class _LinkFieldDropdown extends StatefulWidget {
     this.getLinkFilterBuilder,
     this.style,
     this.onIsLocalChanged,
+    this.errorText,
   });
 
   @override
@@ -391,17 +408,17 @@ class _LinkFieldDropdownState extends State<_LinkFieldDropdown> {
     if (_isLoading) {
       final loadingValue = widget.value?.toString();
       final hasValue = loadingValue != null && loadingValue.isNotEmpty;
-      return FormBuilderDropdown<String>(
+      return DropdownButtonFormField<String>(
         key: ValueKey('${widget.field.fieldname}_loading'),
-        name: widget.field.fieldname ?? '',
         initialValue: hasValue ? loadingValue : null,
-        enabled: false,
+        onChanged: null,
         decoration:
-            widget.style?.decoration ??
-            const InputDecoration(
+            widget.style?.decoration?.copyWith(errorText: widget.errorText) ??
+            InputDecoration(
               hintText: 'Loading...',
-              border: OutlineInputBorder(),
-              suffixIcon: SizedBox(
+              errorText: widget.errorText,
+              border: const OutlineInputBorder(),
+              suffixIcon: const SizedBox(
                 width: 20,
                 height: 20,
                 child: CircularProgressIndicator(strokeWidth: 2),
@@ -437,15 +454,17 @@ class _LinkFieldDropdownState extends State<_LinkFieldDropdown> {
       final hint = isWaiting
           ? 'Select $_dependentFieldName first'
           : 'No options available';
-      return FormBuilderDropdown<String>(
+      return DropdownButtonFormField<String>(
         key: ValueKey('${widget.field.fieldname}_empty_$isWaiting'),
-        name: widget.field.fieldname ?? '',
         initialValue: null,
-        enabled: !isWaiting && (widget.enabled && !widget.field.readOnly),
+        onChanged: (!isWaiting && widget.enabled && !widget.field.readOnly)
+            ? (v) => widget.onChanged?.call(v)
+            : null,
         decoration:
-            widget.style?.decoration ??
+            widget.style?.decoration?.copyWith(errorText: widget.errorText) ??
             InputDecoration(
               hintText: hint,
+              errorText: widget.errorText,
               border: const OutlineInputBorder(),
               suffixIcon: isWaiting
                   ? null
@@ -461,7 +480,6 @@ class _LinkFieldDropdownState extends State<_LinkFieldDropdown> {
             child: Text(hint, style: TextStyle(color: Colors.grey[600])),
           ),
         ],
-        onChanged: isWaiting ? null : (v) => widget.onChanged?.call(v),
       );
     }
 
@@ -489,6 +507,9 @@ class _LinkFieldDropdownState extends State<_LinkFieldDropdown> {
       hintText:
           widget.field.placeholder ?? 'Search ${widget.field.displayLabel}...',
       labelText: widget.style?.decoration?.labelText,
+      errorText: widget.errorText,
+      pickerMode:
+          widget.style?.linkFieldPickerMode ?? LinkFieldPickerMode.inline,
       onChanged: (values) {
         final picked = values.isEmpty ? null : values.first;
         widget.onChanged?.call(picked);
