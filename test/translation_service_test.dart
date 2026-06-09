@@ -11,7 +11,7 @@ void main() {
   });
 
   TranslationService _service() =>
-      TranslationService(null as dynamic)..injectDao(TranslationDao.forTesting());
+      TranslationService.forTesting()..injectDao(TranslationDao.forTesting());
 
   group('loadFromCache', () {
     test('populates _cache from DAO', () async {
@@ -36,12 +36,12 @@ void main() {
 
   group('translate fallback', () {
     test('returns source key when no translation found', () {
-      final svc = TranslationService(null as dynamic);
+      final svc = TranslationService.forTesting();
       expect(svc.translate('Unknown Key'), 'Unknown Key');
     });
 
     test('returns empty string for empty source', () {
-      final svc = TranslationService(null as dynamic);
+      final svc = TranslationService.forTesting();
       expect(svc.translate(''), '');
     });
   });
@@ -74,6 +74,7 @@ void main() {
       final svc = _service();
       await svc.setLocale('hi');
       expect(svc.currentLang, 'hi');
+      await Future<void>.delayed(Duration.zero); // drain background refreshAsync
       await svc.dao.close();
     });
 
@@ -82,6 +83,7 @@ void main() {
       await svc.dao.bulkUpsert('hi', {'Yes': 'हाँ'});
       await svc.setLocale('hi');
       expect(svc.translate('Yes'), 'हाँ');
+      await Future<void>.delayed(Duration.zero); // drain background refreshAsync
       await svc.dao.close();
     });
   });

@@ -21,6 +21,10 @@ class TranslationService {
 
   TranslationService(this._client);
 
+  /// Use in tests only — creates service without HTTP client.
+  @visibleForTesting
+  factory TranslationService.forTesting() => TranslationService(null);
+
   /// Inject the persistence DAO. Called once by FrappeSDK after DB init.
   void injectDao(TranslationDao dao) => _dao = dao;
 
