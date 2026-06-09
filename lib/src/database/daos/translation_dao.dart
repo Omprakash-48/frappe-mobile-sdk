@@ -26,6 +26,7 @@ class TranslationDao {
     _db = await openDatabase(
       path,
       version: 1,
+      singleInstance: false,
       onCreate: (db, _) async {
         await db.execute('''
           CREATE TABLE IF NOT EXISTS $_tableName (
