@@ -99,7 +99,7 @@ void main() {
   });
 
   test(
-    'setLocale updates currentLang and triggers a load on first use',
+    'setLocale updates currentLang and triggers a background refresh',
     () async {
       final calls = <Map<String, dynamic>>[];
       final client = FrappeClient(
@@ -109,14 +109,21 @@ void main() {
         }, sentSink: calls),
       );
       final svc = TranslationService(client);
+      // refreshAsync is fire-and-forget; wait for onChanged to confirm
+      // the background refresh completed and the cache was populated.
+      final loaded = svc.onChanged.first;
       await svc.setLocale('my');
+      await loaded.timeout(const Duration(seconds: 2));
       expect(svc.currentLang, 'my');
       expect(calls, hasLength(1));
-      expect(calls.single['url'], contains('lang=my'));
+      expect(calls.first['url'], contains('lang=my'));
 
-      // Second setLocale to the same lang should hit cache, no extra request.
+      // Second setLocale triggers another background refresh (unconditional),
+      // even for a cached lang — each call keeps the cache fresh.
+      final reloaded = svc.onChanged.first;
       await svc.setLocale('my');
-      expect(calls, hasLength(1));
+      await reloaded.timeout(const Duration(seconds: 2));
+      expect(calls, hasLength(2));
     },
   );
 
