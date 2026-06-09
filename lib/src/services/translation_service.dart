@@ -127,4 +127,11 @@ class TranslationService {
 
   /// Alias for [translate] (Frappe-style `__`).
   String call(String source, [List<Object>? args]) => translate(source, args);
+
+  /// Closes the SQLite cache and the change stream.
+  /// Called by [FrappeSDK.dispose].
+  Future<void> dispose() async {
+    await _dao?.close();
+    await _changedController.close();
+  }
 }

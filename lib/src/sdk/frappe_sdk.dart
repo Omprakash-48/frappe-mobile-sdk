@@ -1432,6 +1432,7 @@ class FrappeSDK {
     await _connectivityWatcher?.dispose();
     await _sessionUserService?.dispose();
     await _offlineTransitionService?.dispose();
+    await _translationService?.dispose();
 
     // ① Drain in-flight pull BEFORE closing the notifier it writes to.
     // _pendingDrain may hold a PullEngine.run() still calling
