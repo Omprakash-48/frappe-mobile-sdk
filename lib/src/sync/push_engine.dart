@@ -24,6 +24,7 @@ import 'sync_state_notifier.dart';
 import 'tier_computer.dart';
 import 'three_way_merge.dart';
 import 'uuid_rewriter.dart';
+import '../utils/sdk_log.dart';
 import '../utils/uuid_pattern.dart';
 
 /// Sends a push request. [method] is one of POST / PUT / SUBMIT / CANCEL /
@@ -197,10 +198,10 @@ class PushEngine {
     await outboxDao.resetInFlightToPending();
 
     // Supersede pass — for any (doctype, mobile_uuid, operation) tuple
-    // with both a `failed` row AND a newer `pending` row, delete the
-    // older failed row directly. Keeps the outbox a true pending-work-
-    // only table (Invariant 2) and avoids a redundant retry that the
-    // newer pending row already covers.
+    // with both a `failed` or `paused` row AND a newer `pending` row,
+    // delete the older failed/paused row directly. Keeps the outbox a
+    // true pending-work-only table (Invariant 2) and avoids a redundant
+    // retry that the newer pending row already covers.
     await db.execute('''
         DELETE FROM outbox
          WHERE id IN (
@@ -210,7 +211,7 @@ class PushEngine {
                ON older.doctype     = newer.doctype
               AND older.mobile_uuid = newer.mobile_uuid
               AND older.operation   = newer.operation
-              AND older.state       = '${OutboxState.failed.wireName}'
+              AND older.state       IN ('${OutboxState.failed.wireName}', '${OutboxState.paused.wireName}')
               AND newer.state       = '${OutboxState.pending.wireName}'
               AND older.created_at  < newer.created_at
          )
@@ -427,8 +428,7 @@ class PushEngine {
       try {
         payload = transformer(row.doctype, payload, meta);
       } catch (e, st) {
-        // ignore: avoid_print
-        print('PushEngine._dispatchOnce: payloadTransformer threw — $e\n$st');
+        sdkLog('PushEngine._dispatchOnce: payloadTransformer threw — $e\n$st');
         // Fall through with un-transformed payload — never block the push.
       }
     }

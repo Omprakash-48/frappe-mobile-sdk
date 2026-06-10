@@ -7,6 +7,7 @@ import '../database/normalize_for_search.dart';
 import '../database/schema/system_columns.dart';
 import '../database/table_name.dart';
 import '../models/doc_type_meta.dart';
+import '../utils/sdk_log.dart';
 import 'child_table_info.dart';
 
 /// Frappe returns `modified` as `"YYYY-MM-DD HH:MM:SS.ffffff"` with no
@@ -95,6 +96,7 @@ class PullApply {
     required String parentTable,
     required Map<String, PullApplyChildInfo> childMetasByFieldname,
     required List<Map<String, dynamic>> rows,
+    bool isInitialSync = false,
   }) async {
     await db.transaction((txn) async {
       await applyPageInTxn(
@@ -103,6 +105,7 @@ class PullApply {
         parentTable: parentTable,
         childMetasByFieldname: childMetasByFieldname,
         rows: rows,
+        isInitialSync: isInitialSync,
       );
     });
   }
@@ -116,9 +119,49 @@ class PullApply {
     required String parentTable,
     required Map<String, PullApplyChildInfo> childMetasByFieldname,
     required List<Map<String, dynamic>> rows,
+    bool isInitialSync = false,
   }) async {
     final uuidGen = const Uuid();
     final parentNormFields = parentMeta.normFieldNames;
+
+    if (isInitialSync) {
+      sdkLog(
+        'PullApply.applyPageInTxn: Bulk insert of ${rows.length} rows into $parentTable',
+      );
+      await _applyPageInTxnBulk(
+        txn: txn,
+        parentMeta: parentMeta,
+        parentTable: parentTable,
+        childMetasByFieldname: childMetasByFieldname,
+        rows: rows,
+        uuidGen: uuidGen,
+        parentNormFields: parentNormFields,
+      );
+    } else {
+      sdkLog(
+        'PullApply.applyPageInTxn: Sequential write of ${rows.length} rows into $parentTable',
+      );
+      await _applyPageInTxnSequential(
+        txn: txn,
+        parentMeta: parentMeta,
+        parentTable: parentTable,
+        childMetasByFieldname: childMetasByFieldname,
+        rows: rows,
+        uuidGen: uuidGen,
+        parentNormFields: parentNormFields,
+      );
+    }
+  }
+
+  static Future<void> _applyPageInTxnSequential({
+    required Transaction txn,
+    required DocTypeMeta parentMeta,
+    required String parentTable,
+    required Map<String, PullApplyChildInfo> childMetasByFieldname,
+    required List<Map<String, dynamic>> rows,
+    required Uuid uuidGen,
+    required Set<String> parentNormFields,
+  }) async {
 
     for (final r in rows) {
       final serverName = r['name'] as String?;
@@ -169,8 +212,28 @@ class PullApply {
       final localServerName = existing.isEmpty
           ? null
           : existing.first['server_name'] as String?;
-      final isOwnInsertRoundtrip =
+      bool isOwnInsertRoundtrip =
           matchedByUuid && (localServerName == null || localServerName.isEmpty);
+      if (isOwnInsertRoundtrip && existing.isNotEmpty) {
+        // Confirm no owed outbox work — if there is, local edits may have
+        // diverged (e.g. a ghost-success push left server_name NULL while
+        // the user made further edits). Overwriting here would cause data
+        // loss. Check for any non-done, non-in_flight outbox rows.
+        final mobileUuid =
+            existing.first['mobile_uuid'] as String? ?? '';
+        if (mobileUuid.isNotEmpty) {
+          final pendingWork = await txn.rawQuery(
+            "SELECT id FROM outbox WHERE mobile_uuid = ? "
+            "AND state NOT IN ('done','in_flight') LIMIT 1",
+            [mobileUuid],
+          );
+          if (pendingWork.isNotEmpty) {
+            // Local work still owed; don't overwrite. Stamp server_name and
+            // let the conflict guard below decide.
+            isOwnInsertRoundtrip = false;
+          }
+        }
+      }
       if (existing.isNotEmpty &&
           !isOwnInsertRoundtrip &&
           _locallyDirtyStatuses.contains(existing.first['sync_status'])) {
@@ -332,5 +395,137 @@ class PullApply {
         }
       }
     }
+  }
+
+  static Future<void> _applyPageInTxnBulk({
+    required Transaction txn,
+    required DocTypeMeta parentMeta,
+    required String parentTable,
+    required Map<String, PullApplyChildInfo> childMetasByFieldname,
+    required List<Map<String, dynamic>> rows,
+    required Uuid uuidGen,
+    required Set<String> parentNormFields,
+  }) async {
+    final serverNames = rows
+        .map((r) => r['name'] as String?)
+        .where((n) => n != null && n.isNotEmpty)
+        .cast<String>()
+        .toList();
+
+    if (serverNames.isEmpty) return;
+
+    // Fetch existing UUIDs for mid-sync resumes where rows might already exist.
+    final existingUuids = <String, String>{};
+    const chunkSize = 500;
+    for (var i = 0; i < serverNames.length; i += chunkSize) {
+      final chunk = serverNames.sublist(
+        i,
+        i + chunkSize > serverNames.length ? serverNames.length : i + chunkSize,
+      );
+      final placeholders = List.filled(chunk.length, '?').join(',');
+      final res = await txn.query(
+        parentTable,
+        columns: ['server_name', 'mobile_uuid'],
+        where: 'server_name IN ($placeholders)',
+        whereArgs: chunk,
+      );
+      for (final row in res) {
+        final sn = row['server_name'] as String?;
+        final mu = row['mobile_uuid'] as String?;
+        if (sn != null && mu != null) {
+          existingUuids[sn] = mu;
+        }
+      }
+    }
+
+    final batch = txn.batch();
+    final nowMs = DateTime.now().toUtc().millisecondsSinceEpoch;
+
+    for (final r in rows) {
+      final serverName = r['name'] as String?;
+      if (serverName == null || serverName.isEmpty) continue;
+
+      final uuid = existingUuids[serverName] ?? uuidGen.v4();
+
+      final parentRow = <String, Object?>{
+        'mobile_uuid': uuid,
+        'server_name': serverName,
+        'sync_status': 'synced',
+        'docstatus': r['docstatus'] ?? 0,
+        'modified': r['modified'],
+        'local_modified': nowMs,
+        'pulled_at': nowMs,
+      };
+
+      for (final f in parentMeta.fields) {
+        final name = f.fieldname;
+        final type = f.fieldtype;
+        if (name == null) continue;
+        if (type == 'Table' || type == 'Table MultiSelect') continue;
+        if (sqliteColumnTypeFor(type) == null) continue;
+        if (_systemParentColumnNames.contains(name)) continue;
+        final v = r[name];
+        parentRow[name] = v;
+        if (isLinkFieldType(type)) {
+          parentRow['${name}__is_local'] = 0;
+        }
+        if (parentNormFields.contains(name) &&
+            sqliteColumnTypeFor(type) == 'TEXT') {
+          parentRow['${name}__norm'] = normalizeForSearch(v?.toString());
+        }
+      }
+
+      batch.insert(
+        parentTable,
+        parentRow,
+        conflictAlgorithm: ConflictAlgorithm.replace,
+      );
+
+      for (final entry in childMetasByFieldname.entries) {
+        final fieldname = entry.key;
+        final childInfo = entry.value;
+        final childTable = normalizeDoctypeTableName(childInfo.doctype);
+        final list = (r[fieldname] as List?) ?? const [];
+
+        batch.delete(
+          childTable,
+          where: 'parent_uuid = ? AND parentfield = ?',
+          whereArgs: [uuid, fieldname],
+        );
+
+        for (var idx = 0; idx < list.length; idx++) {
+          final cr = Map<String, dynamic>.from(list[idx] as Map);
+          final serverChildName = cr['name'] as String?;
+          final rawChildUuid = cr['mobile_uuid']?.toString();
+          final hasRawUuid = rawChildUuid != null && rawChildUuid.isNotEmpty;
+          final childUuid = hasRawUuid ? rawChildUuid : uuidGen.v4();
+          
+          final childRow = <String, Object?>{
+            'mobile_uuid': childUuid,
+            'server_name': serverChildName,
+            'parent_uuid': uuid,
+            'parent_doctype': parentMeta.name,
+            'parentfield': fieldname,
+            'idx': idx,
+            'modified': cr['modified'] as String?,
+          };
+
+          for (final cf in childInfo.meta.fields) {
+            final cn = cf.fieldname;
+            final ct = cf.fieldtype;
+            if (cn == null) continue;
+            if (sqliteColumnTypeFor(ct) == null) continue;
+            if (_systemChildColumnNames.contains(cn)) continue;
+            childRow[cn] = cr[cn];
+            if (isLinkFieldType(ct)) {
+              childRow['${cn}__is_local'] = 0;
+            }
+          }
+          batch.insert(childTable, childRow);
+        }
+      }
+    }
+    
+    await batch.commit(noResult: true);
   }
 }

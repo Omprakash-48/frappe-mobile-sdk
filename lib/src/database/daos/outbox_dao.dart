@@ -37,7 +37,7 @@ final String _collapsableWhereClause =
     'doctype = ? AND mobile_uuid = ? AND $_collapsableStateInClause';
 
 /// Builds the whereArgs list to go with [_collapsableWhereClause]:
-/// `[doctype, mobileUuid, pending, failed, blocked, conflict]`.
+/// `[doctype, mobileUuid, pending, failed, blocked, conflict, paused]`.
 List<Object?> _collapsableWhereArgs(String doctype, String mobileUuid) =>
     <Object?>[doctype, mobileUuid, ..._collapsableStateWireNames];
 
@@ -67,9 +67,9 @@ class OutboxDao {
   /// Records a save against the outbox.
   ///
   /// Only collapses against rows in `pending`, `failed`, `blocked`,
-  /// `conflict` (the "collapsable" buckets). `in_flight` and `done` are
-  /// never touched — a save during an in-flight push always inserts a
-  /// fresh follow-up row.
+  /// `conflict`, `paused` (the "collapsable" buckets). `in_flight` and
+  /// `done` are never touched — a save during an in-flight push always
+  /// inserts a fresh follow-up row.
   Future<RecordSaveResult> recordSave({
     required String doctype,
     required String mobileUuid,
@@ -150,6 +150,23 @@ class OutboxDao {
     );
     if (existingInsert.isNotEmpty) {
       await resetToPending(existingInsert['id'] as int);
+      // Delete any redundant collapsable INSERT rows (e.g. a paused row
+      // that co-exists with the pending one after the supersede pass
+      // didn't clean it up). Without this, two pending INSERTs can pile
+      // up for the same document.
+      await _db.delete(
+        'outbox',
+        where:
+            'doctype = ? AND mobile_uuid = ? AND operation = ? AND id != ? '
+            'AND $_collapsableStateInClause',
+        whereArgs: [
+          doctype,
+          mobileUuid,
+          'INSERT',
+          existingInsert['id'],
+          ..._collapsableStateWireNames,
+        ],
+      );
       return RecordSaveResult.enqueued;
     }
     final existingUpdate = existing.firstWhere(
@@ -158,6 +175,20 @@ class OutboxDao {
     );
     if (existingUpdate.isNotEmpty) {
       await resetToPending(existingUpdate['id'] as int);
+      // Delete any redundant collapsable UPDATE rows for the same tuple.
+      await _db.delete(
+        'outbox',
+        where:
+            'doctype = ? AND mobile_uuid = ? AND operation = ? AND id != ? '
+            'AND $_collapsableStateInClause',
+        whereArgs: [
+          doctype,
+          mobileUuid,
+          'UPDATE',
+          existingUpdate['id'],
+          ..._collapsableStateWireNames,
+        ],
+      );
       return RecordSaveResult.enqueued;
     }
     await insertPending(

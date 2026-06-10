@@ -279,8 +279,9 @@ class OfflineRepository {
 
   /// Outbox rows for a single document (matched by `mobile_uuid`),
   /// filtered to states the user can act on: `failed`, `blocked`,
-  /// `conflict`. `done`, `pending`, and `inFlight` are intentionally
-  /// excluded — only stuck-and-needs-attention rows reach the UI.
+  /// `conflict`, `paused`. `done`, `pending`, and `inFlight` are
+  /// intentionally excluded — only stuck-and-needs-attention rows reach
+  /// the UI.
   Future<List<OutboxRow>> getSyncErrorsForDoc({
     required String doctype,
     required String mobileUuid,
@@ -293,7 +294,8 @@ class OfflineRepository {
           (r) =>
               r.state == OutboxState.failed ||
               r.state == OutboxState.blocked ||
-              r.state == OutboxState.conflict,
+              r.state == OutboxState.conflict ||
+              r.state == OutboxState.paused,
         )
         .toList();
   }

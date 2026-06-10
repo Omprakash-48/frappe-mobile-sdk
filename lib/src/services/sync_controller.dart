@@ -201,14 +201,18 @@ class SyncController {
   }
 
   /// All outbox rows in any "actionable" terminal state — failed,
-  /// conflict, or blocked. These are the buckets surfaced to the user as
-  /// errors and the rows that [retryAll] re-queues. Shared by `retryAll`
-  /// and `pendingErrors` so the set of "error" states stays uniform.
+  /// conflict, blocked, or paused. These are the buckets surfaced to the
+  /// user as errors. Shared by `retryAll` and `pendingErrors` so the set
+  /// of "error" states stays uniform. Note: `paused` rows are surfaced
+  /// here so they appear in the errors screen and [pendingErrors], but
+  /// [retryAll] explicitly skips them — paused rows re-enter `pending`
+  /// only via a user re-save (recordSave collapse) or explicit retry.
   Future<List<OutboxRow>> _allActionableRows() async {
     return [
       ...await outboxDao.findByState(OutboxState.failed),
       ...await outboxDao.findByState(OutboxState.conflict),
       ...await outboxDao.findByState(OutboxState.blocked),
+      ...await outboxDao.findByState(OutboxState.paused),
     ];
   }
 
@@ -216,12 +220,19 @@ class SyncController {
   /// priority, then run a single push drain. [filterDoctypes] limits
   /// the operation to a doctype subset (used by the per-doctype
   /// `Retry` action in SyncErrorsScreen).
+  ///
+  /// `paused` rows are intentionally excluded: they represent terminal
+  /// server rejections (validation/permission) that cannot succeed on
+  /// an automatic retry. They re-enter `pending` only when the user
+  /// re-saves the corrected record (recordSave collapses them).
   Future<void> retryAll({List<String>? filterDoctypes}) async {
     final all = await _allActionableRows();
     final filtered = filterDoctypes == null
         ? all
         : all.where((r) => filterDoctypes.contains(r.doctype)).toList();
-    final sorted = RetryPriority.sort(filtered);
+    final sorted = RetryPriority.sort(
+      filtered.where((r) => r.state != OutboxState.paused).toList(),
+    );
     for (final r in sorted) {
       await outboxDao.resetToPending(r.id);
     }

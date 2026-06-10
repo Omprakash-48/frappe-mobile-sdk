@@ -46,6 +46,21 @@ void main() {
     )) {
       await db.execute(s);
     }
+    // The outbox table must exist so that the isOwnInsertRoundtrip guard
+    // in PullApply._applyPageInTxnSequential can query it (Issue #4 fix).
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS outbox (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        doctype TEXT NOT NULL,
+        mobile_uuid TEXT NOT NULL,
+        operation TEXT NOT NULL,
+        state TEXT NOT NULL DEFAULT 'pending',
+        error_code TEXT,
+        error_message TEXT,
+        payload TEXT,
+        created_at INTEGER NOT NULL
+      )
+    ''');
   });
 
   tearDown(() async => db.close());
