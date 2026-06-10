@@ -82,6 +82,7 @@ class SyncEngineBuilder {
     SyncStateNotifier? sharedNotifier,
     SchemaReconcilerFn? schemaReconciler,
     PayloadTransformerFn? payloadTransformer,
+    int pullPageSize = 500,
   }) async {
     final notifier = sharedNotifier ?? SyncStateNotifier();
     final tier = await DeviceTier.detect(override: concurrencyOverride);
@@ -240,7 +241,7 @@ class SyncEngineBuilder {
         filters: (params['filters'] as List?)?.cast<List<dynamic>>(),
         fields: (params['fields'] as List?)?.cast<String>(),
         orderBy: params['order_by'] as String?,
-        limitPageLength: params['limit_page_length'] as int? ?? 500,
+        limitPageLength: params['limit_page_length'] as int? ?? pullPageSize,
         limitStart: params['limit_start'] as int? ?? 0,
       );
       return result
@@ -255,7 +256,7 @@ class SyncEngineBuilder {
       outboxDao: outboxDao,
       pool: pullPool,
       fetcher: PullPageFetcher(listHttp: listHttp),
-      pageSize: 500,
+      pageSize: pullPageSize,
       notifier: notifier,
       metaResolver: metaResolver,
       writeQueueResolver: writeQueueResolver,

@@ -168,6 +168,7 @@ class PullEngine {
     final startedAt = DateTime.now().toUtc();
     var pulledCount = 0;
     int? lastPageSize;
+    final bool isInitialSync = !scratch.complete;
 
     notifier.value = notifier.value.updatePerDoctype(
       doctype,
@@ -213,6 +214,7 @@ class PullEngine {
               parentTable: parentTable,
               childMetasByFieldname: childInfo,
               rows: result.rows,
+              isInitialSync: isInitialSync,
             );
           });
         } else {
@@ -222,6 +224,7 @@ class PullEngine {
             parentTable: parentTable,
             childMetasByFieldname: childInfo,
             rows: result.rows,
+            isInitialSync: isInitialSync,
           );
         }
 

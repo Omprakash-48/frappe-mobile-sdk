@@ -6,6 +6,10 @@ import 'package:http/testing.dart';
 import 'package:frappe_mobile_sdk/src/api/client.dart';
 import 'package:frappe_mobile_sdk/src/services/translation_service.dart';
 
+/// Build a MockClient that serves the frappe.client.get_list Translation response.
+/// The [langToTranslations] map is keyed by language code; each value is a
+/// map of source_text → translated_text.  The mock inspects the request URL
+/// to extract the "language" filter value and returns only the matching rows.
 http.Client _scripted(
   Map<String, Map<String, dynamic>> langToTranslations, {
   List<Map<String, dynamic>>? sentSink,
@@ -14,13 +18,31 @@ http.Client _scripted(
   return MockClient((req) async {
     sentSink?.add({'method': req.method, 'url': req.url.toString()});
     if (overrideAll != null) return overrideAll;
-    final body = {
-      'data': {
-        'langs': langToTranslations.keys.toList(),
-        'translations': langToTranslations,
-      },
-    };
-    // Force lang-specific data shape so missing-lang test still returns the full envelope.
+
+    // Extract the requested language from the filters query param.
+    // The URL params are percent-encoded, so decode first.
+    final decodedUrl = Uri.decodeFull(req.url.toString());
+    // Decoded URL contains: filters=[["language","=","<lang>"]]
+    String? requestedLang;
+    final filtersMatch = RegExp(r'"language","=","([^"]+)"').firstMatch(
+      decodedUrl,
+    );
+    if (filtersMatch != null) {
+      requestedLang = filtersMatch.group(1);
+    }
+
+    final translations = requestedLang != null
+        ? (langToTranslations[requestedLang] ?? {})
+        : <String, dynamic>{};
+
+    final rows = translations.entries
+        .map((e) => {
+              'source_text': e.key,
+              'translated_text': e.value?.toString() ?? '',
+            })
+        .toList();
+
+    final body = {'data': rows};
     return http.Response(jsonEncode(body), 200);
   });
 }
@@ -116,7 +138,7 @@ void main() {
       await loaded.timeout(const Duration(seconds: 2));
       expect(svc.currentLang, 'my');
       expect(calls, hasLength(1));
-      expect(calls.first['url'], contains('lang=my'));
+      expect(calls.first['url'], contains('language'));
 
       // Second setLocale triggers another background refresh (unconditional),
       // even for a cached lang — each call keeps the cache fresh.

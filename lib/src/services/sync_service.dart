@@ -60,6 +60,8 @@ class SyncService {
   /// (`pull_engine.dart:133`). Null in tests / when unwired → no defer.
   final Future<bool> Function(String doctype)? _hasActivePush;
 
+  final int pageSize;
+
   SyncService(
     this._client,
     this._repository,
@@ -72,6 +74,7 @@ class SyncService {
     OfflineModeNotifier? offlineModeNotifier,
     Future<void> Function()? pushRunner,
     Future<bool> Function(String doctype)? hasActivePush,
+    this.pageSize = 1000,
   }) : _getMobileUuid = getMobileUuid,
        _modeNotifier = offlineModeNotifier ?? OfflineModeNotifier(offlineMode),
        _pushRunner = pushRunner,
@@ -459,8 +462,7 @@ class SyncService {
     // Paginate via `limit_start` until the server returns a short page
     // (fewer rows than requested). Without this, doctypes with > 1000
     // rows (Village, Hamlet, etc.) silently truncate at the first page.
-    // Page size is the API cap, not a UX choice.
-    const int pageSize = 1000;
+    // Page size is configured via SDK initialization.
     // Stable order is required for the cursor to be valid: the server
     // must return the unprocessed suffix in the same order on every
     // call. `name asc` breaks ties when multiple rows share `modified`.
