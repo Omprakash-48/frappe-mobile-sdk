@@ -80,6 +80,19 @@ Major release: offline-first foundation, server-driven offline-mode toggle, and 
 - `LinkFieldPickerMode` enum (`inline` and `dialog` modes) to support alternative full-modal lookup dialogs for Link and Table MultiSelect fields, configurable globally via `FrappeFormStyle`.
 - `SearchableSelectDialog` widget rendering a modal dialog with a dedicated search filter, checkboxes for multi-select, and checkmarks for single-select.
 
+**Translation pipeline (PR #76)**
+
+- `TranslationDao` — standalone KV SQLite store (`translations_cache.db`, schema: `(lang, src, tgt)`) for offline translation persistence. Fully independent of `AppDatabase`; can be wiped without a migration. Methods: `bulkUpsert`, `readAll`, `deleteAll`, `close`. `TranslationDao.forTesting()` opens an in-memory DB.
+- `TranslationService` — offline-capable translation service with `loadFromCache` (SQLite, <5 ms), `refreshAsync` / `refreshAllAsync` (fire-and-forget network), `translateDelegate` hook for host-app ARB priority lookup, `onChanged` broadcast stream, `clearAll`, and `dispose()`.
+- `TranslationService.fetchEnabledLanguages()` — queries `frappe.client.get_list` on the `Language` doctype to discover all enabled language codes.
+- `TranslationService.refreshAllAsync()` — calls `fetchEnabledLanguages()` then `_doRefresh(lang)` for every enabled language; fires once per login. Ensures the offline cache covers all languages the deployment supports.
+- `TranslationService.clearAll()` — clears in-memory cache, resets `_currentLang = 'en'`, and calls `TranslationDao.deleteAll()`. Wires into `FrappeSDK.logout(clearDatabase: true)`.
+- `FrappeTranslations` static registry + `sdkTr()` top-level helper — exported from `frappe_mobile_sdk.dart`. Host apps call `FrappeTranslations.setDelegate(sdk.translations.translate)` once (e.g. in a Riverpod listener) to route `sdkTr()` through the live `TranslationService`.
+- `TranslationService.translateDelegate` — nullable `String Function(String, [List<Object>?])?` field on `TranslationService`. When set, the delegate is called first; if it returns a value different from the source, that value is used (ARB wins). Otherwise falls through to `translateLocal` (SQLite). Lets host apps inject their compiled ARB lookup without the SDK knowing about Flutter's localization layer.
+- `doc/TRANSLATIONS.md` — consumer guide covering architecture, `sdkTr` usage, host app integration, ARB lookup, SQLite fallback, locale lifecycle, reactive rebuild path, dispose safety, and why `sdkTr` not `tr`.
+- `doc/PHONE-FIELD.md` — documents the PhoneField storage contract, `toStored`/`numberFromStored` invariants, the echo-guard that prevents OOM, regression history, and integration checklist.
+- `doc/OUTBOX-STATE-MACHINE.md` — documents all 7 outbox states, state transitions, supersede pass logic, `isOwnInsertRoundtrip` ghost-success data-loss scenario and fix, `recordSave` duplicate-INSERT prevention, and error-surfacing invariants.
+
 ### Changed
 
 - **Single read path.** All list reads route through `UnifiedResolver`. DB-first with background refresh on connectivity; Link decoration via `LinkDecorator`.
@@ -121,6 +134,32 @@ Major release: offline-first foundation, server-driven offline-mode toggle, and 
 - `SyncController.pause()` / `resume()` — `syncNow` now checks the `isPaused` flag before running.
 - `BaseField` — wrap field labels in `Expanded` and use `CrossAxisAlignment.start` to prevent horizontal `RenderFlex` overflows when field labels contain long text (Issue #52).
 - `FrappeFormBuilder` — replace `SingleTickerProviderStateMixin` with `TickerProviderStateMixin` to prevent "Multiple Tickers" crashes, and utilize `mapEquals` deep comparison for `initialData` in `didUpdateWidget` to avoid unnecessary controller teardowns and state resets (Issue #72).
+
+**Translation pipeline (feat/sdk-offline-phase2 — PR #76)**
+
+- `TranslationService.loadTranslations` — migrated from `mobile_auth.get_translations` to `frappe.client.get_list` on the standard `Translation` doctype. No custom backend method required; works with any Frappe installation.
+- `TranslationService.refreshAllAsync` — fires once per login to pull translations for **all** enabled languages, not just the current user's language. Ensures the offline SQLite cache is fully populated for every language the deployment supports, so offline sessions have no missing translations regardless of locale.
+- `TranslationService.clearAll` (+ `TranslationDao.deleteAll`) — called from `FrappeSDK.logout(clearDatabase: true)`. Wipes `translations_cache.db` on logout so a different user logging into the same device never sees stale translations.
+- `TranslationService._disposed` flag — guards `loadFromCache` and `_doRefresh` against writing to a closed `StreamController` or DAO when `dispose()` fires during an in-flight network call.
+- `TranslationDao._openFuture` memoization — prevents a TOCTOU double-open if two concurrent callers hit `_open()` before the first `openDatabase` resolves.
+- `sdkTr` global helper — renamed from `tr` to avoid naming collisions with `easy_localization` and GetX in host apps. Host apps should define a local `tr(String s) => FrappeTranslations.translate(s);` wrapper instead of importing `sdkTr` directly.
+
+**Outbox state machine (feat/sdk-offline-phase2 — PR #76)**
+
+- `PushEngine._drainOnce` supersede pass — extended to include `paused` rows alongside `failed`. A stale paused row from a prior terminal rejection is now cleaned up when a newer `pending` row covers the same `(doctype, mobile_uuid, operation)` tuple, preventing phantom errors in the UI.
+- `SyncController._allActionableRows` + `OfflineRepository.getSyncErrorsForDoc` — `paused` rows are now included in all error-surfacing queries. They appear in SyncErrorsScreen, document badges, and the per-document form banner. `retryAll` still excludes `paused` (bulk-re-queuing a terminal rejection is incorrect; re-save is the resume path).
+- `OutboxDao.recordSave` — when a paused + pending INSERT pair co-existed for the same document, `firstWhere` reset one row and returned, leaving the second row alive. Both rows then dispatched, producing two INSERTs for the same document. Fixed by deleting all remaining collapsable same-operation rows after resetting the survivor.
+- `PullApply.isOwnInsertRoundtrip` — when a ghost-success INSERT left `server_name NULL` and the user re-edited before write-back, the dirty-conflict guard was bypassed and local edits were silently overwritten on the next pull (data loss). Fixed by checking the outbox for any non-done, non-in_flight rows for the matched `mobile_uuid` before accepting the round-trip flag; if owed work exists, the flag is cleared and the normal conflict guard runs.
+
+**PhoneField (feat/sdk-offline-phase2 — PR #76)**
+
+- `PhoneField.toStored` — regression introduced in `0a33fbe` called `numberFromStored()` (the inverse operation — strips `+91`) instead of prepending the dial code. Every phone entered or edited on device was stored as bare digits with no country code. Fixed by reverting to the correct form: `return '$_defaultDialCode$digits'`. Test expectations restored to `+919876543210`. The echo-guard invariant (`numberFromStored(toStored(digits)) == digits`) is unaffected — no OOM regression.
+
+**Misc (feat/sdk-offline-phase2 — PR #76)**
+
+- `FrappeAppGuard.allowDeferringUpdates` — default was `false` but documented as `true`. The deferrable-update branch in `_checkAppStatus` never assigned `deferrableUpdate = true` because the `else` branch was missing. Both defects fixed.
+- `debugPrint` → `sdkLog` migration completed across `translation_service.dart`, `doctype_service.dart`, `login_screen.dart`, `sync_status_screen.dart`, `form_screen.dart`, `document_list_screen.dart`, and `app_guard.dart`. `sdkLog` is a no-op in release builds; `debugPrint` was not.
+- `doc/FIELD_TYPES.md` — `SearchableSelect` / `SearchableSelectDialog` usage examples marked as internal (not exported from the barrel).
 
 ### Notes for upgraders
 

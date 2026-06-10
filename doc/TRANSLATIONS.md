@@ -11,8 +11,8 @@ The translation pipeline has two complementary layers:
 ```
 SDK screens / fields / validators
          │
-         ▼  tr('Save')
-  FrappeTranslations.translate(source)           ← global helper (lib/src/utils/translate.dart)
+         ▼  sdkTr('Save')
+  FrappeTranslations.translate(source)           ← static registry (lib/src/utils/translate.dart)
          │
          ▼  delegates to
   TranslationService.translate(source)           ← owned by FrappeSDK
@@ -26,24 +26,24 @@ SDK screens / fields / validators
 
 **Priority order (highest to lowest):**
 1. Host app ARB lookup (compiled, type-safe, always current)
-2. SQLite translation cache (`translations_cache.db`, populated from `mobile_auth.get_translations`)
+2. SQLite translation cache (`translations_cache.db`, populated from `frappe.client.get_list` on the `Translation` doctype)
 3. Source string as-is (English fallback, never null)
 
 ---
 
-## SDK-side: the `tr` helper
+## SDK-side: the `sdkTr` helper
 
-Every user-visible string in SDK screens, fields, and validators calls the top-level `tr` function:
+Every user-visible string in SDK screens, fields, and validators calls the top-level `sdkTr` function (renamed from `tr` in commit `0dfe1e1` to avoid naming collisions with `easy_localization`/GetX in host apps):
 
 ```dart
 import 'package:frappe_mobile_sdk/frappe_mobile_sdk.dart';
 
-// In a widget build method:
-Text(tr('Save'))
-Text(tr('{0} records found', [count]))
+// Within an SDK widget build method:
+Text(sdkTr('Save'))
+Text(sdkTr('{0} records found', [count]))
 ```
 
-`tr` is exported from `frappe_mobile_sdk.dart` and resolves via `FrappeTranslations`, a thin static registry:
+`sdkTr` is exported from `frappe_mobile_sdk.dart` and resolves via `FrappeTranslations`, a thin static registry:
 
 ```dart
 // lib/src/utils/translate.dart (SDK)
@@ -52,11 +52,54 @@ class FrappeTranslations {
   static String translate(String source, [List<Object>? args]) { ... }
 }
 
+String sdkTr(String source, [List<Object>? args]) =>
+    FrappeTranslations.translate(source, args);
+```
+
+Until the host app wires a delegate, `sdkTr` performs simple positional `{0}` / `{1}` substitution and returns the source string unchanged — no crashes, no null returns.
+
+**Host apps that previously imported `tr` from the SDK barrel** should define their own wrapper instead of importing `sdkTr`:
+
+```dart
+// lib/core/sdk/translation_provider.dart (host app)
 String tr(String source, [List<Object>? args]) =>
     FrappeTranslations.translate(source, args);
 ```
 
-Until the host app wires a delegate, `tr` performs simple positional `{0}` / `{1}` substitution and returns the source string unchanged — no crashes, no null returns.
+This avoids renaming hundreds of call sites and decouples the host app from the SDK's internal naming.
+
+---
+
+## Translation API
+
+Translations are fetched using the standard `frappe.client.get_list` API on the `Translation` doctype (replaced `mobile_auth.get_translations` in commit `b5ac45c`):
+
+```
+GET /api/v2/method/frappe.client.get_list
+    ?doctype=Translation
+    &fields=["source_text","translated_text"]
+    &filters=[["language","=","hi"]]
+    &limit_page_length=0
+```
+
+Response format:
+```json
+{
+  "data": [
+    { "source_text": "Save", "translated_text": "सहेजें" },
+    { "source_text": "Delete", "translated_text": "हटाएं" }
+  ]
+}
+```
+
+Enabled languages are discovered via:
+```
+GET /api/v2/method/frappe.client.get_list
+    ?doctype=Language
+    &fields=["name"]
+    &filters=[["enabled","=","1"]]
+    &limit_page_length=0
+```
 
 ---
 
@@ -64,14 +107,14 @@ Until the host app wires a delegate, `tr` performs simple positional `{0}` / `{1
 
 ### 1. Wire the delegate (Riverpod)
 
-In the `translationListenerProvider` (called once from `ChetnaApp`):
+In the `translationListenerProvider` (called once from inside `sdkInit.when(data:...)` in `ChetnaApp`):
 
 ```dart
 // lib/core/sdk/translation_provider.dart
 final translationListenerProvider = Provider<void>((ref) {
   final sdk = ref.watch(sdkProvider);
 
-  // Wire global tr() helper to the initialized TranslationService
+  // Wire global sdkTr() helper to the initialized TranslationService
   FrappeTranslations.setDelegate(sdk.translations.translate);
 
   // Inject ARB lookup: host app strings take priority over SQLite cache
@@ -97,8 +140,6 @@ final translationListenerProvider = Provider<void>((ref) {
 });
 ```
 
-`_currentLocalizations` is a file-level variable (`AppLocalizations? _currentLocalizations`) that caches the most recently loaded locale. Because ARB loading is asynchronous but `translate` must be synchronous, the cache is refreshed on each locale change and the Riverpod tick triggers a full rebuild so widgets re-render with the new strings.
-
 ### 2. The ARB lookup extension
 
 Flutter's generated `AppLocalizations` exposes only named getters (`l10n.save`, `l10n.login`). To look up by a string key at runtime, the project generates a switch-case extension:
@@ -111,15 +152,12 @@ This scans `lib/l10n/app_en.arb` and emits `lib/l10n/app_localizations_lookup.da
 
 ### 3. Adding SDK strings to ARB
 
-Every string called via `tr(...)` in the SDK that should be translated must have an entry in `app_en.arb` (and its `app_hi.arb` / `app_gu.arb` counterparts):
+Every string called via `sdkTr(...)` in the SDK that should be translated must have an entry in `app_en.arb` (and its `app_hi.arb` / `app_gu.arb` counterparts):
 
 ```json
-// lib/l10n/app_en.arb
 {
   "saveLabel": "Save",
-  "@saveLabel": { "description": "Form save button label" },
-  "savingEllipsis": "Saving...",
-  "@savingEllipsis": {}
+  "@saveLabel": { "description": "Form save button label" }
 }
 ```
 
@@ -129,17 +167,17 @@ The ARB key must match the switch-case in the generated lookup. Keys are camelCa
 
 ## SQLite translation cache
 
-Independent of the ARB pipeline, `TranslationService` also maintains a SQLite KV cache (`translations_cache.db`) populated from the Frappe backend API (`mobile_auth.get_translations`). This covers dynamic doctype field labels and select option values that do not exist in ARB files.
+`TranslationService` maintains a standalone SQLite KV store (`translations_cache.db`) at `TranslationDao`. It is completely separate from the main `AppDatabase` and can be wiped freely.
 
 | Source | What it covers | When loaded |
-|---|---|---|
+|--------|---------------|-------------|
 | ARB files | Fixed UI strings (buttons, headers, validators) | Compile-time, instant |
-| SQLite cache | Dynamic field labels, select options from doctype meta | Startup (SQLite, <5 ms) + background refresh after login |
+| SQLite cache | Dynamic field labels, select options from Frappe doctype meta | Startup (<5 ms) + background refresh after login |
 
-The `translate` method checks the `translateDelegate` (ARB) first; if the result equals the source, it falls through to `translateLocal` (SQLite). This means:
+The `translate` method checks `translateDelegate` (ARB) first; if the result equals the source, it falls through to `translateLocal` (SQLite). This means:
 
-- UI strings that exist in ARB: always resolved correctly, even offline, even before API login
-- Doctype field labels that exist only in the Frappe DB: resolved from SQLite cache on restart, refreshed from API in background
+- UI strings in ARB: always resolved correctly, even offline, even before API login.
+- Doctype field labels that exist only in Frappe DB: resolved from SQLite cache on restart, refreshed from API in background.
 
 ---
 
@@ -151,7 +189,15 @@ app launch
        ├─ sdk.initialize()
        └─ sdk.translations.setLocale(storedLang)   ← SharedPreferences 'user_locale'
             ├─ loadFromCache(lang)                  ← SQLite, <5 ms
-            └─ refreshAsync(lang)                   ← background network fetch
+            └─ refreshAsync(lang)                   ← background refresh for this language
+
+login()
+  └─ _translationService?.setLocale(lang)           ← language from login response
+       ├─ loadFromCache(lang)
+       └─ refreshAsync(lang)                        ← background refresh for user's language
+  └─ _translationService?.refreshAllAsync()         ← NEW: pulls ALL enabled languages
+       └─ fetchEnabledLanguages() → [hi, gu, ...]
+            └─ for each lang: _doRefresh(lang)      ← fire-and-forget per language
 
 ChetnaApp renders (sdkInit.when data:)
   └─ translationListenerProvider watched
@@ -169,9 +215,17 @@ user changes locale in Settings
 
 background refresh completes (~200 ms after login)
   └─ onChanged emits → tick++ → translationFnProvider invalidates → form rebuilds
+
+logout()
+  └─ _translationService?.clearAll()               ← NEW: clears SQLite + in-memory cache
+       └─ TranslationDao.deleteAll()               ← wipes translations_cache.db
 ```
 
 **First-frame guarantee:** On every launch after the first, the SQLite cache is pre-warmed before the form screen mounts. The user's language is correct from frame 1 — no flash of English.
+
+**Offline-first guarantee:** After the first successful login (while online), `refreshAllAsync` populates the cache for all enabled languages. Subsequent offline sessions have a fully populated SQLite cache regardless of which user logs in and which language they select.
+
+**Session isolation:** `clearAll()` is called on logout, wiping translations from `translations_cache.db`. This prevents a different user (on a shared device) from seeing another user's cached translations on their next login.
 
 ---
 
@@ -195,11 +249,20 @@ FormScreen(
 
 ---
 
+## Dispose safety
+
+`TranslationService` holds a `StreamController` and a `TranslationDao` handle. Both are closed in `dispose()`, which is called from `FrappeSDK.dispose()`. `refreshAllAsync` and `_doRefresh` are fire-and-forget — they can still be running when `dispose()` fires. Two guards prevent stale writes after disposal:
+
+1. `_disposed` flag — checked at the start of `loadFromCache` and after every `await` in `_doRefresh`. Any code that runs after the flag is set returns immediately without writing.
+2. `_changedController.isClosed` check — guards the `add(null)` call even if `_disposed` was briefly missed.
+
+---
+
 ## Adding a new translatable string
 
 **Fixed UI string (button, label, error message):**
 
-1. Call `tr('My string')` at the use site in the SDK widget.
+1. Call `sdkTr('My string')` at the use site in the SDK widget.
 2. Add to `lib/l10n/app_en.arb`:
    ```json
    "myStringKey": "My string",
@@ -211,7 +274,7 @@ FormScreen(
 
 **Dynamic field label (from Frappe doctype meta):**
 
-No action needed — these flow through `TranslationService.translateLocal` via the SQLite cache, which is populated automatically from `mobile_auth.get_translations` on login.
+No action needed — these flow through `TranslationService.translateLocal` via the SQLite cache, which is populated automatically from `frappe.client.get_list` on the `Translation` doctype after login.
 
 ---
 
@@ -236,6 +299,8 @@ When writing SDK widget tests that involve translated strings, either:
 
 ---
 
-## Why `tr` and not `__`
+## Why `sdkTr` and not `tr`
 
-In Dart, any identifier beginning with `_` is library-private. A top-level function named `__` defined in `translate.dart` cannot be accessed from other files or from the host app, even if re-exported in the barrel file. `tr` starts with a public character and resolves normally across all library boundaries.
+In host apps that use `easy_localization` or GetX, both packages export a top-level `tr()` function. Importing `frappe_mobile_sdk` alongside either package would produce an ambiguous-name compile error. `sdkTr` starts with a distinctive prefix that never conflicts with third-party localization helpers.
+
+Host apps that want a short `tr(...)` call site should define their own wrapper (e.g. in `translation_provider.dart`) that delegates to `FrappeTranslations.translate`. This keeps call sites idiomatic and independent of the SDK's naming choices.
