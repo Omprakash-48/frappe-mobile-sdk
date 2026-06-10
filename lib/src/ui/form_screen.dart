@@ -325,7 +325,7 @@ class _FormScreenState extends State<FormScreen> with WidgetsBindingObserver {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
-            content: Text(tr('Retry failed: {0}', [toUserFriendlyMessage(e)])),
+            content: Text(sdkTr('Retry failed: {0}', [toUserFriendlyMessage(e)])),
             backgroundColor: Colors.red,
           ),
         );
@@ -360,7 +360,7 @@ class _FormScreenState extends State<FormScreen> with WidgetsBindingObserver {
     final stuck = _syncErrorRows.isNotEmpty;
     showStatusSnackBar(
       context,
-      stuck ? tr('Push completed with errors') : tr('Pushed'),
+      stuck ? sdkTr('Push completed with errors') : sdkTr('Pushed'),
       severity: stuck ? SnackBarSeverity.warning : SnackBarSeverity.success,
       duration: const Duration(seconds: 2),
     );
@@ -385,7 +385,7 @@ class _FormScreenState extends State<FormScreen> with WidgetsBindingObserver {
         });
       }
     } catch (e, st) {
-      debugPrint('FormScreen._loadWorkflowTransitions failed — $e\n$st');
+      sdkLog('FormScreen._loadWorkflowTransitions failed — $e\n$st');
       if (mounted) {
         setState(() {
           _workflowTransitions = [];
@@ -423,7 +423,7 @@ class _FormScreenState extends State<FormScreen> with WidgetsBindingObserver {
         }
       }
     } catch (e, st) {
-      debugPrint('FormScreen._applyWorkflowAction($action) failed — $e\n$st');
+      sdkLog('FormScreen._applyWorkflowAction($action) failed — $e\n$st');
       if (mounted) {
         showStatusSnackBar(
           context,
@@ -474,7 +474,7 @@ class _FormScreenState extends State<FormScreen> with WidgetsBindingObserver {
                         ? widget.translate!(
                             'No workflow actions available for this state.',
                           )
-                        : tr('No workflow actions available for this state.'),
+                        : sdkTr('No workflow actions available for this state.'),
                     style: Theme.of(context).textTheme.bodyMedium,
                   ),
                 )
@@ -504,7 +504,7 @@ class _FormScreenState extends State<FormScreen> with WidgetsBindingObserver {
       if (mounted) {
         showStatusSnackBar(
           context,
-          tr(
+          sdkTr(
             '{0}: Action not configured for mobile. This button may use client-side logic only available on web.',
             [field.displayLabel],
           ),
@@ -518,7 +518,7 @@ class _FormScreenState extends State<FormScreen> with WidgetsBindingObserver {
       if (mounted) {
         showStatusSnackBar(
           context,
-          tr('Action unavailable offline'),
+          sdkTr('Action unavailable offline'),
           severity: SnackBarSeverity.warning,
         );
       }
@@ -530,12 +530,12 @@ class _FormScreenState extends State<FormScreen> with WidgetsBindingObserver {
       if (mounted) {
         showStatusSnackBar(
           context,
-          tr('Action completed'),
+          sdkTr('Action completed'),
           severity: SnackBarSeverity.success,
         );
       }
     } catch (e, st) {
-      debugPrint('FormScreen.action($method) failed — $e\n$st');
+      sdkLog('FormScreen.action($method) failed — $e\n$st');
       if (mounted) {
         showStatusSnackBar(
           context,
@@ -638,7 +638,7 @@ class _FormScreenState extends State<FormScreen> with WidgetsBindingObserver {
       try {
         serverReachable = await widget.syncService!.isOnline();
       } catch (e, st) {
-        debugPrint('FormScreen.save: isOnline check failed — $e\n$st');
+        sdkLog('FormScreen.save: isOnline check failed — $e\n$st');
         serverReachable = false;
       }
     }
@@ -762,7 +762,7 @@ class _FormScreenState extends State<FormScreen> with WidgetsBindingObserver {
           _isFormDirty.value = false;
           showStatusSnackBar(
             context,
-            tr('Saved successfully'),
+            sdkTr('Saved successfully'),
             severity: SnackBarSeverity.success,
           );
           widget.onSaveSuccess?.call();
@@ -803,13 +803,13 @@ class _FormScreenState extends State<FormScreen> with WidgetsBindingObserver {
         _isFormDirty.value = false;
         showStatusSnackBar(
           context,
-          tr('Document saved successfully'),
+          sdkTr('Document saved successfully'),
           severity: SnackBarSeverity.success,
         );
         widget.onSaveSuccess?.call();
       }
     } catch (e, st) {
-      debugPrint('FormScreen.save (server-first/offline) failed — $e\n$st');
+      sdkLog('FormScreen.save (server-first/offline) failed — $e\n$st');
       if (mounted) {
         setState(() {
           _errorMessage = e is FrappeException
@@ -830,9 +830,9 @@ class _FormScreenState extends State<FormScreen> with WidgetsBindingObserver {
 
     final confirmed = await showConfirmDialog(
       context,
-      title: tr('Delete Document'),
-      content: tr('Are you sure you want to delete this document?'),
-      confirmLabel: tr('Delete'),
+      title: sdkTr('Delete Document'),
+      content: sdkTr('Are you sure you want to delete this document?'),
+      confirmLabel: sdkTr('Delete'),
       confirmColor: Colors.red,
     );
 
@@ -865,14 +865,14 @@ class _FormScreenState extends State<FormScreen> with WidgetsBindingObserver {
       if (mounted) {
         showStatusSnackBar(
           context,
-          tr('Document deleted'),
+          sdkTr('Document deleted'),
           severity: SnackBarSeverity.warning,
         );
         Navigator.pop(context);
         widget.onSaveSuccess?.call();
       }
     } catch (e, st) {
-      debugPrint('FormScreen.delete failed — $e\n$st');
+      sdkLog('FormScreen.delete failed — $e\n$st');
       if (mounted) {
         setState(() {
           _errorMessage = e is FrappeException
@@ -932,7 +932,7 @@ class _FormScreenState extends State<FormScreen> with WidgetsBindingObserver {
                         child: CircularProgressIndicator(strokeWidth: 2),
                       )
                     : const Icon(Icons.save),
-                label: Text(tr('Save')),
+                label: Text(sdkTr('Save')),
               );
             },
           ),
@@ -953,7 +953,7 @@ class _FormScreenState extends State<FormScreen> with WidgetsBindingObserver {
                         )
                       : const Icon(Icons.cloud_upload),
                   onPressed: syncing || _isSaving ? null : _handlePushRecord,
-                  tooltip: tr('Push to server'),
+                  tooltip: sdkTr('Push to server'),
                 );
               },
             ),
@@ -964,7 +964,7 @@ class _FormScreenState extends State<FormScreen> with WidgetsBindingObserver {
                 color: widget.screenStyle?.deleteIconColor,
               ),
               onPressed: _isSaving ? null : _handleDelete,
-              tooltip: tr('Delete'),
+              tooltip: sdkTr('Delete'),
             ),
         ],
       ),
@@ -1057,7 +1057,7 @@ class _FormScreenState extends State<FormScreen> with WidgetsBindingObserver {
                             ),
                             const SizedBox(height: 16),
                             Text(
-                              tr('Saving...'),
+                              sdkTr('Saving...'),
                               style: Theme.of(context).textTheme.titleMedium,
                             ),
                           ],

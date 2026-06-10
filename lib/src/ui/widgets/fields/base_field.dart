@@ -131,7 +131,7 @@ abstract class BaseField extends StatelessWidget {
       final label = style?.translate != null
           ? style!.translate!(field.displayLabel)
           : field.displayLabel;
-      return tr('{0} is required', [label]);
+      return sdkTr('{0} is required', [label]);
     }
     return null;
   }

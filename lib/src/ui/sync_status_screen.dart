@@ -3,6 +3,7 @@ import '../services/sync_service.dart';
 import '../services/offline_repository.dart';
 import '../models/document.dart';
 import 'widgets/screen_helpers.dart';
+import '../utils/sdk_log.dart';
 import '../utils/translate.dart';
 
 /// Screen to display sync status and errors
@@ -45,9 +46,9 @@ class _SyncStatusScreenState extends State<SyncStatusScreen> {
         _isLoading = false;
       });
     } catch (e, st) {
-      debugPrint('SyncStatusScreen._loadDirtyDocuments failed — $e\n$st');
+      sdkLog('SyncStatusScreen._loadDirtyDocuments failed — $e\n$st');
       setState(() {
-        _syncStatus = tr('Error loading documents: {0}', [e]);
+        _syncStatus = sdkTr('Error loading documents: {0}', [e]);
         _isLoading = false;
       });
     }
@@ -58,14 +59,14 @@ class _SyncStatusScreenState extends State<SyncStatusScreen> {
 
     setState(() {
       _isSyncing = true;
-      _syncStatus = tr('Syncing...');
+      _syncStatus = sdkTr('Syncing...');
     });
 
     try {
       final result = await widget.syncService.pushSync();
 
       setState(() {
-        _syncStatus = tr('Sync completed: {0} succeeded, {1} failed', [
+        _syncStatus = sdkTr('Sync completed: {0} succeeded, {1} failed', [
           result.success,
           result.failed,
         ]);
@@ -83,21 +84,21 @@ class _SyncStatusScreenState extends State<SyncStatusScreen> {
       } else if (result.success > 0 && mounted) {
         showStatusSnackBar(
           context,
-          tr('Successfully synced {0} document(s)', [result.success]),
+          sdkTr('Successfully synced {0} document(s)', [result.success]),
           severity: SnackBarSeverity.success,
         );
       }
     } catch (e, st) {
-      debugPrint('SyncStatusScreen._syncAll failed — $e\n$st');
+      sdkLog('SyncStatusScreen._syncAll failed — $e\n$st');
       setState(() {
-        _syncStatus = tr('Sync failed: {0}', [e]);
+        _syncStatus = sdkTr('Sync failed: {0}', [e]);
         _isSyncing = false;
       });
 
       if (mounted) {
         showStatusSnackBar(
           context,
-          tr('Sync error: {0}', [e]),
+          sdkTr('Sync error: {0}', [e]),
           severity: SnackBarSeverity.error,
         );
       }
@@ -109,14 +110,14 @@ class _SyncStatusScreenState extends State<SyncStatusScreen> {
 
     setState(() {
       _isSyncing = true;
-      _syncStatus = tr('Syncing {0}...', [doctype]);
+      _syncStatus = sdkTr('Syncing {0}...', [doctype]);
     });
 
     try {
       final result = await widget.syncService.pushSync(doctype: doctype);
 
       setState(() {
-        _syncStatus = tr('Sync completed: {0} succeeded, {1} failed', [
+        _syncStatus = sdkTr('Sync completed: {0} succeeded, {1} failed', [
           result.success,
           result.failed,
         ]);
@@ -134,21 +135,21 @@ class _SyncStatusScreenState extends State<SyncStatusScreen> {
       } else if (result.success > 0 && mounted) {
         showStatusSnackBar(
           context,
-          tr('Successfully synced {0} document(s)', [result.success]),
+          sdkTr('Successfully synced {0} document(s)', [result.success]),
           severity: SnackBarSeverity.success,
         );
       }
     } catch (e, st) {
-      debugPrint('SyncStatusScreen._syncDoctype failed — $e\n$st');
+      sdkLog('SyncStatusScreen._syncDoctype failed — $e\n$st');
       setState(() {
-        _syncStatus = tr('Sync failed: {0}', [e]);
+        _syncStatus = sdkTr('Sync failed: {0}', [e]);
         _isSyncing = false;
       });
 
       if (mounted) {
         showStatusSnackBar(
           context,
-          tr('Sync error: {0}', [e]),
+          sdkTr('Sync error: {0}', [e]),
           severity: SnackBarSeverity.error,
         );
       }
@@ -163,7 +164,7 @@ class _SyncStatusScreenState extends State<SyncStatusScreen> {
           children: [
             const Icon(Icons.error, color: Colors.red),
             const SizedBox(width: 8),
-            Text(tr('Sync Errors')),
+            Text(sdkTr('Sync Errors')),
           ],
         ),
         content: SizedBox(
@@ -179,7 +180,7 @@ class _SyncStatusScreenState extends State<SyncStatusScreen> {
                 child: ListTile(
                   leading: const Icon(Icons.error_outline, color: Colors.red),
                   title: Text(
-                    tr('{0}: {1}', [
+                    sdkTr('{0}: {1}', [
                       error.operation.toUpperCase(),
                       error.doctype,
                     ]),
@@ -188,14 +189,14 @@ class _SyncStatusScreenState extends State<SyncStatusScreen> {
                   subtitle: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      Text(tr('Document: {0}', [error.documentId])),
+                      Text(sdkTr('Document: {0}', [error.documentId])),
                       const SizedBox(height: 4),
                       Text(
                         error.errorMessage,
                         style: TextStyle(fontSize: 12, color: Colors.red[700]),
                       ),
                       Text(
-                        tr('Time: {0}', [
+                        sdkTr('Time: {0}', [
                           error.timestamp.toString().substring(0, 19),
                         ]),
                         style: TextStyle(fontSize: 10, color: Colors.grey[600]),
@@ -211,7 +212,7 @@ class _SyncStatusScreenState extends State<SyncStatusScreen> {
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(context),
-            child: Text(tr('Close')),
+            child: Text(sdkTr('Close')),
           ),
         ],
       ),
@@ -222,7 +223,7 @@ class _SyncStatusScreenState extends State<SyncStatusScreen> {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: Text(tr('Sync Status')),
+        title: Text(sdkTr('Sync Status')),
         actions: [
           refreshOrSpinnerAction(
             isBusy: _isSyncing,
@@ -268,7 +269,7 @@ class _SyncStatusScreenState extends State<SyncStatusScreen> {
               child: ElevatedButton.icon(
                 onPressed: _isSyncing ? null : _syncAll,
                 icon: const Icon(Icons.cloud_upload),
-                label: Text(tr('Sync All Documents')),
+                label: Text(sdkTr('Sync All Documents')),
                 style: ElevatedButton.styleFrom(
                   padding: const EdgeInsets.symmetric(vertical: 16),
                 ),
@@ -295,7 +296,7 @@ class _SyncStatusScreenState extends State<SyncStatusScreen> {
                         ),
                         const SizedBox(height: 16),
                         Text(
-                          tr('All documents synced'),
+                          sdkTr('All documents synced'),
                           style: const TextStyle(
                             fontSize: 18,
                             fontWeight: FontWeight.bold,
@@ -303,7 +304,7 @@ class _SyncStatusScreenState extends State<SyncStatusScreen> {
                         ),
                         const SizedBox(height: 8),
                         Text(
-                          tr('No pending changes'),
+                          sdkTr('No pending changes'),
                           style: TextStyle(color: Colors.grey[600]),
                         ),
                       ],
@@ -343,7 +344,7 @@ class _SyncStatusScreenState extends State<SyncStatusScreen> {
                                         ? null
                                         : () => _syncDoctype(doc.doctype),
                                     icon: const Icon(Icons.sync, size: 18),
-                                    label: Text(tr('Sync')),
+                                    label: Text(sdkTr('Sync')),
                                   ),
                                 ],
                               ),
@@ -371,10 +372,10 @@ class _SyncStatusScreenState extends State<SyncStatusScreen> {
                             ),
                             subtitle: Text(
                               doc.status == 'deleted'
-                                  ? tr('Pending deletion')
+                                  ? sdkTr('Pending deletion')
                                   : doc.serverId == null
-                                  ? tr('New document (not synced)')
-                                  : tr('Pending update'),
+                                  ? sdkTr('New document (not synced)')
+                                  : sdkTr('Pending update'),
                             ),
                             trailing: Icon(
                               Icons.cloud_upload,

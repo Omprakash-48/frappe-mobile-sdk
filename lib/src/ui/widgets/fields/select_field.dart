@@ -64,7 +64,7 @@ class SelectField extends BaseField {
         decoration:
             style?.decoration ??
             InputDecoration(
-              hintText: tr('No options available'),
+              hintText: sdkTr('No options available'),
               border: const OutlineInputBorder(),
               filled: true,
               fillColor: Colors.grey[200],
@@ -99,7 +99,7 @@ class SelectField extends BaseField {
             style?.decoration ??
             InputDecoration(
               labelText:
-                  field.placeholder ?? tr('Select {0}', [field.displayLabel]),
+                  field.placeholder ?? sdkTr('Select {0}', [field.displayLabel]),
               border: const OutlineInputBorder(),
               filled: field.readOnly,
               fillColor: field.readOnly ? Colors.grey[200] : null,
@@ -148,7 +148,7 @@ class SelectField extends BaseField {
           style?.decoration ??
           InputDecoration(
             hintText:
-                field.placeholder ?? tr('Select {0}', [field.displayLabel]),
+                field.placeholder ?? sdkTr('Select {0}', [field.displayLabel]),
             border: const OutlineInputBorder(),
             filled: field.readOnly,
             fillColor: field.readOnly ? Colors.grey[200] : null,

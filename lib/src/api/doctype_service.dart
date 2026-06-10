@@ -4,17 +4,24 @@
 import 'dart:convert';
 import 'dart:math' as math;
 
-import 'package:flutter/foundation.dart';
-
 import '../sync/sync_details.dart';
+import '../utils/sdk_log.dart';
 import 'exceptions.dart';
 import 'rest_helper.dart';
 import 'utils.dart';
 
 class DoctypeService {
   final RestHelper _restHelper;
+  final int listChildDocsPageSize;
+  final int listFullDocsPageSize;
+  final int listDefaultPageSize;
 
-  DoctypeService(this._restHelper);
+  DoctypeService(
+    this._restHelper, {
+    this.listChildDocsPageSize = 1000,
+    this.listFullDocsPageSize = 1000,
+    this.listDefaultPageSize = 20,
+  });
 
   Future<Map<String, dynamic>> getDocTypeMeta(String doctype) async {
     final response = await _restHelper.get(
@@ -51,7 +58,7 @@ class DoctypeService {
       }
       return null;
     } catch (e, st) {
-      debugPrint(
+      sdkLog(
         'DoctypeService.getDocTypeWatermark($doctype) failed — $e\n$st',
       );
       return null;
@@ -64,13 +71,14 @@ class DoctypeService {
     List<List<dynamic>>? filters,
     List<List<dynamic>>? orFilters,
     int limitStart = 0,
-    int limitPageLength = 20,
+    int? limitPageLength,
     String? orderBy,
   }) async {
+    final resolvedLimit = limitPageLength ?? listDefaultPageSize;
     final methodParams = <String, dynamic>{
       'doctype': doctype,
       'limit_start': limitStart,
-      'limit_page_length': limitPageLength,
+      'limit_page_length': resolvedLimit,
     };
 
     if (fields != null) methodParams['fields'] = jsonEncode(fields);
@@ -90,7 +98,7 @@ class DoctypeService {
       if (msg is List) return msg;
       // Frappe returned a non-List message (null, error string, etc.).
       // Treat as empty page — callers see no records and pull continues.
-      debugPrint(
+      sdkLog(
         'DoctypeService.list: unexpected message shape for $doctype '
         '(${msg?.runtimeType ?? "null"}) — treating as empty page',
       );
@@ -127,14 +135,15 @@ class DoctypeService {
   Future<List<Map<String, dynamic>>> listChildDocs(
     String doctype, {
     List<List<dynamic>>? filters,
-    int limitPageLength = 1000,
+    int? limitPageLength,
   }) async {
+    final resolvedLimit = limitPageLength ?? listChildDocsPageSize;
     // Step 1: get names (get_list works for this)
     final nameList = await list(
       doctype,
       fields: ['name'],
       filters: filters,
-      limitPageLength: limitPageLength,
+      limitPageLength: resolvedLimit,
     );
     if (nameList.isEmpty) return [];
 
@@ -207,7 +216,7 @@ class DoctypeService {
       if (message is! Map) return null;
       return SyncDetailsResponse.fromJson(Map<String, dynamic>.from(message));
     } catch (e, st) {
-      debugPrint(
+      sdkLog(
         'DoctypeService.getSyncDetails failed — falling back to full pull — '
         '$e\n$st',
       );
@@ -228,15 +237,16 @@ class DoctypeService {
     String doctype, {
     List<List<dynamic>>? filters,
     int limitStart = 0,
-    int limitPageLength = 1000,
+    int? limitPageLength,
     String? orderBy,
   }) async {
+    final resolvedLimit = limitPageLength ?? listFullDocsPageSize;
     final nameList = await list(
       doctype,
       fields: ['name'],
       filters: filters,
       limitStart: limitStart,
-      limitPageLength: limitPageLength,
+      limitPageLength: resolvedLimit,
       orderBy: orderBy,
     );
     if (nameList.isEmpty) return [];

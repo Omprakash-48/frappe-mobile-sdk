@@ -355,7 +355,7 @@ class _DocumentListScreenState extends State<DocumentListScreen> {
         actions: [
           PopupMenuButton<String>(
             icon: const Icon(Icons.sort),
-            tooltip: tr('Sort'),
+            tooltip: sdkTr('Sort'),
             onSelected: (value) {
               setState(() {
                 if (value == _sortField) {
@@ -423,7 +423,7 @@ class _DocumentListScreenState extends State<DocumentListScreen> {
                     child: TextField(
                       controller: _searchController,
                       decoration: InputDecoration(
-                        hintText: tr('Search...'),
+                        hintText: sdkTr('Search...'),
                         prefixIcon: const Icon(Icons.search),
                         border: OutlineInputBorder(
                           borderRadius: BorderRadius.circular(8),
@@ -459,10 +459,10 @@ class _DocumentListScreenState extends State<DocumentListScreen> {
         children: [
           const Icon(Icons.inbox, size: 64, color: Colors.grey),
           const SizedBox(height: 16),
-          Text(tr('No documents found')),
+          Text(sdkTr('No documents found')),
           const SizedBox(height: 8),
           Text(
-            tr('Pull down to refresh or create a new document'),
+            sdkTr('Pull down to refresh or create a new document'),
             style: Theme.of(context).textTheme.bodySmall,
             textAlign: TextAlign.center,
           ),
@@ -471,7 +471,7 @@ class _DocumentListScreenState extends State<DocumentListScreen> {
             onPressed: _pullDocuments,
             style: listStyle.primaryButtonStyle,
             icon: const Icon(Icons.refresh),
-            label: Text(tr('Refresh from Server')),
+            label: Text(sdkTr('Refresh from Server')),
           ),
           if (_canCreate) ...[
             const SizedBox(height: 16),
@@ -479,7 +479,7 @@ class _DocumentListScreenState extends State<DocumentListScreen> {
               onPressed: () => _openForm(null),
               style: listStyle.primaryButtonStyle,
               icon: const Icon(Icons.add),
-              label: Text(tr('Create New')),
+              label: Text(sdkTr('Create New')),
             ),
           ],
         ],
@@ -505,11 +505,11 @@ class _DocumentListScreenState extends State<DocumentListScreen> {
             itemBuilder: (context, index) {
               final doc = pageList[index];
               final titleText = _docTitle(doc).isEmpty
-                  ? tr('Untitled')
+                  ? sdkTr('Untitled')
                   : _docTitle(doc);
               final idText = doc.serverId != null
-                  ? tr('ID: {0}', [doc.serverId!])
-                  : tr('Local (not synced)');
+                  ? sdkTr('ID: {0}', [doc.serverId!])
+                  : sdkTr('Local (not synced)');
               final hasStatusField = widget.meta.getField('status') != null;
               final statusValue = hasStatusField
                   ? doc.data['status']?.toString()
@@ -587,7 +587,7 @@ class _DocumentListScreenState extends State<DocumentListScreen> {
                   onPressed: _page > 0 ? () => setState(() => _page--) : null,
                 ),
                 Text(
-                  tr('Page {0} of {1}', [_page + 1, totalPages]),
+                  sdkTr('Page {0} of {1}', [_page + 1, totalPages]),
                   style: Theme.of(context).textTheme.bodySmall,
                 ),
                 IconButton(
@@ -624,7 +624,7 @@ class _DocumentListScreenState extends State<DocumentListScreen> {
           widget.meta,
         );
       } catch (e, st) {
-        debugPrint(
+        sdkLog(
           'DocumentListScreen: attachChildRows(${widget.doctype}) failed — $e\n$st',
         );
         resolvedDoc = doc;
@@ -663,7 +663,7 @@ class _DocumentListScreenState extends State<DocumentListScreen> {
         );
       } catch (e, st) {
         // Network error — fall back to local cached data.
-        debugPrint(
+        sdkLog(
           'DocumentListScreen: getByName(${widget.doctype}/${doc.serverId}) failed — $e\n$st',
         );
         resolvedDoc = doc;

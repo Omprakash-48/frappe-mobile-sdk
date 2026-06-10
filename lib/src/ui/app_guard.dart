@@ -6,6 +6,7 @@ import 'package:url_launcher/url_launcher.dart';
 
 import '../api/exceptions.dart';
 import '../services/app_status_service.dart';
+import '../utils/sdk_log.dart';
 
 /// App guard widget that checks server-side app status on launch.
 ///
@@ -59,7 +60,7 @@ class FrappeAppGuard extends StatefulWidget {
     this.currentVersion,
     this.appNotConfiguredMessage,
     this.forceUpdateTitle,
-    this.allowDeferringUpdates = false,
+    this.allowDeferringUpdates = true,
   });
 
   @override
@@ -156,6 +157,8 @@ class _FrappeAppGuardState extends State<FrappeAppGuard> {
           if (currentSemVer.isMajorLessThan(expectedSemVer) ||
               !widget.allowDeferringUpdates) {
             forceUpdateRequired = true;
+          } else {
+            deferrableUpdate = true;
           }
         }
       }
@@ -189,7 +192,7 @@ class _FrappeAppGuardState extends State<FrappeAppGuard> {
       if (!mounted) return;
       setState(() => _isChecking = false);
     } catch (e, st) {
-      debugPrint('AppGuard: status check failed — $e\n$st');
+      sdkLog('AppGuard: status check failed — $e\n$st');
       // Treat 417 (ValidationException) and 404 as "app not configured"
       if (e is ValidationException ||
           (e is ApiException && (e.statusCode == 417 || e.statusCode == 404))) {

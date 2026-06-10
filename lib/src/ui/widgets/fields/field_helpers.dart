@@ -13,7 +13,7 @@ import 'base_field.dart';
 /// translation through [BaseField.style]) at the call site.
 String? requiredValidator(dynamic value, String label) {
   if (value == null || value.toString().isEmpty) {
-    return tr('{0} is required', [label]);
+    return sdkTr('{0} is required', [label]);
   }
   return null;
 }

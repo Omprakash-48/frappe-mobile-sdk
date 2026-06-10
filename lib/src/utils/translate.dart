@@ -24,5 +24,8 @@ class FrappeTranslations {
 }
 
 /// Dynamic translation helper alias, matching Frappe's standard format.
-String tr(String source, [List<Object>? args]) =>
+///
+/// Renamed from `tr` to `sdkTr` to avoid collisions with `tr()` from
+/// easy_localization, GetX, and other packages commonly used in host apps.
+String sdkTr(String source, [List<Object>? args]) =>
     FrappeTranslations.translate(source, args);
