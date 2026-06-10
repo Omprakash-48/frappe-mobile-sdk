@@ -41,11 +41,11 @@ void main() {
   });
 
   group('toStored', () {
-    test('returns the 10-digit number', () {
-      expect(PhoneField.toStored('9876543210'), '9876543210');
+    test('stores back as +91-prefixed value', () {
+      expect(PhoneField.toStored('9876543210'), '+919876543210');
     });
-    test('strips non-digits from number', () {
-      expect(PhoneField.toStored('98-76 54 32 10'), '9876543210');
+    test('strips non-digits then prepends +91', () {
+      expect(PhoneField.toStored('98-76 54 32 10'), '+919876543210');
     });
     test('empty input returns empty', () {
       expect(PhoneField.toStored(''), '');
@@ -64,7 +64,7 @@ void main() {
       expect(find.text('9876543210'), findsOneWidget);
     });
 
-    testWidgets('onChanged stores back as bare number', (tester) async {
+    testWidgets('onChanged stores back as +91-prefixed value', (tester) async {
       String? emitted;
       await _pumpPhone(
         tester,
@@ -72,7 +72,7 @@ void main() {
         onChanged: (v) => emitted = v as String?,
       );
       await tester.enterText(find.byType(TextField), '9876543210');
-      expect(emitted, '9876543210');
+      expect(emitted, '+919876543210');
     });
 
     testWidgets('clearing the field emits null', (tester) async {
@@ -101,19 +101,19 @@ void main() {
       await tester.enterText(find.byType(TextField), '9');
       await tester.pump();
       expect(find.text('9'), findsOneWidget);
-      expect(emitted, '9');
+      expect(emitted, '+919');
 
       // Simulate typing '98'
       await tester.enterText(find.byType(TextField), '98');
       await tester.pump();
       expect(find.text('98'), findsOneWidget);
-      expect(emitted, '98');
+      expect(emitted, '+9198');
 
       // Simulate typing '987'
       await tester.enterText(find.byType(TextField), '987');
       await tester.pump();
       expect(find.text('987'), findsOneWidget);
-      expect(emitted, '987');
+      expect(emitted, '+91987');
     });
 
     testWidgets('required validator fails on empty submit', (tester) async {

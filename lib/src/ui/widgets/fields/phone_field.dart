@@ -57,9 +57,11 @@ class PhoneField extends BaseField {
     return digits;
   }
 
-  /// Build the stored value: 10 number digits.
+  /// Build the stored value: dial-code + 10 digits (e.g. +919876543210).
   static String toStored(String numberDigits) {
-    return numberFromStored(numberDigits);
+    final digits = numberDigits.replaceAll(RegExp(r'[^\d]'), '');
+    if (digits.isEmpty) return '';
+    return '$_defaultDialCode$digits';
   }
 
   String? _validate(dynamic stored) {
