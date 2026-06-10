@@ -26,7 +26,7 @@ SDK screens / fields / validators
 
 **Priority order (highest to lowest):**
 1. Host app ARB lookup (compiled, type-safe, always current)
-2. SQLite translation cache (`translations_cache.db`, populated from `frappe.client.get_list` on the `Translation` doctype)
+2. SQLite translation cache (`translations_cache.db`, populated from `mobile_auth.get_translations` after login)
 3. Source string as-is (English fallback, never null)
 
 ---
@@ -72,25 +72,28 @@ This avoids renaming hundreds of call sites and decouples the host app from the 
 
 ## Translation API
 
-Translations are fetched using the standard `frappe.client.get_list` API on the `Translation` doctype (replaced `mobile_auth.get_translations` in commit `b5ac45c`):
+Translations are fetched via the Frappe mobile-auth whitelist method:
 
 ```
-GET /api/v2/method/frappe.client.get_list
-    ?doctype=Translation
-    &fields=["source_text","translated_text"]
-    &filters=[["language","=","hi"]]
-    &limit_page_length=0
+GET /api/v2/method/mobile_auth.get_translations?lang=hi
 ```
 
 Response format:
 ```json
 {
-  "data": [
-    { "source_text": "Save", "translated_text": "सहेजें" },
-    { "source_text": "Delete", "translated_text": "हटाएं" }
-  ]
+  "data": {
+    "translations": {
+      "hi": {
+        "Save": "सहेजें",
+        "Child Name": "बच्चे का नाम",
+        "Date of Birth": "जन्म तिथि"
+      }
+    }
+  }
 }
 ```
+
+**Why not `frappe.client.get_list('Translation')`?** That endpoint only returns rows from the `Translation` doctype (user-created custom translations). The compiled `.po` translations that ship with Frappe and custom apps — which are the source of doctype field labels like "Child Name" — are NOT stored in that doctype. `mobile_auth.get_translations` merges both sources and is the only endpoint that returns the complete translation set needed to translate field labels offline.
 
 Enabled languages are discovered via:
 ```
@@ -274,7 +277,7 @@ FormScreen(
 
 **Dynamic field label (from Frappe doctype meta):**
 
-No action needed — these flow through `TranslationService.translateLocal` via the SQLite cache, which is populated automatically from `frappe.client.get_list` on the `Translation` doctype after login.
+No action needed — these flow through `TranslationService.translateLocal` via the SQLite cache, which is populated automatically from `mobile_auth.get_translations` after login. Ensure the string is translated in Frappe's `.po` files or the `Translation` doctype so the server returns it.
 
 ---
 

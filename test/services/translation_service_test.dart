@@ -6,10 +6,10 @@ import 'package:http/testing.dart';
 import 'package:frappe_mobile_sdk/src/api/client.dart';
 import 'package:frappe_mobile_sdk/src/services/translation_service.dart';
 
-/// Build a MockClient that serves the frappe.client.get_list Translation response.
+/// Build a MockClient that serves the mobile_auth.get_translations response.
 /// The [langToTranslations] map is keyed by language code; each value is a
-/// map of source_text → translated_text.  The mock inspects the request URL
-/// to extract the "language" filter value and returns only the matching rows.
+/// map of source → translated.  The mock inspects the ?lang= query param and
+/// returns only the matching language block.
 http.Client _scripted(
   Map<String, Map<String, dynamic>> langToTranslations, {
   List<Map<String, dynamic>>? sentSink,
@@ -19,30 +19,21 @@ http.Client _scripted(
     sentSink?.add({'method': req.method, 'url': req.url.toString()});
     if (overrideAll != null) return overrideAll;
 
-    // Extract the requested language from the filters query param.
-    // The URL params are percent-encoded, so decode first.
-    final decodedUrl = Uri.decodeFull(req.url.toString());
-    // Decoded URL contains: filters=[["language","=","<lang>"]]
-    String? requestedLang;
-    final filtersMatch = RegExp(r'"language","=","([^"]+)"').firstMatch(
-      decodedUrl,
-    );
-    if (filtersMatch != null) {
-      requestedLang = filtersMatch.group(1);
-    }
+    final requestedLang = req.url.queryParameters['lang'];
 
     final translations = requestedLang != null
-        ? (langToTranslations[requestedLang] ?? {})
+        ? (langToTranslations[requestedLang] ?? <String, dynamic>{})
         : <String, dynamic>{};
 
-    final rows = translations.entries
-        .map((e) => {
-              'source_text': e.key,
-              'translated_text': e.value?.toString() ?? '',
-            })
-        .toList();
-
-    final body = {'data': rows};
+    // mobile_auth.get_translations response shape:
+    // { "data": { "translations": { "<lang>": { "Source": "Target" } } } }
+    final body = {
+      'data': {
+        'translations': {
+          if (requestedLang != null) requestedLang: translations,
+        },
+      },
+    };
     return http.Response(jsonEncode(body), 200);
   });
 }
@@ -91,6 +82,8 @@ void main() {
       }),
     );
     final svc = TranslationService(client);
+    // Requesting 'xx' — not present in the scripted map; server returns {}
+    // for that lang block, so the parser returns an empty map.
     final map = await svc.loadTranslations('xx');
     expect(map, isEmpty);
   });
@@ -138,7 +131,7 @@ void main() {
       await loaded.timeout(const Duration(seconds: 2));
       expect(svc.currentLang, 'my');
       expect(calls, hasLength(1));
-      expect(calls.first['url'], contains('language'));
+      expect(calls.first['url'], contains('get_translations'));
 
       // Second setLocale triggers another background refresh (unconditional),
       // even for a cached lang — each call keeps the cache fresh.

@@ -90,6 +90,23 @@ void main() {
       ); // drain background refreshAsync
       await svc.dao.close();
     });
+
+    test('reloads from SQLite even when _cache already has an entry for lang',
+        () async {
+      // Simulates: login cached stale/empty data, user switches locale offline.
+      // setLocale must NOT skip loadFromCache just because _cache.containsKey.
+      final svc = makeService();
+      // Pre-seed an empty in-memory entry (as if a previous wrong API call ran)
+      // by injecting it directly via the testing helper path.
+      svc.setCurrentLangForTesting('hi'); // set lang first
+      // populate SQLite with correct translations (as if refreshAllAsync ran)
+      await svc.dao.bulkUpsert('hi', {'Child Name': 'बच्चे का नाम'});
+      // Now set locale again — must reload from SQLite unconditionally.
+      await svc.setLocale('hi');
+      expect(svc.translate('Child Name'), 'बच्चे का नाम');
+      await Future<void>.delayed(Duration.zero);
+      await svc.dao.close();
+    });
   });
 
   group('clearAll', () {

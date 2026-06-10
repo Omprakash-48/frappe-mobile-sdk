@@ -97,7 +97,9 @@ class TranslationService {
     }
   }
 
-  /// Fetches the list of enabled language codes from the Frappe Language doctype.
+  /// Fetches the list of enabled language codes via frappe.client.get_list on
+  /// the Language doctype. Used by [refreshAllAsync] to know which languages
+  /// to pre-warm into SQLite after login.
   Future<List<String>> fetchEnabledLanguages() async {
     try {
       final result = await _client?.rest.get(
@@ -123,42 +125,45 @@ class TranslationService {
     }
   }
 
-  /// Set the active language. Loads from SQLite cache first (instant),
+  /// Set the active language. Always reloads from SQLite first (fast, <5 ms),
   /// then starts a background API refresh to keep the cache fresh.
+  ///
+  /// The SQLite reload is unconditional — no [_cache.containsKey] guard — so
+  /// a locale switch always picks up the latest persisted translations even if
+  /// [_cache] already holds a stale or empty entry for [lang].
   Future<void> setLocale(String lang) async {
     if (lang.isEmpty) return;
     _currentLang = lang;
-    if (!_cache.containsKey(lang)) {
-      await loadFromCache(lang);
-    }
+    await loadFromCache(lang);
     refreshAsync(lang);
   }
 
-  /// Fetch translations for [lang] from the Frappe Translation doctype via
-  /// the standard frappe.client.get_list API and populate [_cache].
+  /// Fetch translations for [lang] from the Frappe mobile-auth whitelist API.
+  /// This endpoint merges compiled (.po) translations with custom Translation
+  /// doctype entries — the complete set needed to translate field labels offline.
+  ///
+  /// [frappe.client.get_list('Translation')] is NOT used here because it only
+  /// returns user-created custom translations; compiled .po field-label
+  /// translations are not stored in the Translation doctype.
+  ///
+  /// Response format:
+  ///   { "data": { "translations": { "hi": { "Source": "Translated" } } } }
   Future<Map<String, String>> loadTranslations(String lang) async {
     if (_disposed) return {};
     try {
       final result = await _client?.rest.get(
-        '/api/v2/method/frappe.client.get_list',
-        queryParams: {
-          'doctype': 'Translation',
-          'fields': '["source_text","translated_text"]',
-          'filters': '[["language","=","$lang"]]',
-          'limit_page_length': '0',
-        },
+        '/api/v2/method/mobile_auth.get_translations',
+        queryParams: {'lang': lang},
       );
       if (result is! Map<String, dynamic>) return {};
-      final data = result['data'];
-      if (data is! List) return {};
-      final map = <String, String>{};
-      for (final item in data.cast<Map<String, dynamic>>()) {
-        final src = item['source_text']?.toString();
-        final tgt = item['translated_text']?.toString();
-        if (src != null && src.isNotEmpty && tgt != null && tgt.isNotEmpty) {
-          map[src] = tgt;
-        }
-      }
+      final data = result['data'] as Map<String, dynamic>? ?? result;
+      final translationsMap = data['translations'] as Map<String, dynamic>?;
+      if (translationsMap == null) return {};
+      final raw = translationsMap[lang] as Map<String, dynamic>?;
+      if (raw == null) return {};
+      final map = raw.map(
+        (k, v) => MapEntry(k.toString(), v?.toString() ?? k.toString()),
+      );
       _cache[lang] = map;
       return map;
     } catch (e, st) {
