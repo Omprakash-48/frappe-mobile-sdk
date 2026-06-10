@@ -2,11 +2,17 @@ import 'dart:async';
 import 'package:flutter/foundation.dart';
 import '../api/client.dart';
 import '../database/daos/translation_dao.dart';
+import '../utils/sdk_log.dart';
 
 class TranslationService {
   final FrappeClient? _client;
 
   TranslationDao? _dao;
+
+  /// True once [dispose] has been called. Guards fire-and-forget paths
+  /// (_doRefresh, _doRefreshAll, loadFromCache) so they bail out cleanly
+  /// when the DAO/stream have already been closed.
+  bool _disposed = false;
 
   /// Optional external delegate to intercept/override translations (e.g. static host app ARB strings).
   String Function(String source, [List<Object>? args])? translateDelegate;
@@ -45,14 +51,14 @@ class TranslationService {
   /// Load translations for [lang] from SQLite into [_cache].
   /// Fast (<5 ms). No network. Emits [onChanged] if rows were found.
   Future<void> loadFromCache(String lang) async {
-    if (_dao == null) return;
+    if (_dao == null || _disposed) return;
     try {
       final map = await _dao!.readAll(lang);
       if (map.isEmpty) return;
       _cache[lang] = map;
       if (!_changedController.isClosed) _changedController.add(null);
     } catch (e, st) {
-      debugPrint('TranslationService.loadFromCache($lang) failed — $e\n$st');
+      sdkLog('TranslationService.loadFromCache($lang) failed — $e\n$st');
     }
   }
 
@@ -63,18 +69,58 @@ class TranslationService {
   }
 
   Future<void> _doRefresh(String lang) async {
-    final map = await loadTranslations(
-      lang,
-    ); // fetches + populates _cache[lang]
+    final map = await loadTranslations(lang); // fetches + populates _cache[lang]
+    if (_disposed) return; // guard — dispose may have run during the await
     if (map.isEmpty) return;
     try {
       await _dao?.bulkUpsert(lang, map);
     } catch (e, st) {
-      debugPrint(
-        'TranslationService._doRefresh($lang) persist failed — $e\n$st',
-      );
+      sdkLog('TranslationService._doRefresh($lang) persist failed — $e\n$st');
+      return;
     }
     if (!_changedController.isClosed) _changedController.add(null);
+  }
+
+  /// Fire-and-forget: fetch ALL enabled languages from Frappe and persist each.
+  /// Called after login/OTP so the SQLite cache is fully populated even if the
+  /// user goes offline immediately after.
+  void refreshAllAsync() {
+    unawaited(_doRefreshAll());
+  }
+
+  Future<void> _doRefreshAll() async {
+    if (_disposed) return;
+    final langs = await fetchEnabledLanguages();
+    for (final lang in langs) {
+      if (_disposed) return;
+      await _doRefresh(lang);
+    }
+  }
+
+  /// Fetches the list of enabled language codes from the Frappe Language doctype.
+  Future<List<String>> fetchEnabledLanguages() async {
+    try {
+      final result = await _client?.rest.get(
+        '/api/v2/method/frappe.client.get_list',
+        queryParams: {
+          'doctype': 'Language',
+          'fields': '["name"]',
+          'filters': '[["enabled","=","1"]]',
+          'limit_page_length': '0',
+        },
+      );
+      if (result is! Map<String, dynamic>) return [];
+      final data = result['data'];
+      if (data is! List) return [];
+      return data
+          .cast<Map<String, dynamic>>()
+          .map((e) => e['name']?.toString() ?? '')
+          .where((e) => e.isNotEmpty)
+          .toList();
+    } catch (e, st) {
+      sdkLog('TranslationService.fetchEnabledLanguages failed — $e\n$st');
+      return [];
+    }
   }
 
   /// Set the active language. Loads from SQLite cache first (instant),
@@ -88,27 +134,35 @@ class TranslationService {
     refreshAsync(lang);
   }
 
-  /// Fetch translations for [lang] from API and populate [_cache].
-  /// Response format: { "data": { "translations": { "hi": { "source": "target" } } } }
+  /// Fetch translations for [lang] from the Frappe Translation doctype via
+  /// the standard frappe.client.get_list API and populate [_cache].
   Future<Map<String, String>> loadTranslations(String lang) async {
+    if (_disposed) return {};
     try {
       final result = await _client?.rest.get(
-        '/api/v2/method/mobile_auth.get_translations',
-        queryParams: {'lang': lang},
+        '/api/v2/method/frappe.client.get_list',
+        queryParams: {
+          'doctype': 'Translation',
+          'fields': '["source_text","translated_text"]',
+          'filters': '[["language","=","$lang"]]',
+          'limit_page_length': '0',
+        },
       );
       if (result is! Map<String, dynamic>) return {};
-      final data = result['data'] as Map<String, dynamic>? ?? result;
-      final translationsMap = data['translations'] as Map<String, dynamic>?;
-      if (translationsMap == null) return {};
-      final raw = translationsMap[lang] as Map<String, dynamic>?;
-      if (raw == null) return {};
-      final map = raw.map(
-        (k, v) => MapEntry(k.toString(), v?.toString() ?? k.toString()),
-      );
+      final data = result['data'];
+      if (data is! List) return {};
+      final map = <String, String>{};
+      for (final item in data.cast<Map<String, dynamic>>()) {
+        final src = item['source_text']?.toString();
+        final tgt = item['translated_text']?.toString();
+        if (src != null && src.isNotEmpty && tgt != null && tgt.isNotEmpty) {
+          map[src] = tgt;
+        }
+      }
       _cache[lang] = map;
       return map;
     } catch (e, st) {
-      debugPrint('TranslationService.loadTranslations($lang) failed — $e\n$st');
+      sdkLog('TranslationService.loadTranslations($lang) failed — $e\n$st');
       return {};
     }
   }
@@ -146,9 +200,18 @@ class TranslationService {
   /// Alias for [translate] (Frappe-style `__`).
   String call(String source, [List<Object>? args]) => translate(source, args);
 
+  /// Clears in-memory cache, resets currentLang to 'en', and wipes the
+  /// SQLite translation cache. Called on logout.
+  Future<void> clearAll() async {
+    _cache.clear();
+    _currentLang = 'en';
+    await _dao?.deleteAll();
+  }
+
   /// Closes the SQLite cache and the change stream.
   /// Called by [FrappeSDK.dispose].
   Future<void> dispose() async {
+    _disposed = true; // guard first — before closing
     await _dao?.close();
     await _changedController.close();
   }

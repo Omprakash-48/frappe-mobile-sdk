@@ -92,6 +92,47 @@ void main() {
     });
   });
 
+  group('clearAll', () {
+    test('clears in-memory cache, resets lang to en, wipes SQLite', () async {
+      final svc = makeService();
+      await svc.dao.bulkUpsert('hi', {'Yes': 'हाँ'});
+      await svc.loadFromCache('hi');
+      svc.setCurrentLangForTesting('hi');
+      // Confirm translation is cached
+      expect(svc.translate('Yes'), 'हाँ');
+
+      await svc.clearAll();
+
+      // translate() now falls back to source (cache cleared, lang reset to en)
+      expect(svc.translate('Yes'), 'Yes');
+      expect(svc.currentLang, 'en');
+
+      // SQLite rows should be gone
+      final remaining = await svc.dao.readAll('hi');
+      expect(remaining, isEmpty);
+
+      await svc.dao.close();
+    });
+  });
+
+  group('refreshAllAsync dispose safety', () {
+    test('refreshAllAsync returns early if disposed — no write after dispose',
+        () async {
+      final svc = makeService();
+      // Immediately dispose; _doRefreshAll should bail when _disposed is true.
+      await svc.dispose();
+
+      // Should not throw; _disposed guard short-circuits the whole method.
+      final errors = <Object>[];
+      await runZonedGuarded(() async {
+        svc.refreshAllAsync();
+        await Future<void>.delayed(const Duration(milliseconds: 10));
+      }, (e, _) => errors.add(e));
+
+      expect(errors, isEmpty);
+    });
+  });
+
   group('dispose safety', () {
     test(
       'no StateError when dispose is called before onChanged emits',

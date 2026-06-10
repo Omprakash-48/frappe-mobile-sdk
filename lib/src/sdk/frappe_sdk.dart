@@ -52,6 +52,12 @@ class FrappeSDK {
   /// to `docstatus=1` on sync).
   final PayloadTransformerFn? payloadTransformer;
 
+  final int pullPageSize;
+  final int syncServicePageSize;
+  final int listChildDocsPageSize;
+  final int listFullDocsPageSize;
+  final int listDefaultPageSize;
+
   FrappeClient? _client;
   AppDatabase? _database;
   AuthService? _authService;
@@ -163,6 +169,11 @@ class FrappeSDK {
     required this.baseUrl,
     this.databaseAppName,
     this.payloadTransformer,
+    this.pullPageSize = 500,
+    this.syncServicePageSize = 1000,
+    this.listChildDocsPageSize = 1000,
+    this.listFullDocsPageSize = 1000,
+    this.listDefaultPageSize = 20,
   });
 
   /// Test-only constructor: accepts a pre-built [AppDatabase] (e.g. in-memory).
@@ -182,6 +193,11 @@ class FrappeSDK {
       isPersisted: true,
     ),
     http.Client? httpClient,
+    this.pullPageSize = 500,
+    this.syncServicePageSize = 1000,
+    this.listChildDocsPageSize = 1000,
+    this.listFullDocsPageSize = 1000,
+    this.listDefaultPageSize = 20,
   }) : databaseAppName = null,
        payloadTransformer = null {
     _database = database;
@@ -191,7 +207,13 @@ class FrappeSDK {
     // writes to FlutterSecureStorage and is unavailable in widget tests.
     // [httpClient] lets tests stub the transport (e.g. the /sync_details
     // pre-flight) without a real network.
-    _client = FrappeClient(baseUrl, httpClient: httpClient);
+    _client = FrappeClient(
+      baseUrl,
+      httpClient: httpClient,
+      listChildDocsPageSize: listChildDocsPageSize,
+      listFullDocsPageSize: listFullDocsPageSize,
+      listDefaultPageSize: listDefaultPageSize,
+    );
     // Use AuthService.forTesting so the client and database are wired up
     // without touching FlutterSecureStorage. This means sdk.auth methods
     // (e.g. getOrCreateMobileUuid, restoreSession) won't throw "not
@@ -218,6 +240,7 @@ class FrappeSDK {
       _database!,
       getMobileUuid: () async => 'test-uuid',
       offlineModeNotifier: _modeNotifier!,
+      pageSize: syncServicePageSize,
     );
     final testResolver = UnifiedResolver(
       db: database.rawDatabase,
@@ -242,6 +265,7 @@ class FrappeSDK {
         _database!,
         getMobileUuid: () async => 'test-uuid',
         offlineMode: const OfflineMode(enabled: true, isPersisted: true),
+        pageSize: syncServicePageSize,
       ),
       residueCounter: _residueCount,
     );
@@ -349,6 +373,7 @@ class FrappeSDK {
       // each doctype's pull loop runs.
       schemaReconciler: _repository!.reconcileParentTableForMeta,
       payloadTransformer: payloadTransformer,
+      pullPageSize: pullPageSize,
     );
     _syncStateNotifier = pack.notifier;
     _pushPool = pack.pushPool;
@@ -379,6 +404,7 @@ class FrappeSDK {
       // push is active for it, so a pull can't insert a duplicate over an
       // in-flight push INSERT (#43). OutboxDao is a thin wrapper over rawDb.
       hasActivePush: (doctype) => OutboxDao(rawDb).hasActivePushFor(doctype),
+      pageSize: syncServicePageSize,
     );
     // Build UnifiedResolver — single read path for all offline queries.
     // Probe connectivity once here AND subscribe to the platform
@@ -439,6 +465,7 @@ class FrappeSDK {
         // the SDK owns; the drain runs PushEngine.runOnce() to drain the
         // outbox before the local-state wipe.
         pushRunner: () => _pushEngine!.runOnce(),
+        pageSize: syncServicePageSize,
       ),
       residueCounter: _residueCount,
     );
@@ -600,6 +627,9 @@ class FrappeSDK {
     final lang = response['language'] as String?;
     if (lang != null && lang.isNotEmpty) {
       await _translationService?.setLocale(lang);
+      // Pull ALL enabled languages in the background so the SQLite cache is
+      // fully populated before the user goes offline.
+      _translationService?.refreshAllAsync();
     }
     _setSessionUserFromLoginResponse(response);
     await _persistOfflineFlagFromLogin(response);
@@ -625,6 +655,9 @@ class FrappeSDK {
     final lang = response['language'] as String?;
     if (lang != null && lang.isNotEmpty) {
       await _translationService?.setLocale(lang);
+      // Pull ALL enabled languages in the background so the SQLite cache is
+      // fully populated before the user goes offline.
+      _translationService?.refreshAllAsync();
     }
     _setSessionUserFromLoginResponse(response);
     await _persistOfflineFlagFromLogin(response);
@@ -713,6 +746,9 @@ class FrappeSDK {
       await _authService!.logout(clearDatabase: clearDatabase);
     });
     if (clearDatabase) {
+      // Wipe the translation SQLite cache and in-memory map so a different
+      // user logging in on the same device doesn't see stale translations.
+      await _translationService?.clearAll();
       // In-memory mirrors of the now-dropped DB state. Without these, the
       // next session would short-circuit table-existence checks against a
       // cache that still remembers tables that no longer exist.
@@ -1265,6 +1301,13 @@ class FrappeSDK {
           if (cursor.complete && cursor.modified != null) {
             eligible[dt] = cursor.modified!;
           }
+          // TODO(#13): zero-row completed doctypes skip the cursor.modified
+          // filter and are re-pulled each cycle — needs a separate zero-row
+          // sentinel. A doctype whose last sync completed successfully but
+          // returned 0 rows has cursor.complete==true and cursor.modified==null,
+          // so it falls through the guard above and is re-included in every
+          // incremental cycle. Adding the sentinel requires a new cursor field
+          // (e.g. `zeroRowAt`) and a read in the eligibility filter here.
         } catch (e, st) {
           debugPrint(
             'FrappeSDK: sync_details cursor read($dt) failed — $e\n$st',
