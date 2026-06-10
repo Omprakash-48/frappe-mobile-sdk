@@ -74,9 +74,6 @@ void main() {
       final svc = makeService();
       await svc.setLocale('hi');
       expect(svc.currentLang, 'hi');
-      await Future<void>.delayed(
-        Duration.zero,
-      ); // drain background refreshAsync
       await svc.dao.close();
     });
 
@@ -85,9 +82,6 @@ void main() {
       await svc.dao.bulkUpsert('hi', {'Yes': 'हाँ'});
       await svc.setLocale('hi');
       expect(svc.translate('Yes'), 'हाँ');
-      await Future<void>.delayed(
-        Duration.zero,
-      ); // drain background refreshAsync
       await svc.dao.close();
     });
 

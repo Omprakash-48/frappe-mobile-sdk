@@ -114,7 +114,28 @@ void main() {
   });
 
   test(
-    'setLocale updates currentLang and triggers a background refresh',
+    'setLocale sets currentLang and does NOT make a network call',
+    () async {
+      // setLocale is SQLite-only — callers that want a network refresh must
+      // call refreshAsync / refreshAll separately (after confirming a session
+      // is active).  This test asserts that no HTTP request is fired.
+      final calls = <Map<String, dynamic>>[];
+      final client = FrappeClient(
+        'http://localhost',
+        httpClient: _scripted({
+          'my': {'Yes': 'Yes-my'},
+        }, sentSink: calls),
+      );
+      final svc = TranslationService(client);
+      await svc.setLocale('my');
+      await Future<void>.delayed(Duration.zero); // drain microtasks
+      expect(svc.currentLang, 'my');
+      expect(calls, isEmpty, reason: 'setLocale must not fire any HTTP request');
+    },
+  );
+
+  test(
+    'refreshAsync fires a network request and caches the result',
     () async {
       final calls = <Map<String, dynamic>>[];
       final client = FrappeClient(
@@ -124,21 +145,13 @@ void main() {
         }, sentSink: calls),
       );
       final svc = TranslationService(client);
-      // refreshAsync is fire-and-forget; wait for onChanged to confirm
-      // the background refresh completed and the cache was populated.
-      final loaded = svc.onChanged.first;
       await svc.setLocale('my');
+      final loaded = svc.onChanged.first;
+      svc.refreshAsync('my');
       await loaded.timeout(const Duration(seconds: 2));
-      expect(svc.currentLang, 'my');
       expect(calls, hasLength(1));
       expect(calls.first['url'], contains('get_translations'));
-
-      // Second setLocale triggers another background refresh (unconditional),
-      // even for a cached lang — each call keeps the cache fresh.
-      final reloaded = svc.onChanged.first;
-      await svc.setLocale('my');
-      await reloaded.timeout(const Duration(seconds: 2));
-      expect(calls, hasLength(2));
+      expect(svc.translate('Yes'), 'Yes-my');
     },
   );
 

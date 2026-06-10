@@ -81,9 +81,14 @@ class TranslationService {
     if (!_changedController.isClosed) _changedController.add(null);
   }
 
-  /// Fire-and-forget: fetch ALL enabled languages from Frappe and persist each.
-  /// Called after login/OTP so the SQLite cache is fully populated even if the
-  /// user goes offline immediately after.
+  /// Awaitable: fetch ALL enabled languages from Frappe and persist each.
+  /// Called (awaited) inside the post-login meta sync so the SQLite cache is
+  /// fully populated before the "Syncing…" indicator clears.  Errors per
+  /// language are swallowed individually; a failing language never aborts the
+  /// rest of the batch.
+  Future<void> refreshAll() => _doRefreshAll();
+
+  /// Fire-and-forget alias for callers that cannot or do not need to await.
   void refreshAllAsync() {
     unawaited(_doRefreshAll());
   }
@@ -125,8 +130,11 @@ class TranslationService {
     }
   }
 
-  /// Set the active language. Always reloads from SQLite first (fast, <5 ms),
-  /// then starts a background API refresh to keep the cache fresh.
+  /// Set the active language. Reads SQLite cache only — **no network call**.
+  ///
+  /// Safe to call before login (app startup, locale restore) without triggering
+  /// a 403.  Callers that want a background network refresh after confirming an
+  /// active session should call [refreshAsync] or [refreshAll] separately.
   ///
   /// The SQLite reload is unconditional — no [_cache.containsKey] guard — so
   /// a locale switch always picks up the latest persisted translations even if
@@ -135,7 +143,6 @@ class TranslationService {
     if (lang.isEmpty) return;
     _currentLang = lang;
     await loadFromCache(lang);
-    refreshAsync(lang);
   }
 
   /// Fetch translations for [lang] from the Frappe mobile-auth whitelist API.

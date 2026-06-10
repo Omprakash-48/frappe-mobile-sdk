@@ -627,16 +627,12 @@ class FrappeSDK {
     final lang = response['language'] as String?;
     if (lang != null && lang.isNotEmpty) {
       await _translationService?.setLocale(lang);
-      // Pull ALL enabled languages in the background so the SQLite cache is
-      // fully populated before the user goes offline.
-      _translationService?.refreshAllAsync();
     }
     _setSessionUserFromLoginResponse(response);
     await _persistOfflineFlagFromLogin(response);
-    // Always run meta + config sync after login, regardless of
-    // offline_enabled. Online mode still needs accurate doctype meta for
-    // form rendering, list view fields, and Link pickers. The closure pull
-    // inside _initialMetaAndDataSync short-circuits when offline is false.
+    // _initialMetaAndDataSync awaits refreshAll() internally — translations
+    // for all enabled languages are persisted to SQLite before the Syncing
+    // indicator clears. No separate refreshAllAsync needed here.
     unawaited(_initialMetaAndDataSync());
     return response;
   }
@@ -655,9 +651,6 @@ class FrappeSDK {
     final lang = response['language'] as String?;
     if (lang != null && lang.isNotEmpty) {
       await _translationService?.setLocale(lang);
-      // Pull ALL enabled languages in the background so the SQLite cache is
-      // fully populated before the user goes offline.
-      _translationService?.refreshAllAsync();
     }
     _setSessionUserFromLoginResponse(response);
     await _persistOfflineFlagFromLogin(response);
@@ -1174,7 +1167,15 @@ class FrappeSDK {
       // outage (e.g. one method 500) doesn't block the rest of boot.
     }
 
-    _translationService?.refreshAsync(_translationService?.currentLang ?? 'en');
+    // Await translations for ALL enabled languages so the SQLite cache is
+    // fully populated before the "Syncing…" indicator clears.  Errors per
+    // language are swallowed inside refreshAll() — a failing language never
+    // aborts meta sync.
+    try {
+      await _translationService?.refreshAll();
+    } catch (e, st) {
+      debugPrint('FrappeSDK: translation refresh failed — $e\n$st');
+    }
 
     try {
       await _metaService!.checkAndSyncDoctypes();
