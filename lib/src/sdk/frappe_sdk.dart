@@ -52,6 +52,11 @@ class FrappeSDK {
   /// to `docstatus=1` on sync).
   final PayloadTransformerFn? payloadTransformer;
 
+  /// Called when SQLite FFI initialization fails before the MethodChannel
+  /// fallback activates. Use to record a non-fatal Crashlytics event.
+  /// The SDK continues normally on the MethodChannel path regardless.
+  final void Function(Object, StackTrace)? onFfiInitFailure;
+
   final int pullPageSize;
   final int syncServicePageSize;
   final int listChildDocsPageSize;
@@ -169,6 +174,7 @@ class FrappeSDK {
     required this.baseUrl,
     this.databaseAppName,
     this.payloadTransformer,
+    this.onFfiInitFailure,
     this.pullPageSize = 500,
     this.syncServicePageSize = 1000,
     this.listChildDocsPageSize = 1000,
@@ -199,7 +205,8 @@ class FrappeSDK {
     this.listFullDocsPageSize = 1000,
     this.listDefaultPageSize = 20,
   }) : databaseAppName = null,
-       payloadTransformer = null {
+       payloadTransformer = null,
+       onFfiInitFailure = null {
     _database = database;
     _modeNotifier = OfflineModeNotifier(offlineMode);
     _syncCompleteController = StreamController<void>.broadcast();
@@ -306,7 +313,10 @@ class FrappeSDK {
   }
 
   Future<void> _doInitialize(bool autoRestoreAndSync) async {
-    _database = await AppDatabase.getInstance(appName: databaseAppName);
+    _database = await AppDatabase.getInstance(
+      appName: databaseAppName,
+      onFfiInitFailure: onFfiInitFailure,
+    );
     _authService = AuthService();
     _authService!.initialize(baseUrl, database: _database);
 
