@@ -8,6 +8,7 @@ import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 
 import '../api/client.dart';
+import '../utils/sdk_log.dart';
 import '../api/exceptions.dart';
 import '../concurrency/concurrency_pool.dart';
 import '../concurrency/connectivity_watcher.dart';
@@ -442,7 +443,7 @@ class FrappeSDK {
         try {
           await syncSvc.pullSyncWaiting(doctype: doctype);
         } catch (e, st) {
-          debugPrint(
+          sdkLog(
             'FrappeSDK: background pullSync($doctype) failed — $e\n$st',
           );
         }
@@ -1032,7 +1033,7 @@ class FrappeSDK {
         setAtMs: DateTime.now().millisecondsSinceEpoch,
       );
     } catch (e, st) {
-      debugPrint('FrappeSDK: failed to persist offline_enabled — $e\n$st');
+      sdkLog('FrappeSDK: failed to persist offline_enabled — $e\n$st');
       return;
     }
 
@@ -1161,7 +1162,7 @@ class FrappeSDK {
           at: DateTime.now(),
         ),
       );
-      debugPrint('FrappeSDK: boot sync — server unreachable: $e\n$st');
+      sdkLog('FrappeSDK: boot sync — server unreachable: $e\n$st');
       _setInitialSyncFlag(initialSyncNotifier, false);
       return;
     } catch (e, st) {
@@ -1172,7 +1173,7 @@ class FrappeSDK {
           at: DateTime.now(),
         ),
       );
-      debugPrint('FrappeSDK: permissions.syncFromApi failed — $e\n$st');
+      sdkLog('FrappeSDK: permissions.syncFromApi failed — $e\n$st');
       // Non-network failure: continue with other steps so a partial
       // outage (e.g. one method 500) doesn't block the rest of boot.
     }
@@ -1184,19 +1185,19 @@ class FrappeSDK {
     try {
       await _translationService?.refreshAll();
     } catch (e, st) {
-      debugPrint('FrappeSDK: translation refresh failed — $e\n$st');
+      sdkLog('FrappeSDK: translation refresh failed — $e\n$st');
     }
 
     try {
       await _metaService!.checkAndSyncDoctypes();
     } catch (e, st) {
-      debugPrint('FrappeSDK: meta.checkAndSyncDoctypes failed — $e\n$st');
+      sdkLog('FrappeSDK: meta.checkAndSyncDoctypes failed — $e\n$st');
     }
 
     try {
       await _metaService!.resyncMobileConfiguration();
     } catch (e, st) {
-      debugPrint('FrappeSDK: meta.resyncMobileConfiguration failed — $e\n$st');
+      sdkLog('FrappeSDK: meta.resyncMobileConfiguration failed — $e\n$st');
     }
 
     // Online mode stops here — closure pull is offline-only.
@@ -1249,7 +1250,7 @@ class FrappeSDK {
         // Drain failure is surfaced via the transition stream; we just
         // need to know it has settled before writing to per-doctype tables.
         // Log so the failure mode is visible at the boot path too.
-        debugPrint('FrappeSDK: pending drain awaited with error — $e\n$st');
+        sdkLog('FrappeSDK: pending drain awaited with error — $e\n$st');
       }
     }
     try {
@@ -1272,7 +1273,7 @@ class FrappeSDK {
           try {
             metasByDoctype[dt] = await _metaService!.getMeta(dt);
           } catch (e, st) {
-            debugPrint(
+            sdkLog(
               'FrappeSDK: closure pull — getMeta($dt) failed — $e\n$st',
             );
           }
@@ -1283,7 +1284,7 @@ class FrappeSDK {
             childDoctypes: closure.childDoctypes,
           );
         } catch (e, st) {
-          debugPrint(
+          sdkLog(
             'FrappeSDK: closure pull — ensureSchemaForClosure failed — $e\n$st',
           );
         }
@@ -1320,7 +1321,7 @@ class FrappeSDK {
           // incremental cycle. Adding the sentinel requires a new cursor field
           // (e.g. `zeroRowAt`) and a read in the eligibility filter here.
         } catch (e, st) {
-          debugPrint(
+          sdkLog(
             'FrappeSDK: sync_details cursor read($dt) failed — $e\n$st',
           );
         }
@@ -1334,7 +1335,7 @@ class FrappeSDK {
           final skip = doctypesToSkip(eligible.keys.toSet(), manifest);
           if (skip.isNotEmpty) {
             allowed = allowed.difference(skip);
-            debugPrint(
+            sdkLog(
               'FrappeSDK: sync_details skipped ${skip.length}/'
               '${eligible.length} unchanged doctypes',
             );
@@ -1349,7 +1350,7 @@ class FrappeSDK {
         () => _pullEngine!.run(closure, allowedDoctypes: allowed),
       );
     } catch (e, st) {
-      debugPrint('FrappeSDK: closure pull failed — $e\n$st');
+      sdkLog('FrappeSDK: closure pull failed — $e\n$st');
       return const <String>{};
     } finally {
       _syncCompleteController?.add(null);
@@ -1446,7 +1447,7 @@ class FrappeSDK {
         try {
           await dao.clearLastOkCursor(doctype);
         } catch (e, st) {
-          debugPrint(
+          sdkLog(
             'FrappeSDK: forcePullAll cursor-clear($doctype) failed — $e\n$st',
           );
         }
@@ -1455,11 +1456,11 @@ class FrappeSDK {
       for (final entry in results.entries) {
         final err = entry.value.error;
         if (err != null && err.isNotEmpty) {
-          debugPrint('FrappeSDK: forcePullAll(${entry.key}) failed — $err');
+          sdkLog('FrappeSDK: forcePullAll(${entry.key}) failed — $err');
         }
       }
     } catch (e, st) {
-      debugPrint('FrappeSDK: forcePullAll failed — $e\n$st');
+      sdkLog('FrappeSDK: forcePullAll failed — $e\n$st');
     }
     _syncCompleteController?.add(null);
   }
@@ -1499,7 +1500,7 @@ class FrappeSDK {
       try {
         await pending;
       } catch (e, st) {
-        debugPrint(
+        sdkLog(
           'FrappeSDK.dispose: pendingDrain still failing at teardown — '
           '$e\n$st',
         );

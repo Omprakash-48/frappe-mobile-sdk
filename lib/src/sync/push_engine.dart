@@ -342,7 +342,7 @@ class PushEngine {
         );
       }
     } catch (e, st) {
-      debugPrint(
+      sdkLog(
         'PushEngine: row(${row.id}, ${row.doctype}/${row.mobileUuid}) failed with unknown error — $e\n$st',
       );
       await outboxDao.markFailed(
@@ -746,7 +746,7 @@ class PushEngine {
     try {
       meta = await metaResolver(row.doctype);
     } catch (e, st) {
-      debugPrint('PushEngine: metaResolver(${row.doctype}) failed — $e\n$st');
+      sdkLog('PushEngine: metaResolver(${row.doctype}) failed — $e\n$st');
       return const [];
     }
 
@@ -776,7 +776,7 @@ class PushEngine {
       try {
         childMeta = await childMetaResolver(childDoctype);
       } catch (e, st) {
-        debugPrint(
+        sdkLog(
           'PushEngine: childMetaResolver($childDoctype) failed — $e\n$st',
         );
         continue;

@@ -3,6 +3,7 @@ import 'package:path/path.dart';
 import 'package:package_info_plus/package_info_plus.dart';
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 import 'daos/doctype_meta_dao.dart';
+import '../utils/sdk_log.dart';
 import 'daos/link_option_dao.dart';
 import 'daos/auth_token_dao.dart';
 import 'daos/doctype_permission_dao.dart';
@@ -75,7 +76,7 @@ class AppDatabase {
       _databaseName = '${sanitized}_frappe.db';
       return _databaseName!;
     } catch (e, st) {
-      debugPrint(
+      sdkLog(
         'AppDatabase._resolveDatabaseName: PackageInfo lookup failed, falling back to default — $e\n$st',
       );
       _databaseName = 'frappe_mobile_sdk.db';
@@ -104,7 +105,7 @@ class AppDatabase {
       await smokeDb.close();
       return databaseFactoryFfi;
     } catch (e, st) {
-      debugPrint(
+      sdkLog(
         'AppDatabase: FFI init failed → falling back to sqflite — $e\n$st',
       );
       onFfiInitFailure?.call(e, st);
@@ -261,7 +262,7 @@ class AppDatabase {
         ? walResult.first.values.first?.toString().toLowerCase()
         : null;
     if (actualMode != 'wal' && actualMode != 'memory') {
-      debugPrint(
+      sdkLog(
         'AppDatabase._onConfigure: WARNING — WAL mode not active '
         '(got "$actualMode"). Write throughput will be reduced.',
       );
