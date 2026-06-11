@@ -711,6 +711,21 @@ class OfflineRepository {
     required String serverName,
     required Map<String, dynamic> data,
   }) async {
+    await applyServerPage(
+      doctype: doctype,
+      rows: [data],
+    );
+  }
+
+  /// Applies a page of server-pulled snapshots via PullApply.
+  /// Used by SyncService to batch apply a whole page of data.
+  Future<void> applyServerPage({
+    required String doctype,
+    required List<Map<String, dynamic>> rows,
+    bool isInitialSync = false,
+  }) async {
+    if (rows.isEmpty) return;
+    
     final meta = await _loadMeta(doctype);
     if (meta == null) {
       // Meta absent means the DocType schema was never synced — we cannot
@@ -719,8 +734,8 @@ class OfflineRepository {
       // error message) rather than silently skipping the apply and marking
       // the outbox row as done.
       throw StateError(
-        'OfflineRepository.applyServerDocument: meta missing for $doctype; '
-        'cannot apply server snapshot for $serverName',
+        'OfflineRepository.applyServerPage: meta missing for $doctype; '
+        'cannot apply server snapshot for ${rows.length} rows',
       );
     }
     final tableName = normalizeDoctypeTableName(doctype);
@@ -731,7 +746,8 @@ class OfflineRepository {
       parentMeta: meta,
       parentTable: tableName,
       childMetasByFieldname: childMetas,
-      rows: [data],
+      rows: rows,
+      isInitialSync: isInitialSync,
     );
   }
 

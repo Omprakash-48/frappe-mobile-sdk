@@ -139,15 +139,11 @@ class UnifiedResolver {
       pageSize: pageSize,
     );
     final rawRows = await db.rawQuery(parsed.sql, parsed.params);
-    final rows = await Future.wait(
-      rawRows.map((r) async {
-        return LinkDecorator.decorate(
-          db: db,
-          parentMeta: meta,
-          row: Map<String, Object?>.from(r),
-          targetMetaResolver: metaResolver,
-        );
-      }),
+    final rows = await LinkDecorator.decorateBatch(
+      db: db,
+      parentMeta: meta,
+      rows: rawRows,
+      targetMetaResolver: metaResolver,
     );
 
     if (isOnline()) {

@@ -61,6 +61,14 @@ List<String> systemTablesDDL() => <String>[
       )
       ''',
   'INSERT OR IGNORE INTO sdk_meta (id, schema_version) VALUES (1, 0)',
+  '''
+      CREATE TABLE IF NOT EXISTS kv (
+        lang TEXT NOT NULL,
+        src  TEXT NOT NULL,
+        tgt  TEXT NOT NULL,
+        PRIMARY KEY (lang, src)
+      )
+      ''',
 ];
 
 /// ALTER statements to add the new columns to a pre-existing

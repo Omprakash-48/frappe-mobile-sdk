@@ -29,56 +29,153 @@ class LinkDecorator {
     required Map<String, Object?> row,
     required TargetMetaResolver targetMetaResolver,
   }) async {
-    final out = Map<String, Object?>.from(row);
-    for (final f in parentMeta.fields) {
-      if (f.fieldtype != 'Link' && f.fieldtype != 'Dynamic Link') continue;
-      final name = f.fieldname;
-      if (name == null || name.isEmpty) continue;
-      final v = row[name];
-      if (v == null) continue;
+    final res = await decorateBatch(
+      db: db,
+      parentMeta: parentMeta,
+      rows: [row],
+      targetMetaResolver: targetMetaResolver,
+    );
+    return res.first;
+  }
 
-      String? targetDoctype;
-      if (f.fieldtype == 'Link') {
-        targetDoctype = f.options;
-      } else {
-        // Dynamic Link: `options` names a sibling field that holds the doctype.
-        final sibling = f.options;
-        if (sibling != null && sibling.isNotEmpty) {
-          targetDoctype = row[sibling] as String?;
+  /// Batch resolves Link / Dynamic Link fields for multiple rows simultaneously.
+  /// Eliminates the O(N) database queries problem that occurs when hydrating
+  /// large lists or options. Chunked into queries of 900 variables to avoid
+  /// SQLite limits.
+  static Future<List<Map<String, Object?>>> decorateBatch({
+    required Database db,
+    required DocTypeMeta parentMeta,
+    required List<Map<String, Object?>> rows,
+    required TargetMetaResolver targetMetaResolver,
+  }) async {
+    if (rows.isEmpty) return rows;
+
+    final linkFields = parentMeta.fields
+        .where((f) => f.fieldtype == 'Link' || f.fieldtype == 'Dynamic Link')
+        .toList();
+    if (linkFields.isEmpty) return rows;
+
+    // 1. Gather all required lookups grouped by targetDoctype -> {isLocal: Set<ID>}
+    final lookups = <String, Map<bool, Set<String>>>{};
+
+    for (final row in rows) {
+      for (final f in linkFields) {
+        final name = f.fieldname;
+        if (name == null || name.isEmpty) continue;
+        final v = row[name];
+        if (v == null || v.toString().isEmpty) continue;
+        final strVal = v.toString();
+
+        String? targetDoctype;
+        if (f.fieldtype == 'Link') {
+          targetDoctype = f.options;
+        } else {
+          final sibling = f.options;
+          if (sibling != null && sibling.isNotEmpty) {
+            targetDoctype = row[sibling] as String?;
+          }
         }
-      }
-      if (targetDoctype == null || targetDoctype.isEmpty) {
-        out['${name}__display'] = v;
-        continue;
-      }
+        if (targetDoctype == null || targetDoctype.isEmpty) continue;
 
-      final isLocal = (row['${name}__is_local'] as int?) == 1;
-      final targetTable = normalizeDoctypeTableName(targetDoctype);
-      final targetMeta = await targetMetaResolver(targetDoctype);
-      final titleCol = targetMeta.titleField ?? 'server_name';
+        final isLocal = (row['${name}__is_local'] as int?) == 1;
 
-      final List<Map<String, Object?>> targetRows;
-      try {
-        targetRows = await db.query(
-          targetTable,
-          columns: [titleCol, 'server_name'],
-          where: isLocal ? 'mobile_uuid = ?' : 'server_name = ?',
-          whereArgs: [v],
-          limit: 1,
-        );
-      } on DatabaseException {
-        // Target table not yet provisioned (closure may not have reached
-        // it). Fall back to raw value — UI shows the UUID/name as-is.
-        out['${name}__display'] = v;
-        continue;
-      }
-      if (targetRows.isEmpty) {
-        out['${name}__display'] = v;
-      } else {
-        final title = targetRows.first[titleCol];
-        out['${name}__display'] = title ?? targetRows.first['server_name'] ?? v;
+        lookups.putIfAbsent(targetDoctype, () => {true: {}, false: {}});
+        lookups[targetDoctype]![isLocal]!.add(strVal);
       }
     }
-    return out;
+
+    if (lookups.isEmpty) return rows;
+
+    // 2. Perform batched queries.
+    // Map of targetDoctype -> (Map of ID -> displayLabel)
+    final displayCache = <String, Map<String, String>>{};
+
+    for (final entry in lookups.entries) {
+      final targetDoctype = entry.key;
+      final targetMeta = await targetMetaResolver(targetDoctype);
+      final titleCol = targetMeta.titleField ?? 'server_name';
+      final targetTable = normalizeDoctypeTableName(targetDoctype);
+
+      final isLocalSet = entry.value[true]!;
+      final isServerSet = entry.value[false]!;
+
+      final doctypeCache = <String, String>{};
+      displayCache[targetDoctype] = doctypeCache;
+
+      Future<void> fetchChunked(bool isLocal, Set<String> values) async {
+        if (values.isEmpty) return;
+        final list = values.toList();
+        final col = isLocal ? 'mobile_uuid' : 'server_name';
+
+        for (var i = 0; i < list.length; i += 900) {
+          final chunk = list.sublist(
+            i,
+            i + 900 > list.length ? list.length : i + 900,
+          );
+          final placeholders = List.filled(chunk.length, '?').join(',');
+
+          try {
+            final targetRows = await db.query(
+              targetTable,
+              columns: [titleCol, 'server_name', 'mobile_uuid'],
+              where: '$col IN ($placeholders)',
+              whereArgs: chunk,
+            );
+
+            for (final tr in targetRows) {
+              final title = tr[titleCol];
+              final idVal = tr[col] as String?;
+              if (idVal != null) {
+                doctypeCache[idVal] =
+                    (title ?? tr['server_name'] ?? idVal).toString();
+              }
+            }
+          } on DatabaseException {
+            // Target table not yet provisioned. Fall back to raw value.
+          }
+        }
+      }
+
+      await fetchChunked(true, isLocalSet);
+      await fetchChunked(false, isServerSet);
+    }
+
+    // 3. Map back to rows.
+    return rows.map((row) {
+      final out = Map<String, Object?>.from(row);
+      for (final f in linkFields) {
+        final name = f.fieldname;
+        if (name == null || name.isEmpty) continue;
+        final v = row[name];
+        if (v == null || v.toString().isEmpty) {
+          if (v != null) out['${name}__display'] = v;
+          continue;
+        }
+        final strVal = v.toString();
+
+        String? targetDoctype;
+        if (f.fieldtype == 'Link') {
+          targetDoctype = f.options;
+        } else {
+          final sibling = f.options;
+          if (sibling != null && sibling.isNotEmpty) {
+            targetDoctype = row[sibling] as String?;
+          }
+        }
+
+        if (targetDoctype == null || targetDoctype.isEmpty) {
+          out['${name}__display'] = v;
+          continue;
+        }
+
+        final doctypeCache = displayCache[targetDoctype];
+        if (doctypeCache != null && doctypeCache.containsKey(strVal)) {
+          out['${name}__display'] = doctypeCache[strVal];
+        } else {
+          out['${name}__display'] = v;
+        }
+      }
+      return out;
+    }).toList();
   }
 }

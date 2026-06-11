@@ -8,10 +8,10 @@ import '../field_type_mapping.dart';
 /// sort_field, then Link fields (ordered by linkEdgeCount desc, then insertion).
 List<String> chooseIndexes(
   DocTypeMeta meta, {
-  int maxIndexes = 7,
+  int maxIndexes = 8,
   Map<String, int>? linkEdgeCount,
 }) {
-  final chosen = <String>['server_name', 'modified', 'sync_status'];
+  final chosen = <String>['server_name', 'modified', 'sync_status', 'mobile_uuid'];
 
   void add(String col) {
     if (chosen.length >= maxIndexes) return;

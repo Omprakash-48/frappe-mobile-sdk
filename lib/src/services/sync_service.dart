@@ -509,14 +509,13 @@ class SyncService {
         lookahead = fetchPage(start + pageSize);
       }
 
-      // Track the cursor advance for this page so we can persist it
-      // exactly once after the page drains. Updating per-row would
-      // burn extra UPDATE statements without changing crash-safety.
+      // Apply the current page to SQLite. We batch them together so
+      // `PullApply.applyPage` can execute a single transaction block for the
+      // entire page, bypassing per-row overhead.
+      final batchRows = <Map<String, dynamic>>[];
       String? pageLastModified;
       String? pageLastName;
 
-      // Apply the current page to SQLite. When `lookahead` was fired,
-      // this work overlaps with the network request.
       for (final docData in page) {
         if (docData is! Map<String, dynamic>) continue;
         final serverId =
@@ -534,23 +533,27 @@ class SyncService {
           if (modCmp == 0 && serverId.compareTo(cursorName) <= 0) continue;
         }
 
+        batchRows.add(docData);
+        pageLastModified = modifiedAt;
+        pageLastName = serverId;
+      }
+
+      if (batchRows.isNotEmpty) {
         try {
-          await _repository.applyServerDocument(
+          await _repository.applyServerPage(
             doctype: doctype,
-            serverName: serverId,
-            data: docData,
+            rows: batchRows,
+            isInitialSync: !cursorComplete,
           );
-          success++;
-          pageLastModified = modifiedAt;
-          pageLastName = serverId;
+          success += batchRows.length;
         } catch (e, st) {
           sdkLog(
-            'SyncService.pullSync applyServerDocument($doctype/$serverId) failed — $e\n$st',
+            'SyncService.pullSync applyServerPage($doctype) failed for ${batchRows.length} rows — $e\n$st',
           );
-          failed++;
+          failed += batchRows.length;
           errors.add(
             SyncError(
-              documentId: serverId,
+              documentId: 'batch',
               doctype: doctype,
               operation: 'pull',
               errorMessage: e.toString(),

@@ -1,38 +1,20 @@
-import 'package:path/path.dart';
 import 'package:sqflite/sqflite.dart';
 
 /// A standalone KV SQLite cache for translation strings.
 ///
-/// Opens its own `translations_cache.db` file — completely independent of the
-/// main [AppDatabase]. This is intentional: it is a pure cache that can be
-/// wiped freely and requires no migrations.
+/// Uses the injected [Database] from [AppDatabase].
 class TranslationDao {
   static const _tableName = 'kv';
 
-  final String _dbPath;
-  Database? _db;
+  final Database _db;
 
-  /// Memoises an in-flight [_doOpen] call so concurrent callers
-  /// (TOCTOU) don't race to open two handles.
-  Future<Database>? _openFuture;
-
-  TranslationDao() : _dbPath = 'translations_cache.db';
+  TranslationDao(this._db);
 
   /// Use in tests only — opens an in-memory database so no filesystem I/O
   /// occurs and each [TranslationDao.forTesting()] instance is isolated.
-  TranslationDao.forTesting() : _dbPath = inMemoryDatabasePath;
-
-  Future<Database> _open() {
-    if (_db != null) return Future.value(_db!);
-    return _openFuture ??= _doOpen();
-  }
-
-  Future<Database> _doOpen() async {
-    final path = _dbPath == inMemoryDatabasePath
-        ? _dbPath
-        : join(await getDatabasesPath(), _dbPath);
+  static Future<TranslationDao> forTesting() async {
     final db = await openDatabase(
-      path,
+      inMemoryDatabasePath,
       version: 1,
       singleInstance: false,
       onCreate: (db, _) async {
@@ -46,9 +28,7 @@ class TranslationDao {
         ''');
       },
     );
-    _db = db;
-    _openFuture = null;
-    return db;
+    return TranslationDao(db);
   }
 
   /// Inserts or replaces all entries in [map] for [lang].
@@ -57,8 +37,7 @@ class TranslationDao {
   /// by writing all rows inside a single transaction batch.
   Future<void> bulkUpsert(String lang, Map<String, String> map) async {
     if (map.isEmpty) return;
-    final db = await _open();
-    await db.transaction((txn) async {
+    await _db.transaction((txn) async {
       final batch = txn.batch();
       for (final e in map.entries) {
         batch.insert(_tableName, {
@@ -75,8 +54,7 @@ class TranslationDao {
   ///
   /// Returns an empty map if [lang] has no cached entries.
   Future<Map<String, String>> readAll(String lang) async {
-    final db = await _open();
-    final rows = await db.query(
+    final rows = await _db.query(
       _tableName,
       columns: ['src', 'tgt'],
       where: 'lang = ?',
@@ -88,16 +66,11 @@ class TranslationDao {
   /// Deletes ALL rows from the kv table. Called by [TranslationService.clearAll]
   /// on logout to wipe the translation cache for all languages.
   Future<void> deleteAll() async {
-    final db = await _open();
-    await db.delete(_tableName);
+    await _db.delete(_tableName);
   }
 
   /// Closes the underlying database connection.
-  ///
-  /// After calling this, any subsequent operation will re-open the database.
   Future<void> close() async {
-    _openFuture = null;
-    await _db?.close();
-    _db = null;
+    // Let AppDatabase manage connection lifecycle; do nothing here.
   }
 }

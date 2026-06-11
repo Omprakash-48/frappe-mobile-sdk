@@ -238,7 +238,7 @@ class FrappeSDK {
       metaFetcher: testMetaFn,
     );
     _permissionService = PermissionService(_client!, _database!);
-    final translationDao = TranslationDao.forTesting();
+    final translationDao = TranslationDao(database.rawDatabase);
     _translationService = TranslationService(_client!)
       ..injectDao(translationDao);
     _syncService = SyncService(
@@ -351,7 +351,7 @@ class FrappeSDK {
       metaFetcher: metaFn,
     );
     _permissionService = PermissionService(_client!, _database!);
-    final translationDao = TranslationDao();
+    final translationDao = TranslationDao(rawDb);
     _translationService = TranslationService(_client!)
       ..injectDao(translationDao);
     // Build the sync engine pack (PushEngine + PullEngine + SyncController +

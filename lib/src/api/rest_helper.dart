@@ -252,7 +252,7 @@ class RestHelper {
           error: null,
         );
 
-        return _handleResponse(response);
+        return await _handleResponse(response);
       } on AuthException catch (e) {
         if (e.statusCode == 401 &&
             _bearerToken != null &&
@@ -293,10 +293,10 @@ class RestHelper {
     }
   }
 
-  dynamic _handleResponse(http.Response response) {
+  Future<dynamic> _handleResponse(http.Response response) async {
     dynamic body;
     try {
-      body = jsonDecode(response.body);
+      body = await compute(jsonDecode, response.body);
     } catch (e, st) {
       // Non-JSON body. On 2xx we return raw text; on error status we
       // synthesize an ApiException below using the same raw body. Logged
@@ -405,7 +405,7 @@ class RestHelper {
       var response = await http.Response.fromStream(
         streamedResponse,
       ).timeout(uploadTimeout);
-      return _handleResponse(response);
+      return await _handleResponse(response);
     } on TimeoutException {
       throw NetworkException(
         'Upload timed out. Check your connection and try again.',

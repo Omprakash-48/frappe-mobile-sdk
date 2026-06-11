@@ -163,6 +163,7 @@ class PullApply {
     required Set<String> parentNormFields,
   }) async {
 
+    final batch = txn.batch();
     for (final r in rows) {
       final serverName = r['name'] as String?;
       if (serverName == null) continue;
@@ -251,7 +252,7 @@ class PullApply {
             (storedModified == null ||
                 incomingModified.isAfter(storedModified));
         if (serverAdvanced) {
-          await txn.update(
+          batch.update(
             parentTable,
             <String, Object?>{
               'sync_status': 'conflict',
@@ -301,9 +302,9 @@ class PullApply {
       }
 
       if (existing.isEmpty) {
-        await txn.insert(parentTable, parentRow);
+        batch.insert(parentTable, parentRow);
       } else {
-        await txn.update(
+        batch.update(
           parentTable,
           parentRow,
           where: 'mobile_uuid = ?',
@@ -348,7 +349,7 @@ class PullApply {
           if (sn != null && sn.isNotEmpty) byServerName[sn] = mu;
         }
 
-        await txn.delete(
+        batch.delete(
           childTable,
           where: 'parent_uuid = ? AND parentfield = ?',
           whereArgs: [uuid, fieldname],
@@ -391,10 +392,11 @@ class PullApply {
               childRow['${cn}__is_local'] = 0;
             }
           }
-          await txn.insert(childTable, childRow);
+          batch.insert(childTable, childRow);
         }
       }
     }
+    await batch.commit(noResult: true);
   }
 
   static Future<void> _applyPageInTxnBulk({
