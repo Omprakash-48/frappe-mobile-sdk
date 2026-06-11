@@ -79,6 +79,13 @@ dependencies:
   # Bounded so downstream consumers pinning their own `meta` don't hit
   # version-skew conflicts (PR#36 round-4 M8). meta stays on 1.x.
   meta: ">=1.9.0 <3.0.0"
+
+  # SQLite FFI for offline database access
+  sqflite_common_ffi: ^2.3.0
+
+  # Native SQLite bindings (transitive, now explicit for clarity)
+  sqlite3: ^3.0.0
+
 dev_dependencies:
   flutter_test:
     sdk: flutter
@@ -86,9 +93,6 @@ dev_dependencies:
 
   # Pre-commit: format + analyze before commit (run: dart run flutter_pre_commit)
   flutter_pre_commit: ^0.2.4
-
-  # SQLite FFI for testing
-  sqflite_common_ffi: ^2.3.0
 
 flutter:
   uses-material-design: true
