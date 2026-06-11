@@ -125,32 +125,95 @@ class PullApply {
     final parentNormFields = parentMeta.normFieldNames;
 
     if (isInitialSync) {
-      sdkLog(
-        'PullApply.applyPageInTxn: Bulk insert of ${rows.length} rows into $parentTable',
-      );
-      await _applyPageInTxnBulk(
-        txn: txn,
-        parentMeta: parentMeta,
-        parentTable: parentTable,
-        childMetasByFieldname: childMetasByFieldname,
-        rows: rows,
-        uuidGen: uuidGen,
-        parentNormFields: parentNormFields,
-      );
-    } else {
-      sdkLog(
-        'PullApply.applyPageInTxn: Sequential write of ${rows.length} rows into $parentTable',
-      );
-      await _applyPageInTxnSequential(
-        txn: txn,
-        parentMeta: parentMeta,
-        parentTable: parentTable,
-        childMetasByFieldname: childMetasByFieldname,
-        rows: rows,
-        uuidGen: uuidGen,
-        parentNormFields: parentNormFields,
-      );
+      // Bulk path is an optimisation for the clean-slate initial sync —
+      // it skips per-row queries. Before using it, check whether any
+      // existing rows need the sequential guards (tombstone skip,
+      // dirty-row conflict detection, ghost-success UUID reconciliation).
+      // If any such rows exist, fall back to the sequential path for the
+      // entire page. The pre-check is a single COUNT query, O(1).
+      final serverNames = rows
+          .map((r) => r['name'] as String?)
+          .where((n) => n != null && n.isNotEmpty)
+          .cast<String>()
+          .toList();
+      final incomingUuids = rows
+          .map((r) => r['mobile_uuid']?.toString())
+          .where((u) => u != null && u.isNotEmpty)
+          .cast<String>()
+          .toList();
+
+      var useSequential = false;
+      if (serverNames.isNotEmpty) {
+        final dirtyStatuses = [..._locallyDirtyStatuses, 'deleted'];
+        final snPlaceholders = List.filled(serverNames.length, '?').join(',');
+        final dirtyPlaceholders =
+            List.filled(dirtyStatuses.length, '?').join(',');
+
+        final String query;
+        final List<Object?> args;
+        if (incomingUuids.isNotEmpty) {
+          final uuidPlaceholders =
+              List.filled(incomingUuids.length, '?').join(',');
+          query = '''
+            SELECT COUNT(*) AS n FROM $parentTable
+            WHERE (server_name IN ($snPlaceholders)
+                   AND sync_status IN ($dirtyPlaceholders))
+               OR (mobile_uuid IN ($uuidPlaceholders)
+                   AND (server_name IS NULL OR server_name = ''))
+          ''';
+          args = [...serverNames, ...dirtyStatuses, ...incomingUuids];
+        } else {
+          query = '''
+            SELECT COUNT(*) AS n FROM $parentTable
+            WHERE server_name IN ($snPlaceholders)
+              AND sync_status IN ($dirtyPlaceholders)
+          ''';
+          args = [...serverNames, ...dirtyStatuses];
+        }
+
+        final result = await txn.rawQuery(query, args);
+        final unsafeCount = (result.first['n'] as int? ?? 0);
+        if (unsafeCount > 0) {
+          sdkLog(
+            'PullApply.applyPageInTxn: $unsafeCount unsafe rows detected'
+            ' — falling back to sequential for $parentTable',
+          );
+          useSequential = true;
+        }
+      }
+
+      if (!useSequential) {
+        sdkLog(
+          'PullApply.applyPageInTxn: Bulk insert of ${rows.length} rows'
+          ' into $parentTable',
+        );
+        await _applyPageInTxnBulk(
+          txn: txn,
+          parentMeta: parentMeta,
+          parentTable: parentTable,
+          childMetasByFieldname: childMetasByFieldname,
+          rows: rows,
+          uuidGen: uuidGen,
+          parentNormFields: parentNormFields,
+        );
+        return;
+      }
     }
+    // Sequential path — handles all edge cases. Used for incremental
+    // sync and for initial-sync pages that failed the bulk safety check.
+    sdkLog(
+      'PullApply.applyPageInTxn: Sequential write of ${rows.length} rows'
+      ' into $parentTable',
+    );
+    await _applyPageInTxnSequential(
+      txn: txn,
+      parentMeta: parentMeta,
+      parentTable: parentTable,
+      childMetasByFieldname: childMetasByFieldname,
+      rows: rows,
+      uuidGen: uuidGen,
+      parentNormFields: parentNormFields,
+    );
   }
 
   static Future<void> _applyPageInTxnSequential({
