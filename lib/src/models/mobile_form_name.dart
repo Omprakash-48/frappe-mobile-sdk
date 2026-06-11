@@ -16,7 +16,7 @@ class MobileFormName {
     return MobileFormName(
       mobileDoctype: json['mobile_workspace_item'] as String? ?? '',
       groupName: json['group_name'] as String?,
-      doctypeMetaModifiedAt: json['doctype_meta_modifed_at'] as String?,
+      doctypeMetaModifiedAt: json['doctype_meta_modified_at'] as String?,
       doctypeIcon: json['doctype_icon'] as String?,
     );
   }
@@ -26,7 +26,7 @@ class MobileFormName {
       'mobile_doctype': mobileDoctype,
       if (groupName != null) 'group_name': groupName,
       if (doctypeMetaModifiedAt != null)
-        'doctype_meta_modifed_at': doctypeMetaModifiedAt,
+        'doctype_meta_modified_at': doctypeMetaModifiedAt,
       if (doctypeIcon != null) 'doctype_icon': doctypeIcon,
     };
   }
