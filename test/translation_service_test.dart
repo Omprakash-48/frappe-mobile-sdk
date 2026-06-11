@@ -67,6 +67,30 @@ void main() {
       expect(events, isEmpty);
       await svc.dao.close();
     });
+
+    test('emits onChanged on every loadFromCache call that finds rows', () async {
+      // Verifies the contract that _doRefresh is meant to honour: once the
+      // in-memory cache is populated, onChanged fires every time — even on
+      // repeated calls (analogous to _doRefresh firing after bulkUpsert
+      // throws but the cache is still valid from loadTranslations).
+      final svc = await makeService();
+      await svc.dao.bulkUpsert('hi', {'Submit': 'सबमिट'});
+      final events = <void>[];
+      svc.onChanged.listen((_) => events.add(null));
+
+      svc.setCurrentLangForTesting('hi');
+      await svc.loadFromCache('hi');
+      await Future<void>.delayed(Duration.zero);
+      expect(events, hasLength(1));
+      expect(svc.translate('Submit'), 'सबमिट');
+
+      // A second load (simulating a cache-refresh) must also emit.
+      await svc.loadFromCache('hi');
+      await Future<void>.delayed(Duration.zero);
+      expect(events, hasLength(2));
+
+      await svc.dao.close();
+    });
   });
 
   group('setLocale', () {

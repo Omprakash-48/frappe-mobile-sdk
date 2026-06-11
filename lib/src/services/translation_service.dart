@@ -76,7 +76,8 @@ class TranslationService {
       await _dao?.bulkUpsert(lang, map);
     } catch (e, st) {
       sdkLog('TranslationService._doRefresh($lang) persist failed — $e\n$st');
-      return;
+      // fall through — in-memory cache is valid even if SQLite persistence
+      // failed; notify listeners so the UI reflects the updated cache.
     }
     if (!_changedController.isClosed) _changedController.add(null);
   }
