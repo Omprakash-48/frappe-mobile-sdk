@@ -82,7 +82,7 @@ Major release: offline-first foundation, server-driven offline-mode toggle, and 
 
 **Translation pipeline (PR #76)**
 
-- `TranslationDao` — standalone KV SQLite store (`translations_cache.db`, schema: `(lang, src, tgt)`) for offline translation persistence. Fully independent of `AppDatabase`; can be wiped without a migration. Methods: `bulkUpsert`, `readAll`, `deleteAll`, `close`. `TranslationDao.forTesting()` opens an in-memory DB.
+- `TranslationDao` — KV store for offline translation persistence (schema: `(lang, src, tgt)`). The `kv` table lives **inside `AppDatabase`** (the main app database), not in a separate file. `TranslationDao` is constructed with an injected `Database` handle; `close()` is a deliberate no-op (AppDatabase manages the connection lifecycle). Cleared via `TranslationService.clearAll()` or `AppDatabase.clearAllData()`. `TranslationDao.forTesting()` opens an isolated in-memory DB. Methods: `bulkUpsert`, `readAll`, `deleteAll`.
 - `TranslationService` — offline-capable translation service with `loadFromCache` (SQLite, <5 ms), `refreshAsync` / `refreshAllAsync` (fire-and-forget network), `translateDelegate` hook for host-app ARB priority lookup, `onChanged` broadcast stream, `clearAll`, and `dispose()`.
 - `TranslationService.fetchEnabledLanguages()` — queries `frappe.client.get_list` on the `Language` doctype to discover all enabled language codes.
 - `TranslationService.refreshAllAsync()` — calls `fetchEnabledLanguages()` then `_doRefresh(lang)` for every enabled language; fires once per login. Ensures the offline cache covers all languages the deployment supports.
@@ -119,13 +119,14 @@ Major release: offline-first foundation, server-driven offline-mode toggle, and 
 
 ### Schema
 
-- **`AppDatabase._version` bumped from `2` to `3`.** `sdk_meta.schema_version` is written in lockstep by both `_onCreate` and the upgrade path.
-- **Single migration step** `_migrateV2ToV3` runs entirely within one transaction and replaces any prior multi-step v3→v4→v5→v6 chain.
-- **Steps:** (1) safely add v3 + v4 column extensions to `doctype_meta` via wrapped `ALTER TABLE ADD COLUMN` (catches "duplicate column name"); (2) idempotently create system tables (`outbox`, `pending_attachments`, `sdk_meta`) with `CREATE TABLE IF NOT EXISTS`; (3) drop the legacy `documents` table and its indexes; (4) upsert the singleton `sdk_meta` row with `schema_version = 3`.
+- **`AppDatabase._version` bumped from `2` to `4`.** `sdk_meta.schema_version` is written in lockstep by both `_onCreate` and all upgrade paths.
+- **Migration step `_migrateV2ToV3`** runs within one transaction: (1) safely add v3 + v4 column extensions to `doctype_meta` via wrapped `ALTER TABLE ADD COLUMN` (catches "duplicate column name"); (2) idempotently create system tables (`outbox`, `pending_attachments`, `sdk_meta`) with `CREATE TABLE IF NOT EXISTS`; (3) drop the legacy `documents` table and its indexes; (4) upsert the singleton `sdk_meta` row with `schema_version = 3`.
+- **Migration step `_migrateV3ToV4`** (new — runs for all existing v3 installs): creates the `kv` table (offline translation cache, `PRIMARY KEY (lang, src)`) inside `AppDatabase` using `CREATE TABLE IF NOT EXISTS`; updates `sdk_meta.schema_version = 4`. Fresh installs also receive the `kv` table via `systemTablesDDL()`.
+- **Upgrade paths:** v2→v4 runs both steps; v3→v4 runs only `_migrateV3ToV4`; fresh installs skip both. All three paths produce identical final schema.
 - **Storage layers:**
   - **Per-doctype mirror** — `docs__<doctype>` tables with `mobile_uuid` PK, `server_name`, `sync_status`, `sync_op`, `push_base_payload`, and field columns. Children carry `parent_uuid`. Tables are **lazily created** on first pull via `OfflineRepository.ensureSchemaForClosure`.
-  - **System** — `sdk_meta` (singleton row tracking `schema_version`, bootstrap state, offline mode, session user); `outbox` (operation log indexed by state + created_at); `pending_attachments` (file upload queue with retry).
-- Fresh installs and migrated devices end in identical schema state.
+  - **System** — `sdk_meta` (singleton row tracking `schema_version`, bootstrap state, offline mode, session user); `outbox` (operation log indexed by state + created_at); `pending_attachments` (file upload queue with retry); `kv` (offline translation cache).
+- Fresh installs, v2→v4 upgrades, and v3→v4 upgrades all end in identical schema state (`schema_version = 4`).
 
 ### Fixed
 
@@ -137,11 +138,11 @@ Major release: offline-first foundation, server-driven offline-mode toggle, and 
 
 **Translation pipeline (feat/sdk-offline-phase2 — PR #76)**
 
-- `TranslationService.loadTranslations` — migrated from `mobile_auth.get_translations` to `frappe.client.get_list` on the standard `Translation` doctype. No custom backend method required; works with any Frappe installation.
+- `TranslationService.loadTranslations` — continues to call `mobile_auth.get_translations` (the `frappe-mobile-control` custom method). `frappe.client.get_list('Translation')` was evaluated but not adopted: it returns only user-created custom translations and misses the compiled `.po` translations that supply field labels. The `frappe-mobile-control` backend is still required.
 - `TranslationService.refreshAllAsync` — fires once per login to pull translations for **all** enabled languages, not just the current user's language. Ensures the offline SQLite cache is fully populated for every language the deployment supports, so offline sessions have no missing translations regardless of locale.
-- `TranslationService.clearAll` (+ `TranslationDao.deleteAll`) — called from `FrappeSDK.logout(clearDatabase: true)`. Wipes `translations_cache.db` on logout so a different user logging into the same device never sees stale translations.
+- `TranslationService.clearAll` (+ `TranslationDao.deleteAll`) — called from `FrappeSDK.logout(clearDatabase: true)`. Clears the in-memory translation cache and wipes the `kv` table inside `AppDatabase` on logout so a different user logging into the same device never sees stale translations.
 - `TranslationService._disposed` flag — guards `loadFromCache` and `_doRefresh` against writing to a closed `StreamController` or DAO when `dispose()` fires during an in-flight network call.
-- `TranslationDao._openFuture` memoization — prevents a TOCTOU double-open if two concurrent callers hit `_open()` before the first `openDatabase` resolves.
+- `TranslationDao` constructor — accepts an injected `Database` handle, eliminating any lazy-open pattern. No `_open()` method exists; the TOCTOU race cannot occur.
 - `sdkTr` global helper — renamed from `tr` to avoid naming collisions with `easy_localization` and GetX in host apps. Host apps should define a local `tr(String s) => FrappeTranslations.translate(s);` wrapper instead of importing `sdkTr` directly.
 
 **Outbox state machine (feat/sdk-offline-phase2 — PR #76)**
@@ -157,6 +158,8 @@ Major release: offline-first foundation, server-driven offline-mode toggle, and 
 
 **Misc (feat/sdk-offline-phase2 — PR #76)**
 
+- `FrappeSDK.onFfiInitFailure` — optional `void Function(Object, StackTrace)?` constructor parameter. Called when SQLite FFI initialisation fails before the MethodChannel fallback activates. Wire to your crash reporter to capture non-fatal FFI errors without blocking SDK startup. Example: `onFfiInitFailure: (e, st) => FirebaseCrashlytics.instance.recordError(e, st, fatal: false)`.
+- `FrappeSDK` page-size constructor parameters — `pullPageSize` (default 500), `syncServicePageSize` (default 1000), `listChildDocsPageSize` (default 1000), `listFullDocsPageSize` (default 1000), `listDefaultPageSize` (default 20). Tune for your server's response-time profile; higher values reduce round-trips at the cost of larger per-request payloads.
 - `FrappeAppGuard.allowDeferringUpdates` — default was `false` but documented as `true`. The deferrable-update branch in `_checkAppStatus` never assigned `deferrableUpdate = true` because the `else` branch was missing. Both defects fixed.
 - `debugPrint` → `sdkLog` migration completed across `translation_service.dart`, `doctype_service.dart`, `login_screen.dart`, `sync_status_screen.dart`, `form_screen.dart`, `document_list_screen.dart`, and `app_guard.dart`. `sdkLog` is a no-op in release builds; `debugPrint` was not.
 - `doc/FIELD_TYPES.md` — `SearchableSelect` / `SearchableSelectDialog` usage examples marked as internal (not exported from the barrel).

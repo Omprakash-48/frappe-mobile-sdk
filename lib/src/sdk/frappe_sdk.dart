@@ -58,10 +58,20 @@ class FrappeSDK {
   /// The SDK continues normally on the MethodChannel path regardless.
   final void Function(Object, StackTrace)? onFfiInitFailure;
 
+  /// Rows per page for `PullEngine`. Default 500. Increase for servers with
+  /// fast response times and large doctypes; decrease if requests time out.
   final int pullPageSize;
+
+  /// Rows per page for `SyncService` batch apply. Default 1000.
   final int syncServicePageSize;
+
+  /// Rows per page when listing child-table documents. Default 1000.
   final int listChildDocsPageSize;
+
+  /// Rows per page when fetching full document payloads (with children). Default 1000.
   final int listFullDocsPageSize;
+
+  /// Rows per page for general list queries. Default 20.
   final int listDefaultPageSize;
 
   FrappeClient? _client;

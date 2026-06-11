@@ -26,7 +26,7 @@ SDK screens / fields / validators
 
 **Priority order (highest to lowest):**
 1. Host app ARB lookup (compiled, type-safe, always current)
-2. SQLite translation cache (`translations_cache.db`, populated from `mobile_auth.get_translations` after login)
+2. SQLite translation cache (`kv` table inside `AppDatabase`, populated from `mobile_auth.get_translations` after login)
 3. Source string as-is (English fallback, never null)
 
 ---
@@ -170,7 +170,7 @@ The ARB key must match the switch-case in the generated lookup. Keys are camelCa
 
 ## SQLite translation cache
 
-`TranslationService` maintains a standalone SQLite KV store (`translations_cache.db`) at `TranslationDao`. It is completely separate from the main `AppDatabase` and can be wiped freely.
+`TranslationService` persists translations in the `kv` table inside `AppDatabase` (the main app database). `TranslationDao` is constructed with an injected `Database` handle; there is no separate `translations_cache.db` file. `TranslationDao.close()` is a no-op — `AppDatabase` owns the connection lifecycle. Clear via `TranslationService.clearAll()` or `AppDatabase.clearAllData()`.
 
 | Source | What it covers | When loaded |
 |--------|---------------|-------------|
@@ -221,14 +221,14 @@ background refresh completes (~200 ms after login)
 
 logout()
   └─ _translationService?.clearAll()               ← NEW: clears SQLite + in-memory cache
-       └─ TranslationDao.deleteAll()               ← wipes translations_cache.db
+       └─ TranslationDao.deleteAll()               ← wipes kv table in AppDatabase
 ```
 
 **First-frame guarantee:** On every launch after the first, the SQLite cache is pre-warmed before the form screen mounts. The user's language is correct from frame 1 — no flash of English.
 
 **Offline-first guarantee:** After the first successful login (while online), `refreshAllAsync` populates the cache for all enabled languages. Subsequent offline sessions have a fully populated SQLite cache regardless of which user logs in and which language they select.
 
-**Session isolation:** `clearAll()` is called on logout, wiping translations from `translations_cache.db`. This prevents a different user (on a shared device) from seeing another user's cached translations on their next login.
+**Session isolation:** `clearAll()` is called on logout, wiping the `kv` table inside `AppDatabase`. This prevents a different user (on a shared device) from seeing another user's cached translations on their next login.
 
 ---
 
