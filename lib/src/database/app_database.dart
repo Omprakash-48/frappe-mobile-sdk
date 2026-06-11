@@ -395,5 +395,15 @@ class AppDatabaseTestSeam {
     int newVersion,
   ) => AppDatabase._onUpgrade(db, oldVersion, newVersion);
 
+  static Future<void> runOnConfigure(Database db) =>
+      AppDatabase._onConfigure(db);
+
   static int get version => AppDatabase._version;
+
+  /// Resets the production singleton so tests that call [AppDatabase.getInstance]
+  /// start from a clean state. Never call from production code.
+  static void resetSingleton() {
+    AppDatabase._instance = null;
+    AppDatabase._instanceFuture = null;
+  }
 }
