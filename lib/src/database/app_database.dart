@@ -10,12 +10,13 @@ import 'schema/system_tables.dart';
 
 /// Injectable factory resolver — allows tests to substitute their own
 /// factory (e.g. one that always throws) without mocking internals.
-typedef DatabaseFactoryResolver = Future<DatabaseFactory> Function(
-  void Function(Object, StackTrace)? onFailure,
-);
+typedef DatabaseFactoryResolver =
+    Future<DatabaseFactory> Function(
+      void Function(Object, StackTrace)? onFailure,
+    );
 
 class AppDatabase {
-  static const int _version = 3;
+  static const int _version = 4;
 
   /// Singleton instance for the production (on-disk) database. The in-memory
   /// factory does NOT touch this — each call returns an independent instance
@@ -117,14 +118,15 @@ class AppDatabase {
     DatabaseFactoryResolver? factoryResolver,
   }) {
     if (_instance != null) return Future.value(_instance!);
-    return _instanceFuture ??= _createInstance(
-      appName: appName,
-      onFfiInitFailure: onFfiInitFailure,
-      factoryResolver: factoryResolver,
-    ).catchError((Object e, StackTrace st) {
-      _instanceFuture = null; // allow retry on next call
-      return Future<AppDatabase>.error(e, st);
-    });
+    return _instanceFuture ??=
+        _createInstance(
+          appName: appName,
+          onFfiInitFailure: onFfiInitFailure,
+          factoryResolver: factoryResolver,
+        ).catchError((Object e, StackTrace st) {
+          _instanceFuture = null; // allow retry on next call
+          return Future<AppDatabase>.error(e, st);
+        });
   }
 
   static Future<AppDatabase> _createInstance({
@@ -181,6 +183,30 @@ class AppDatabase {
     if (oldVersion < 3) {
       await _migrateV2ToV3(db);
     }
+    if (oldVersion < 4) {
+      await _migrateV3ToV4(db);
+    }
+  }
+
+  /// v3 → v4: add the `kv` translation-cache table that TranslationDao writes to.
+  /// Devices that were on v3 before this PR will not have this table, so we must
+  /// create it here. `CREATE TABLE IF NOT EXISTS` makes the step idempotent for
+  /// devices that reach v4 via a v2→v4 path (where _migrateV2ToV3 already ran
+  /// systemTablesDDL which includes the kv DDL).
+  static Future<void> _migrateV3ToV4(Database db) async {
+    await db.transaction((txn) async {
+      await txn.execute('''
+        CREATE TABLE IF NOT EXISTS kv (
+          lang TEXT NOT NULL,
+          src  TEXT NOT NULL,
+          tgt  TEXT NOT NULL,
+          PRIMARY KEY (lang, src)
+        )
+      ''');
+      await txn.rawUpdate(
+        'UPDATE sdk_meta SET schema_version = 4 WHERE id = 1',
+      );
+    });
   }
 
   static Future<void> _migrateV2ToV3(Database db) async {
@@ -231,8 +257,10 @@ class AppDatabase {
 
   static Future<void> _onConfigure(Database db) async {
     final walResult = await db.rawQuery('PRAGMA journal_mode=WAL');
-    final actualMode = walResult.first.values.first?.toString().toLowerCase();
-    if (actualMode != 'wal') {
+    final actualMode = walResult.isNotEmpty && walResult.first.values.isNotEmpty
+        ? walResult.first.values.first?.toString().toLowerCase()
+        : null;
+    if (actualMode != 'wal' && actualMode != 'memory') {
       debugPrint(
         'AppDatabase._onConfigure: WARNING — WAL mode not active '
         '(got "$actualMode"). Write throughput will be reduced.',
@@ -326,7 +354,7 @@ class AppDatabase {
     // and _onUpgrade post-conditions identical.
     await exec.insert('sdk_meta', <String, Object?>{
       'id': 1,
-      'schema_version': 3,
+      'schema_version': 4,
     }, conflictAlgorithm: ConflictAlgorithm.replace);
   }
 

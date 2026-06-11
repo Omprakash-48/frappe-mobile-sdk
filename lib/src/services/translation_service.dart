@@ -217,7 +217,11 @@ class TranslationService {
   Future<void> clearAll() async {
     _cache.clear();
     _currentLang = 'en';
-    await _dao?.deleteAll();
+    try {
+      await _dao?.deleteAll();
+    } catch (e, st) {
+      sdkLog('TranslationService.clearAll: deleteAll failed — $e\n$st');
+    }
   }
 
   /// Closes the SQLite cache and the change stream.

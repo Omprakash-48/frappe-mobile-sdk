@@ -12,7 +12,7 @@ void main() {
     late TranslationDao dao;
 
     setUp(() async {
-      dao = TranslationDao.forTesting();
+      dao = await TranslationDao.forTesting();
     });
 
     tearDown(() async {

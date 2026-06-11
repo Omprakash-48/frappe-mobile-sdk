@@ -110,22 +110,23 @@ void main() {
       );
       await db.close();
 
-      // Reopen at v3 — _onUpgrade fires on a partially-shaped DB.
+      // Reopen at v4 — _onUpgrade fires on a partially-shaped DB.
       final reopened = await openDatabase(
         dbPath,
-        version: 3,
+        version: 4,
         onUpgrade: AppDatabaseTestSeam.runOnUpgrade,
         singleInstance: false,
       );
 
       // The migration must have completed cleanly.
       final pragma = await reopened.rawQuery('PRAGMA user_version');
-      expect(pragma.first.values.first, 3);
+      expect(pragma.first.values.first, 4);
 
-      // sdk_meta row recovered via INSERT OR REPLACE.
+      // sdk_meta row recovered via INSERT OR REPLACE, then schema_version
+      // updated to 4 by _migrateV3ToV4.
       final meta = await reopened.query('sdk_meta', where: 'id = 1');
       expect(meta, hasLength(1));
-      expect(meta.first['schema_version'], 3);
+      expect(meta.first['schema_version'], 4);
 
       await reopened.close();
     },

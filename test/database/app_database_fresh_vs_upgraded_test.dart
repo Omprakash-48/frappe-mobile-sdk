@@ -130,7 +130,7 @@ void main() {
       final fresh = await AppDatabase.inMemoryDatabase();
       final freshSchema = await tableSchemas(fresh.rawDatabase);
 
-      // Path 2: build v2, upgrade to v3.
+      // Path 2: build v2, upgrade to v4 (current version).
       final v2 = await openDatabase(
         dbPath,
         version: 2,
@@ -140,7 +140,7 @@ void main() {
       await v2.close();
       final upgraded = await openDatabase(
         dbPath,
-        version: 3,
+        version: 4,
         onUpgrade: AppDatabaseTestSeam.runOnUpgrade,
         singleInstance: false,
       );

@@ -147,17 +147,17 @@ void main() {
       expect(pragmaBefore.first.values.first, 2);
       await v2.close();
 
-      // 2. Reopen at v3 — _onUpgrade fires.
+      // 2. Reopen at v4 — _onUpgrade fires running v2→v3 then v3→v4.
       final v3 = await openDatabase(
         dbPath,
-        version: 3,
+        version: 4,
         onUpgrade: AppDatabaseTestSeam.runOnUpgrade,
         singleInstance: false,
       );
 
-      // 3a. user_version pragma is bumped.
+      // 3a. user_version pragma is bumped to 4.
       final pragmaAfter = await v3.rawQuery('PRAGMA user_version');
-      expect(pragmaAfter.first.values.first, 3);
+      expect(pragmaAfter.first.values.first, 4);
 
       // 3b. doctype_meta row preserved; new columns default to NULL/0.
       final dt = await v3.query(
@@ -197,11 +197,11 @@ void main() {
         equals({'outbox', 'pending_attachments', 'sdk_meta'}),
       );
 
-      // 3g. sdk_meta row exists with schema_version=3, offline_enabled=0,
-      //     bootstrap_done=0.
+      // 3g. sdk_meta row exists with schema_version=4 (v3→v4 step ran),
+      //     offline_enabled=0, bootstrap_done=0.
       final meta = await v3.query('sdk_meta', where: 'id = 1');
       expect(meta, hasLength(1));
-      expect(meta.first['schema_version'], 3);
+      expect(meta.first['schema_version'], 4);
       expect(meta.first['offline_enabled'], 0);
       expect(meta.first['bootstrap_done'], 0);
 

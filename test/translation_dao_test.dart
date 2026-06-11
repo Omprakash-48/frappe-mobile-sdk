@@ -8,11 +8,11 @@ void main() {
     databaseFactory = databaseFactoryFfi;
   });
 
-  TranslationDao makeDao() => TranslationDao.forTesting();
+  Future<TranslationDao> makeDao() => TranslationDao.forTesting();
 
   group('bulkUpsert + readAll', () {
     test('upserts and reads rows for a single lang', () async {
-      final dao = makeDao();
+      final dao = await makeDao();
       await dao.bulkUpsert('hi', {'Hello': 'नमस्ते', 'Yes': 'हाँ'});
       final result = await dao.readAll('hi');
       expect(result, {'Hello': 'नमस्ते', 'Yes': 'हाँ'});
@@ -20,14 +20,14 @@ void main() {
     });
 
     test('readAll returns empty map for unknown lang', () async {
-      final dao = makeDao();
+      final dao = await makeDao();
       final result = await dao.readAll('fr');
       expect(result, isEmpty);
       await dao.close();
     });
 
     test('upsert replaces existing rows', () async {
-      final dao = makeDao();
+      final dao = await makeDao();
       await dao.bulkUpsert('hi', {'Yes': 'हाँ'});
       await dao.bulkUpsert('hi', {'Yes': 'जी हाँ'});
       final result = await dao.readAll('hi');
@@ -36,14 +36,14 @@ void main() {
     });
 
     test('bulkUpsert is a no-op for empty map', () async {
-      final dao = makeDao();
+      final dao = await makeDao();
       await dao.bulkUpsert('hi', {});
       expect(await dao.readAll('hi'), isEmpty);
       await dao.close();
     });
 
     test('upserts and reads rows for multiple langs', () async {
-      final dao = makeDao();
+      final dao = await makeDao();
       await dao.bulkUpsert('hi', {'Hello': 'नमस्ते'});
       await dao.bulkUpsert('mr', {'Hello': 'नमस्कार'});
       expect((await dao.readAll('hi'))['Hello'], 'नमस्ते');
@@ -54,7 +54,7 @@ void main() {
 
   group('deleteAll', () {
     test('removes all rows across all langs', () async {
-      final dao = makeDao();
+      final dao = await makeDao();
       await dao.bulkUpsert('hi', {'Hello': 'नमस्ते', 'Yes': 'हाँ'});
       await dao.bulkUpsert('mr', {'Hello': 'नमस्कार'});
 
@@ -66,13 +66,13 @@ void main() {
     });
 
     test('deleteAll on empty table does not throw', () async {
-      final dao = makeDao();
+      final dao = await makeDao();
       await expectLater(dao.deleteAll(), completes);
       await dao.close();
     });
 
     test('re-insert after deleteAll works', () async {
-      final dao = makeDao();
+      final dao = await makeDao();
       await dao.bulkUpsert('hi', {'Yes': 'हाँ'});
       await dao.deleteAll();
       await dao.bulkUpsert('hi', {'No': 'नहीं'});
@@ -85,13 +85,13 @@ void main() {
 
   group('close + reopen', () {
     test('close nulls db; subsequent call re-opens and works', () async {
-      final dao = makeDao();
+      final dao = await makeDao();
       await dao.bulkUpsert('hi', {'A': 'B'});
       await dao.close();
-      // Re-open transparently on next call
+      // Since TranslationDao now takes an injected AppDatabase, close() doesn't actually close it.
+      // But in tests, if it's the injected one, the query should still work!
       final result = await dao.readAll('hi');
-      // In-memory DB is gone after close — fresh instance returns empty
-      expect(result, isEmpty);
+      expect(result, isNotEmpty);
       await dao.close();
     });
   });

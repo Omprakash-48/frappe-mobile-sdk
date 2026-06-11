@@ -10,12 +10,12 @@ void main() {
     databaseFactory = databaseFactoryFfi;
   });
 
-  TranslationService makeService() =>
-      TranslationService.forTesting()..injectDao(TranslationDao.forTesting());
+  Future<TranslationService> makeService() async =>
+      TranslationService.forTesting()..injectDao(await TranslationDao.forTesting());
 
   group('loadFromCache', () {
     test('populates _cache from DAO', () async {
-      final svc = makeService();
+      final svc = await makeService();
       await svc.dao.bulkUpsert('hi', {'Yes': 'हाँ', 'No': 'नहीं'});
       await svc.loadFromCache('hi');
       expect(svc.translate('Yes'), 'Yes'); // currentLang is 'en', not 'hi' yet
@@ -26,7 +26,7 @@ void main() {
     });
 
     test('no-op when DAO has no rows for lang', () async {
-      final svc = makeService();
+      final svc = await makeService();
       await svc.loadFromCache('hi');
       svc.setCurrentLangForTesting('hi');
       expect(svc.translate('Yes'), 'Yes'); // falls back to source
@@ -48,7 +48,7 @@ void main() {
 
   group('onChanged stream', () {
     test('emits after loadFromCache when rows present', () async {
-      final svc = makeService();
+      final svc = await makeService();
       await svc.dao.bulkUpsert('hi', {'Yes': 'हाँ'});
       final events = <void>[];
       svc.onChanged.listen((_) => events.add(null));
@@ -59,7 +59,7 @@ void main() {
     });
 
     test('does not emit after loadFromCache when DAO is empty', () async {
-      final svc = makeService();
+      final svc = await makeService();
       final events = <void>[];
       svc.onChanged.listen((_) => events.add(null));
       await svc.loadFromCache('hi');
@@ -71,14 +71,14 @@ void main() {
 
   group('setLocale', () {
     test('updates currentLang immediately', () async {
-      final svc = makeService();
+      final svc = await makeService();
       await svc.setLocale('hi');
       expect(svc.currentLang, 'hi');
       await svc.dao.close();
     });
 
     test('loads from cache when DB has rows', () async {
-      final svc = makeService();
+      final svc = await makeService();
       await svc.dao.bulkUpsert('hi', {'Yes': 'हाँ'});
       await svc.setLocale('hi');
       expect(svc.translate('Yes'), 'हाँ');
@@ -89,7 +89,7 @@ void main() {
         () async {
       // Simulates: login cached stale/empty data, user switches locale offline.
       // setLocale must NOT skip loadFromCache just because _cache.containsKey.
-      final svc = makeService();
+      final svc = await makeService();
       // Pre-seed an empty in-memory entry (as if a previous wrong API call ran)
       // by injecting it directly via the testing helper path.
       svc.setCurrentLangForTesting('hi'); // set lang first
@@ -105,7 +105,7 @@ void main() {
 
   group('clearAll', () {
     test('clears in-memory cache, resets lang to en, wipes SQLite', () async {
-      final svc = makeService();
+      final svc = await makeService();
       await svc.dao.bulkUpsert('hi', {'Yes': 'हाँ'});
       await svc.loadFromCache('hi');
       svc.setCurrentLangForTesting('hi');
@@ -129,7 +129,7 @@ void main() {
   group('refreshAllAsync dispose safety', () {
     test('refreshAllAsync returns early if disposed — no write after dispose',
         () async {
-      final svc = makeService();
+      final svc = await makeService();
       // Immediately dispose; _doRefreshAll should bail when _disposed is true.
       await svc.dispose();
 
@@ -148,7 +148,7 @@ void main() {
     test(
       'no StateError when dispose is called before onChanged emits',
       () async {
-        final svc = makeService();
+        final svc = await makeService();
         await svc.dao.bulkUpsert('hi', {'Yes': 'हाँ'});
 
         final errors = <Object>[];
@@ -172,7 +172,7 @@ void main() {
     test(
       'onChanged stream is closed after dispose and emits no further events',
       () async {
-        final svc = makeService();
+        final svc = await makeService();
         await svc.dao.bulkUpsert('hi', {'Yes': 'हाँ'});
         await svc.loadFromCache('hi'); // prime the cache + first emission
         await svc.dispose();

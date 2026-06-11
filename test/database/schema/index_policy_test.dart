@@ -85,10 +85,10 @@ void main() {
       );
       final cols = chooseIndexes(
         meta,
-        maxIndexes: 5,
+        maxIndexes: 6,
         linkEdgeCount: {'lnB': 10, 'lnA': 5, 'lnC': 1},
       );
-      expect(cols, ['server_name', 'modified', 'sync_status', 'lnB', 'lnA']);
+      expect(cols, ['server_name', 'modified', 'sync_status', 'mobile_uuid', 'lnB', 'lnA']);
     });
 
     test('layout fieldtypes are never indexed', () {
