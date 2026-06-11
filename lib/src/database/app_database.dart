@@ -1,7 +1,6 @@
 import 'package:flutter/foundation.dart';
 import 'package:path/path.dart';
 import 'package:package_info_plus/package_info_plus.dart';
-import 'package:sqflite/sqflite.dart';
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 import 'daos/doctype_meta_dao.dart';
 import 'daos/link_option_dao.dart';
@@ -133,9 +132,14 @@ class AppDatabase {
     void Function(Object, StackTrace)? onFfiInitFailure,
     DatabaseFactoryResolver? factoryResolver,
   }) async {
+    // Resolve the path BEFORE sqfliteFfiInit() runs. sqfliteFfiInit() overrides
+    // the global databaseFactory to databaseFactoryFfi; after that,
+    // getDatabasesPath() calls the FFI isolate, which cannot make platform
+    // channel calls and returns the wrong path (SQLITE_CANTOPEN, error 14).
+    // Calling it here uses the MethodChannel factory — always correct on Android/iOS.
+    final documentsDirectory = await getDatabasesPath();
     final resolve = factoryResolver ?? _resolveDatabaseFactory;
     final factory = await resolve(onFfiInitFailure);
-    final documentsDirectory = await factory.getDatabasesPath();
     final dbName = await _getDatabaseName(appNameOverride: appName);
     final path = join(documentsDirectory, dbName);
     final db = await factory.openDatabase(
