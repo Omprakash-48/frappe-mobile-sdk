@@ -1,5 +1,6 @@
 import '../../models/doc_type_meta.dart';
 import '../field_type_mapping.dart';
+import '../table_name.dart';
 import 'system_columns.dart';
 
 /// Column names emitted by the child system block. A meta field that uses
@@ -38,7 +39,7 @@ List<String> buildChildSchemaDDL(
     // `near "<word>": syntax error` and the schema-create loop aborts.
     cols.add('"$name" $sqlType');
     if (isLinkFieldType(type)) {
-      cols.add('"${name}__is_local" INTEGER');
+      cols.add(linkCompanionColumnDDL(name));
     }
   }
 
@@ -47,7 +48,7 @@ List<String> buildChildSchemaDDL(
   // SNF's `runSnfPostSdkSync.ensureSchemaForClosure`) cannot abort the
   // schema-create loop on "table/index already exists". See parent_schema.dart
   // for the full rationale.
-  final suffix = tableName.replaceFirst('docs__', '');
+  final suffix = stripDocsPrefix(tableName);
   return [
     'CREATE TABLE IF NOT EXISTS $tableName (\n  ${cols.join(',\n  ')}\n)',
     'CREATE UNIQUE INDEX IF NOT EXISTS ix_${suffix}_server_name '

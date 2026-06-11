@@ -124,13 +124,35 @@ class PullApply {
       final serverName = r['name'] as String?;
       if (serverName == null) continue;
 
-      final existing = await txn.query(
+      var existing = await txn.query(
         parentTable,
-        columns: ['mobile_uuid', 'sync_status', 'modified'],
+        columns: ['mobile_uuid', 'sync_status', 'modified', 'server_name'],
         where: 'server_name = ?',
         whereArgs: [serverName],
         limit: 1,
       );
+
+      // Fallback match by mobile_uuid. When a push INSERT has committed
+      // server-side but its local writeback hasn't stamped `server_name`
+      // yet, the server_name lookup misses. The pulled mobile-origin row
+      // carries the same `mobile_uuid` the device assigned (server stores
+      // it as a unique field that round-trips), so match on that to update
+      // the existing row in place instead of inserting a duplicate.
+      // Desk-origin rows have an empty mobile_uuid and never hit this path.
+      var matchedByUuid = false;
+      if (existing.isEmpty) {
+        final incomingUuid = r['mobile_uuid']?.toString();
+        if (incomingUuid != null && incomingUuid.isNotEmpty) {
+          existing = await txn.query(
+            parentTable,
+            columns: ['mobile_uuid', 'sync_status', 'modified', 'server_name'],
+            where: 'mobile_uuid = ?',
+            whereArgs: [incomingUuid],
+            limit: 1,
+          );
+          matchedByUuid = existing.isNotEmpty;
+        }
+      }
 
       // Tombstoned rows never resurrect — local DELETE is queued in
       // outbox waiting to push. Skip silently; once the DELETE outbox
@@ -138,7 +160,19 @@ class PullApply {
       if (existing.isNotEmpty && existing.first['sync_status'] == 'deleted') {
         continue;
       }
+      // False-conflict guard: a row matched via the mobile_uuid fallback
+      // whose local `server_name` is still NULL is our own INSERT
+      // round-tripping (push committed server-side, writeback pending) —
+      // reconcile it (stamp server_name, mark synced) instead of flagging a
+      // spurious conflict. server_name matches never set matchedByUuid, so
+      // genuine server-side edits to synced docs still flag conflict.
+      final localServerName = existing.isEmpty
+          ? null
+          : existing.first['server_name'] as String?;
+      final isOwnInsertRoundtrip =
+          matchedByUuid && (localServerName == null || localServerName.isEmpty);
       if (existing.isNotEmpty &&
+          !isOwnInsertRoundtrip &&
           _locallyDirtyStatuses.contains(existing.first['sync_status'])) {
         // Spec §5.1 requires "server has advanced" before flagging a
         // conflict. Cursor filtering normally guarantees this, but

@@ -21,6 +21,10 @@ import '../sync/push_engine.dart';
 import '../sync/push_error.dart';
 import '../sync/sync_state_notifier.dart';
 import 'sync_controller.dart';
+import '../utils/sdk_log.dart';
+
+// Re-export so callers building the SDK pack can name the typedef.
+export '../sync/push_engine.dart' show PayloadTransformerFn;
 
 /// True when [e] is Frappe's `QueryDeadlockError` — MySQL/MariaDB error
 /// 1213 ("Deadlock found when trying to get lock; try restarting
@@ -77,6 +81,7 @@ class SyncEngineBuilder {
     int? concurrencyOverride,
     SyncStateNotifier? sharedNotifier,
     SchemaReconcilerFn? schemaReconciler,
+    PayloadTransformerFn? payloadTransformer,
   }) async {
     final notifier = sharedNotifier ?? SyncStateNotifier();
     final tier = await DeviceTier.detect(override: concurrencyOverride);
@@ -159,8 +164,7 @@ class SyncEngineBuilder {
         }
         return null;
       } catch (e, st) {
-        // ignore: avoid_print
-        print(
+        sdkLog(
           'SyncEngineBuilder.serverLookupByUuid: lookup failed for '
           '$doctype/$mobileUuid — $e\n$st',
         );
@@ -201,8 +205,7 @@ class SyncEngineBuilder {
     final idempotencyStrategy = IdempotencyStrategy(
       serverHasDedupHook: serverHasDedupHook,
       onInitWarning: (msg) {
-        // ignore: avoid_print
-        print('IdempotencyStrategy: $msg');
+        sdkLog('IdempotencyStrategy: $msg');
       },
     );
 
@@ -222,6 +225,7 @@ class SyncEngineBuilder {
       resolveServerName: resolveServerName,
       attachmentUploader: attachmentUploader,
       writeQueueResolver: writeQueueResolver,
+      payloadTransformer: payloadTransformer,
     );
 
     // PullEngine is built but not auto-invoked. The list-http callback

@@ -11,6 +11,7 @@ import '../models/offline_mode.dart';
 import '../models/offline_mode_notifier.dart';
 import '../sync/cursor.dart';
 import 'offline_repository.dart';
+import '../utils/sdk_log.dart';
 
 /// Per-doctype sync phase observable from outside the SDK. Drives UX:
 /// `initial` → blocking "preparing offline data" screen,
@@ -53,6 +54,12 @@ class SyncService {
   /// pipeline. Wired by `FrappeSDK` to `PushEngine.runOnce()`.
   final Future<void> Function()? _pushRunner;
 
+  /// Optional. Returns true when a push is active (pending/in-flight outbox
+  /// rows) for the given doctype. When non-null, [_pullOneInternal] defers a
+  /// pull for that doctype — parity with `PullEngine`'s existing guard
+  /// (`pull_engine.dart:133`). Null in tests / when unwired → no defer.
+  final Future<bool> Function(String doctype)? _hasActivePush;
+
   SyncService(
     this._client,
     this._repository,
@@ -64,9 +71,11 @@ class SyncService {
     ),
     OfflineModeNotifier? offlineModeNotifier,
     Future<void> Function()? pushRunner,
+    Future<bool> Function(String doctype)? hasActivePush,
   }) : _getMobileUuid = getMobileUuid,
        _modeNotifier = offlineModeNotifier ?? OfflineModeNotifier(offlineMode),
-       _pushRunner = pushRunner;
+       _pushRunner = pushRunner,
+       _hasActivePush = hasActivePush;
 
   /// Check if device is online.
   /// Returns false when offline mode is disabled, regardless of connectivity,
@@ -100,25 +109,16 @@ class SyncService {
       online = await isOnline();
     } catch (e, st) {
       // Platform-channel failure (e.g. headless test environment without
-      // connectivity_plus mocks). Treat as offline; surface the failure
-      // mode in logs rather than silently swallowing it.
-      // ignore: avoid_print
-      print('SyncService.pushSync: isOnline() threw — $e\n$st');
+      // connectivity_plus mocks). Treat as offline; log the failure mode
+      // in debug builds (sdkLog is a no-op in release).
+      sdkLog('SyncService.pushSync: isOnline() threw — $e\n$st');
     }
     if (!online) {
-      return SyncResult(
-        0,
-        0,
-        0,
-        'No internet connection',
-        errors: const [],
-        status: SyncStatus.noConnectivity,
-      );
+      return SyncResult.noConnectivity();
     }
     final runner = _pushRunner;
     if (runner == null) {
-      // ignore: avoid_print
-      print(
+      sdkLog(
         'SyncService.pushSync: pushRunner not wired; returning empty result',
       );
       return SyncResult.empty();
@@ -159,8 +159,7 @@ class SyncService {
           : DoctypePullPhase.resume;
     } catch (e, st) {
       // Corrupted cursor reads as INITIAL — the next pull will refresh it.
-      // ignore: avoid_print
-      print('SyncService.getPullPhase: corrupted cursor — $e\n$st');
+      sdkLog('SyncService.getPullPhase: corrupted cursor — $e\n$st');
       return DoctypePullPhase.initial;
     }
   }
@@ -183,14 +182,7 @@ class SyncService {
       return SyncResult.empty(status: SyncStatus.offlineModeDisabled);
     }
     if (!await isOnline()) {
-      return SyncResult(
-        0,
-        0,
-        0,
-        'No internet connection',
-        errors: const [],
-        status: SyncStatus.noConnectivity,
-      );
+      return SyncResult.noConnectivity();
     }
     final result = await _syncMutex.tryProtect(
       () => _pullOneInternal(doctype: doctype, since: since),
@@ -220,14 +212,7 @@ class SyncService {
       return SyncResult.empty(status: SyncStatus.offlineModeDisabled);
     }
     if (!await isOnline()) {
-      return SyncResult(
-        0,
-        0,
-        0,
-        'No internet connection',
-        errors: const [],
-        status: SyncStatus.noConnectivity,
-      );
+      return SyncResult.noConnectivity();
     }
     return _syncMutex.protect(
       () => _pullOneInternal(doctype: doctype, since: since),
@@ -262,17 +247,7 @@ class SyncService {
       };
     }
     if (!await isOnline()) {
-      return {
-        for (final dt in doctypes)
-          dt: SyncResult(
-            0,
-            0,
-            0,
-            'No internet connection',
-            errors: const [],
-            status: SyncStatus.noConnectivity,
-          ),
-      };
+      return {for (final dt in doctypes) dt: SyncResult.noConnectivity()};
     }
     final results = await _syncMutex.tryProtect(() async {
       final out = <String, SyncResult>{};
@@ -289,8 +264,7 @@ class SyncService {
             try {
               out[dt] = await _pullOneInternal(doctype: dt);
             } catch (e, st) {
-              // ignore: avoid_print
-              print('SyncService.pullSyncMany($dt) failed — $e\n$st');
+              sdkLog('SyncService.pullSyncMany($dt) failed — $e\n$st');
               out[dt] = SyncResult(
                 0,
                 0,
@@ -384,18 +358,33 @@ class SyncService {
   @visibleForTesting
   Future<bool> isChildTableForTest(String doctype) => _isChildTable(doctype);
 
-  Future<bool> _isChildTable(String doctype) async {
+  @visibleForTesting
+  Future<SyncResult> pullOneInternalForTest({required String doctype}) =>
+      _pullOneInternal(doctype: doctype);
+
+  /// Reads and parses the persisted meta JSON for [doctype], returning
+  /// null when the row is absent, empty, or fails to decode. The empty
+  /// sentinel `'{}'` is treated as absent (legacy rows from earlier
+  /// schema bumps). Shared by [_isChildTable] and [_doctypeHasChildTables]
+  /// so the null-guard and parse pattern lives in exactly one place
+  /// within this class. Caller is responsible for logging the [where]
+  /// label so the stack trace on a parse failure remains diagnosable.
+  Future<DocTypeMeta?> _loadMetaFromDao(String doctype, String where) async {
     final raw = await _database.doctypeMetaDao.getMetaJson(doctype);
-    if (raw == null || raw.isEmpty || raw == '{}') return false;
+    if (raw == null || raw.isEmpty || raw == '{}') return null;
     try {
       final parsed = jsonDecode(raw) as Map<String, dynamic>;
-      if (parsed.isEmpty) return false;
-      return DocTypeMeta.fromJson(parsed).isTable;
+      if (parsed.isEmpty) return null;
+      return DocTypeMeta.fromJson(parsed);
     } catch (e, st) {
-      // ignore: avoid_print
-      print('SyncService._isChildTable($doctype) parse failed — $e\n$st');
-      return false;
+      sdkLog('SyncService.$where($doctype) parse failed — $e\n$st');
+      return null;
     }
+  }
+
+  Future<bool> _isChildTable(String doctype) async {
+    final meta = await _loadMetaFromDao(doctype, '_isChildTable');
+    return meta?.isTable ?? false;
   }
 
   Future<SyncResult> _pullOneInternal({
@@ -405,6 +394,15 @@ class SyncService {
     // Child-table guard: see _isChildTable for rationale.
     if (await _isChildTable(doctype)) {
       return SyncResult(0, 0, 0, null, errors: const []);
+    }
+
+    // Active-push defer (parity with PullEngine, pull_engine.dart:133):
+    // skip the pull while this doctype has pending/in-flight outbox rows so
+    // we don't pull stale server state over local edits in flight. The
+    // doctype is retried on the next sync cycle.
+    final hasActivePush = _hasActivePush;
+    if (hasActivePush != null && await hasActivePush(doctype)) {
+      return SyncResult.empty(status: SyncStatus.deferredActivePush);
     }
 
     int success = 0;
@@ -431,8 +429,7 @@ class SyncService {
         cursorComplete = cv == true;
       } catch (e, st) {
         // Corrupted cursor — treat as fresh INITIAL pull.
-        // ignore: avoid_print
-        print('SyncService.pullSync: corrupted cursor — $e\n$st');
+        sdkLog('SyncService.pullSync: corrupted cursor — $e\n$st');
       }
     }
 
@@ -545,8 +542,7 @@ class SyncService {
           pageLastModified = modifiedAt;
           pageLastName = serverId;
         } catch (e, st) {
-          // ignore: avoid_print
-          print(
+          sdkLog(
             'SyncService.pullSync applyServerDocument($doctype/$serverId) failed — $e\n$st',
           );
           failed++;
@@ -622,24 +618,14 @@ class SyncService {
   // `SyncEngineBuilder._resolveServerNameFor`.
 
   Future<bool> _doctypeHasChildTables(String doctype) async {
-    final raw = await _database.doctypeMetaDao.getMetaJson(doctype);
-    if (raw == null || raw.isEmpty || raw == '{}') return false;
-    try {
-      final parsed = jsonDecode(raw) as Map<String, dynamic>;
-      final meta = DocTypeMeta.fromJson(parsed);
-      for (final f in meta.fields) {
-        if (f.fieldtype == 'Table' || f.fieldtype == 'Table MultiSelect') {
-          return true;
-        }
+    final meta = await _loadMetaFromDao(doctype, '_doctypeHasChildTables');
+    if (meta == null) return false;
+    for (final f in meta.fields) {
+      if (f.fieldtype == 'Table' || f.fieldtype == 'Table MultiSelect') {
+        return true;
       }
-      return false;
-    } catch (e, st) {
-      // ignore: avoid_print
-      print(
-        'SyncService._doctypeHasChildTables($doctype) parse failed — $e\n$st',
-      );
-      return false;
     }
+    return false;
   }
 
   // `syncDoctype` was deleted in retirement Phase 6 — no production
@@ -682,6 +668,11 @@ enum SyncStatus {
   /// `error` is non-null with "Sync already in progress".
   busy,
 
+  /// A push was active (pending/in-flight outbox rows) for this doctype, so
+  /// the pull was skipped this cycle to avoid racing the push. The doctype
+  /// is picked up on the next sync. `success/failed/total` are zero.
+  deferredActivePush,
+
   /// The sync executed. `success/failed/total` carry actual row counts;
   /// when `failed > 0`, `errors` lists per-row details. Note that a
   /// successful call with no dirty rows ALSO reports `ran` — `success=0`
@@ -715,6 +706,19 @@ class SyncResult {
   /// "tried, no work".
   factory SyncResult.empty({SyncStatus status = SyncStatus.ran}) =>
       SyncResult(0, 0, 0, null, status: status);
+
+  /// Canonical no-connectivity result used by every sync entry point
+  /// (`pushSync`, `pullSync`, `pullSyncWaiting`, `pullSyncMany`) when the
+  /// pre-flight connectivity check fails. Defined once so a wording or
+  /// status change applies to all four callers atomically.
+  factory SyncResult.noConnectivity() => SyncResult(
+    0,
+    0,
+    0,
+    'No internet connection',
+    errors: const [],
+    status: SyncStatus.noConnectivity,
+  );
 }
 
 /// Individual sync error details

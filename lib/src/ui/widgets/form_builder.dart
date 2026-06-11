@@ -9,6 +9,7 @@ import '../../constants/field_types.dart';
 import '../../services/link_option_service.dart';
 import '../../services/link_field_coordinator.dart';
 import '../../utils/depends_on_evaluator.dart';
+import '../../utils/field_normalizer.dart';
 import 'fields/field_factory.dart';
 import 'fields/base_field.dart';
 import 'default_form_style.dart';
@@ -181,6 +182,12 @@ class FrappeFormBuilder extends StatefulWidget {
   /// Called once with the form's submit handler so the parent (e.g. FormScreen) can trigger save from AppBar.
   final void Function(void Function() submit)? registerSubmit;
 
+  /// Fires when [registerSubmit]'s callback was invoked but form
+  /// validation rejected the submit attempt. Use this to stop a
+  /// parent-managed loading indicator that was started before triggering
+  /// submit. Does not fire on successful submit ([onSubmit] does).
+  final VoidCallback? onValidationFailed;
+
   /// If set, field labels, section titles and tab labels are passed through this (e.g. sdk.translations.translate).
   final String Function(String)? translate;
 
@@ -219,6 +226,7 @@ class FrappeFormBuilder extends StatefulWidget {
     this.fetchLinkedDocument,
     this.getMeta,
     this.registerSubmit,
+    this.onValidationFailed,
     this.translate,
     this.onButtonPressed,
     this.onFormDataChanged,
@@ -323,6 +331,16 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
           linkOptionService: widget.linkOptionService,
           linkFieldCoordinator: _linkFieldCoordinator,
         );
+    // Custom factories supplied by the host won't have these wired in
+    // their own constructor — they're host-internal services exposed
+    // here so override factories (e.g. SNF's SnfFieldFactory) can
+    // still produce Link/etc. fields without their pickers being half-
+    // configured on first build. Default-constructed FieldFactory above
+    // sets both directly; this branch handles the custom case.
+    if (widget.customFieldFactory != null) {
+      _fieldFactory.linkOptionService ??= widget.linkOptionService;
+      _fieldFactory.linkFieldCoordinator ??= _linkFieldCoordinator;
+    }
 
     _buildFormStructure();
     _tabController = TabController(
@@ -351,117 +369,6 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
     });
   }
 
-  String _formatDurationPatchedValue(int seconds) {
-    final hours = seconds ~/ 3600;
-    final minutes = (seconds % 3600) ~/ 60;
-    final secs = seconds % 60;
-
-    if (hours > 0) {
-      return '${hours.toString().padLeft(2, '0')}:${minutes.toString().padLeft(2, '0')}:${secs.toString().padLeft(2, '0')}';
-    }
-    return '${minutes.toString().padLeft(2, '0')}:${secs.toString().padLeft(2, '0')}';
-  }
-
-  List<String> _normalizeMultiSelectPatchedValue(dynamic value) {
-    if (value == null) return <String>[];
-    if (value is List) {
-      return value.map((item) => item.toString()).toList();
-    }
-    final raw = value.toString();
-    if (raw.isEmpty) return <String>[];
-    return raw
-        .split(',')
-        .map((item) => item.trim())
-        .where((item) => item.isNotEmpty)
-        .toList();
-  }
-
-  dynamic _normalizePatchedValue(DocField field, dynamic value) {
-    switch (field.fieldtype) {
-      case FieldTypes.date:
-      case FieldTypes.datetime:
-        if (value == null || value == '') return null;
-        if (value is DateTime) return value;
-        if (value is String) return DateTime.tryParse(value);
-        return null;
-
-      case FieldTypes.time:
-        if (value == null || value == '') return null;
-        if (value is DateTime) return value;
-        if (value is TimeOfDay) {
-          return DateTime(2000, 1, 1, value.hour, value.minute);
-        }
-        if (value is String) {
-          final parts = value.split(':');
-          if (parts.length >= 2) {
-            final hour = int.tryParse(parts[0]);
-            final minute = int.tryParse(parts[1]);
-            if (hour != null && minute != null) {
-              return DateTime(2000, 1, 1, hour, minute);
-            }
-          }
-        }
-        return null;
-
-      case FieldTypes.check:
-        if (value is bool) return value;
-        if (value is int) return value == 1;
-        if (value is String) {
-          final normalized = value.trim().toLowerCase();
-          return normalized == '1' || normalized == 'true';
-        }
-        return false;
-
-      case FieldTypes.rating:
-        if (value == null || value == '') return null;
-        if (value is int) return value;
-        return int.tryParse(value.toString());
-
-      case FieldTypes.select:
-        if (field.options == null || field.options!.trim().isEmpty) {
-          return value?.toString() ?? '';
-        }
-        if (field.allowMultiple) {
-          return _normalizeMultiSelectPatchedValue(value);
-        }
-        final stringValue = value?.toString();
-        return (stringValue == null || stringValue.isEmpty)
-            ? null
-            : stringValue;
-
-      case FieldTypes.link:
-      case FieldTypes.data:
-      case FieldTypes.text:
-      case FieldTypes.longText:
-      case FieldTypes.smallText:
-      case FieldTypes.password:
-      case FieldTypes.phone:
-      case FieldTypes.attach:
-      case FieldTypes.attachImage:
-      case FieldTypes.image:
-      case FieldTypes.readOnly:
-        return value?.toString() ?? '';
-
-      case FieldTypes.int:
-      case FieldTypes.float:
-      case FieldTypes.currency:
-      case FieldTypes.percent:
-        return value?.toString() ?? '';
-
-      case FieldTypes.duration:
-        if (value == null || value == '') return '';
-        if (value is int) return _formatDurationPatchedValue(value);
-        return value.toString();
-
-      case 'Table':
-        if (value is List) return value;
-        return <dynamic>[];
-
-      default:
-        return value;
-    }
-  }
-
   Map<String, dynamic> _normalizePatchValues(Map<String, dynamic> updates) {
     final normalized = <String, dynamic>{};
     for (final entry in updates.entries) {
@@ -473,7 +380,7 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
         normalized[entry.key] = entry.value ?? '';
         continue;
       }
-      normalized[entry.key] = _normalizePatchedValue(fieldMeta, entry.value);
+      normalized[entry.key] = FieldNormalizer.normalize(fieldMeta, entry.value);
     }
     return normalized;
   }
@@ -577,28 +484,24 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
     }
   }
 
-  bool _shouldShowField(DocField field) {
-    if (field.dependsOn == null || field.dependsOn!.isEmpty) {
-      return true;
-    }
-    return DependsOnEvaluator.evaluate(field.dependsOn, _formData);
+  /// Evaluates a `depends_on` expression against the current form data,
+  /// returning [defaultValue] when [expr] is null or empty. Shared by
+  /// [_shouldShowField], [_isFieldRequired], and [_isFieldReadOnly] so a
+  /// future change to `DependsOnEvaluator.evaluate` (e.g. adding a parent
+  /// context parameter) applies to all three guards at once.
+  bool _evaluateDepends(String? expr, bool defaultValue) {
+    if (expr == null || expr.isEmpty) return defaultValue;
+    return DependsOnEvaluator.evaluate(expr, _formData);
   }
 
-  bool _isFieldRequired(DocField field) {
-    if (field.reqd) return true;
-    if (field.mandatoryDependsOn == null || field.mandatoryDependsOn!.isEmpty) {
-      return false;
-    }
-    return DependsOnEvaluator.evaluate(field.mandatoryDependsOn, _formData);
-  }
+  bool _shouldShowField(DocField field) =>
+      _evaluateDepends(field.dependsOn, true);
 
-  bool _isFieldReadOnly(DocField field) {
-    if (field.readOnly) return true;
-    if (field.readOnlyDependsOn == null || field.readOnlyDependsOn!.isEmpty) {
-      return false;
-    }
-    return DependsOnEvaluator.evaluate(field.readOnlyDependsOn, _formData);
-  }
+  bool _isFieldRequired(DocField field) =>
+      field.reqd || _evaluateDepends(field.mandatoryDependsOn, false);
+
+  bool _isFieldReadOnly(DocField field) =>
+      field.readOnly || _evaluateDepends(field.readOnlyDependsOn, false);
 
   /// Handles fetch_from: when a Link field changes, fetch the linked document
   /// and patch target fields (format: "link_field_name.source_field_name").
@@ -768,6 +671,7 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
       idx: field.idx,
       inListView: field.inListView,
       allowMultiple: field.allowMultiple,
+      searchIndex: field.searchIndex,
     );
 
     final initialValue =
@@ -822,7 +726,7 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
           // Sync FormBuilder internal state (needed for programmatic updates e.g. auto-select)
           if (field.fieldname != null && oldValue != value) {
             _formKey.currentState?.patchValue({
-              field.fieldname!: _normalizePatchedValue(field, value),
+              field.fieldname!: FieldNormalizer.normalize(field, value),
             });
           }
 
@@ -1259,6 +1163,7 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
           break;
         }
       }
+      widget.onValidationFailed?.call();
       return;
     }
 
@@ -1365,8 +1270,13 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
     widget.onSubmit?.call(completeFormData);
   }
 
-  /// Builds current form data (same structure as submit). Used for dirty detection.
-  Map<String, dynamic> _getCurrentFormData() {
+  /// Assembles the full form data map: every non-hidden data field with
+  /// its current value (user input takes precedence), filling in
+  /// `initialData` / `defaultValue` / per-fieldtype empties for fields
+  /// the user hasn't touched. Shared by [_handleSubmit] (post-validate)
+  /// and [_getCurrentFormData] (dirty detection) so the default-value
+  /// fallback logic stays consistent between submit and dirty-check.
+  Map<String, dynamic> _buildCompleteFormData() {
     final state = _formKey.currentState;
     final formValues = state != null
         ? Map<String, dynamic>.from(state.value)
@@ -1394,6 +1304,9 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
     }
     return complete;
   }
+
+  /// Builds current form data (same structure as submit). Used for dirty detection.
+  Map<String, dynamic> _getCurrentFormData() => _buildCompleteFormData();
 
   void _emitFormDataChanged() {
     widget.onFormDataChanged?.call(_getCurrentFormData());

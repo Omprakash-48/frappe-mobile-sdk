@@ -23,7 +23,9 @@ import 'widgets/form_builder.dart'
         OnButtonPressedCallback,
         FieldChangeHandler,
         FormValidator;
+import 'widgets/screen_helpers.dart';
 import 'widgets/sync_error_banner.dart' show humanizeOutboxError;
+import '../utils/sdk_log.dart';
 
 /// Layout variants for [DocumentListScreen].
 enum DocumentListLayout { list, card }
@@ -276,8 +278,7 @@ class _DocumentListScreenState extends State<DocumentListScreen> {
         try {
           await widget.syncService.pullSync(doctype: widget.doctype);
         } catch (e, st) {
-          // ignore: avoid_print
-          print(
+          sdkLog(
             'DocumentListScreen: pullSync(${widget.doctype}) failed — $e\n$st',
           );
           if (mounted) {
@@ -294,8 +295,7 @@ class _DocumentListScreenState extends State<DocumentListScreen> {
       await _refreshErrorIndex();
       if (mounted) setState(() => _documents = docs);
     } catch (e, st) {
-      // ignore: avoid_print
-      print('DocumentListScreen: _pullDocuments failed — $e\n$st');
+      sdkLog('DocumentListScreen: _pullDocuments failed — $e\n$st');
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
@@ -326,8 +326,7 @@ class _DocumentListScreenState extends State<DocumentListScreen> {
         _errorsByUuid.putIfAbsent(r.mobileUuid, () => <OutboxRow>[]).add(r);
       }
     } catch (e, st) {
-      // ignore: avoid_print
-      print('DocumentListScreen: pendingErrors load failed — $e\n$st');
+      sdkLog('DocumentListScreen: pendingErrors load failed — $e\n$st');
     }
   }
 
@@ -404,21 +403,7 @@ class _DocumentListScreenState extends State<DocumentListScreen> {
               ];
             },
           ),
-          if (_isSyncing)
-            const Padding(
-              padding: EdgeInsets.all(16.0),
-              child: SizedBox(
-                width: 20,
-                height: 20,
-                child: CircularProgressIndicator(strokeWidth: 2),
-              ),
-            )
-          else
-            IconButton(
-              icon: const Icon(Icons.refresh),
-              onPressed: _pullDocuments,
-              tooltip: 'Refresh',
-            ),
+          refreshOrSpinnerAction(isBusy: _isSyncing, onRefresh: _pullDocuments),
         ],
       ),
       body: _isLoading
@@ -463,6 +448,10 @@ class _DocumentListScreenState extends State<DocumentListScreen> {
 
   Widget _buildEmptyState() {
     final listStyle = widget.style ?? const DocumentListStyle();
+    // Original structure: `Center(Column(...))` with no surrounding
+    // Padding and a `bodySmall` subtitle — different enough from the
+    // canonical EmptyStateWidget (which adds Padding(24) and uses
+    // `bodyMedium`) that switching would visibly shift spacing.
     return Center(
       child: Column(
         mainAxisAlignment: MainAxisAlignment.center,
@@ -660,8 +649,7 @@ class _DocumentListScreenState extends State<DocumentListScreen> {
           );
         } catch (e, st) {
           // Mirror is best-effort; the fresh data still drives the form.
-          // ignore: avoid_print
-          print(
+          sdkLog(
             'document_list_screen: applyServerDocument mirror failed for '
             '${widget.doctype}/${doc.serverId} — $e\n$st',
           );

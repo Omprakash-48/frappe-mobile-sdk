@@ -181,26 +181,43 @@ void main() {
     });
   });
 
-  test(
-    'close prevents further emissions but value getter still works',
-    () async {
-      final n = SyncStateNotifier();
-      final emitted = <SyncState>[];
-      final sub = n.stream.listen(emitted.add);
+  group('write-after-close (lifecycle teardown safety)', () {
+    test(
+      'close stops emissions; the value getter still returns the last value',
+      () async {
+        final n = SyncStateNotifier();
+        final emitted = <SyncState>[];
+        final sub = n.stream.listen(emitted.add);
 
-      n.value = n.value.copyWith(isOnline: true);
-      await n.close();
+        n.value = n.value.copyWith(isOnline: true);
+        await n.close();
 
-      // After close, the broadcast stream is done — no further events.
-      // Subsequent assignments throw because StreamController.add on a closed
-      // controller throws StateError.
-      expect(
-        () => n.value = n.value.copyWith(isOnline: false),
-        throwsStateError,
-      );
+        await sub.cancel();
+        expect(emitted, hasLength(1));
+        expect(n.value.isOnline, isTrue);
+      },
+    );
 
-      await sub.cancel();
-      expect(emitted, hasLength(1));
-    },
-  );
+    test(
+      'a late writer racing teardown is a silent no-op, not a StateError',
+      () async {
+        final n = SyncStateNotifier();
+        n.value = n.value.copyWith(isOnline: true);
+        await n.close();
+
+        // FrappeSDK.dispose() closes this notifier, but an in-flight
+        // PushEngine/PullEngine holds the same instance (SyncEngineBuilder
+        // wires one notifier into every engine) and writes value per page
+        // (pull_engine.dart:234). If that write is suspended at an await when
+        // dispose() closes the notifier, the resumed write must not crash the
+        // process with a StateError on the closed broadcast controller.
+        expect(
+          () => n.value = n.value.copyWith(isOnline: false),
+          returnsNormally,
+        );
+        // The dropped write must not mutate observable state mid-teardown.
+        expect(n.value.isOnline, isTrue);
+      },
+    );
+  });
 }

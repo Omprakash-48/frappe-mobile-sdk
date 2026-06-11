@@ -235,51 +235,65 @@ void main() {
     expect(called, isFalse);
   });
 
-  test('does not advance cursor on mid-page failure', () async {
-    var page = 0;
-    final fetcher = PullPageFetcher(
-      listHttp: (doctype, params) async {
-        page++;
-        if (page == 1) {
-          return [
-            {'name': 'C-1', 'modified': '2026-01-01', 'customer_name': 'A'},
-          ];
-        }
-        throw Exception('network');
-      },
-    );
-    final closure = const ClosureResult(
-      doctypes: ['Customer'],
-      graph: {
-        'Customer': DepGraph(
-          doctype: 'Customer',
-          tier: 0,
-          outgoing: [],
-          incoming: [],
-        ),
-      },
-      childDoctypes: {},
-      warnings: [],
-    );
-    final engine = PullEngine(
-      db: db,
-      metaDao: metaDao,
-      outboxDao: OutboxDao(db),
-      pool: ConcurrencyPool(maxConcurrent: 2),
-      fetcher: fetcher,
-      pageSize: 500,
-      notifier: SyncStateNotifier(),
-      metaResolver: (dt) async =>
-          DocTypeMeta(name: dt, fields: [f('customer_name', 'Data')]),
-    );
-    await engine.run(closure);
-    final cursor = await metaDao.getLastOkCursor('Customer');
-    expect(
-      cursor,
-      isNull,
-      reason: 'cursor must NOT advance when page 2 throws',
-    );
-  });
+  test(
+    'mid-page failure leaves a resumable checkpoint (complete:false)',
+    () async {
+      var page = 0;
+      final fetcher = PullPageFetcher(
+        listHttp: (doctype, params) async {
+          page++;
+          if (page == 1) {
+            return [
+              {'name': 'C-1', 'modified': '2026-01-01', 'customer_name': 'A'},
+            ];
+          }
+          throw Exception('network');
+        },
+      );
+      final closure = const ClosureResult(
+        doctypes: ['Customer'],
+        graph: {
+          'Customer': DepGraph(
+            doctype: 'Customer',
+            tier: 0,
+            outgoing: [],
+            incoming: [],
+          ),
+        },
+        childDoctypes: {},
+        warnings: [],
+      );
+      final engine = PullEngine(
+        db: db,
+        metaDao: metaDao,
+        outboxDao: OutboxDao(db),
+        pool: ConcurrencyPool(maxConcurrent: 2),
+        fetcher: fetcher,
+        pageSize: 500,
+        notifier: SyncStateNotifier(),
+        metaResolver: (dt) async =>
+            DocTypeMeta(name: dt, fields: [f('customer_name', 'Data')]),
+      );
+      await engine.run(closure);
+      final cursor = await metaDao.getLastOkCursor('Customer');
+      expect(
+        cursor,
+        isNotNull,
+        reason: 'page 1 succeeded — its progress must be a durable checkpoint',
+      );
+      final parsed = jsonDecode(cursor!) as Map<String, dynamic>;
+      expect(
+        parsed['complete'],
+        isFalse,
+        reason: 'drain was interrupted — not yet incremental',
+      );
+      expect(
+        parsed['name'],
+        'C-1',
+        reason: 'checkpoint is positioned at the last applied row',
+      );
+    },
+  );
 
   test('multiple doctypes drain in parallel via the pool', () async {
     // Add a second doctype.
@@ -760,6 +774,89 @@ void main() {
       final rows = await db.query('docs__customer');
       expect(rows.length, 1);
       expect(rows.first['customer_name'], 'Gamma');
+    },
+  );
+
+  test(
+    'resumes from the persisted offset after a crash (no re-download)',
+    () async {
+      const rows = [
+        {'name': 'C-1', 'modified': '2026-01-01', 'customer_name': 'A'},
+        {'name': 'C-2', 'modified': '2026-01-02', 'customer_name': 'B'},
+      ];
+      List<Map<String, dynamic>> pageAt(int start) =>
+          start >= rows.length ? const [] : [rows[start]];
+
+      const closure = ClosureResult(
+        doctypes: ['Customer'],
+        graph: {
+          'Customer': DepGraph(
+            doctype: 'Customer',
+            tier: 0,
+            outgoing: [],
+            incoming: [],
+          ),
+        },
+        childDoctypes: {},
+        warnings: [],
+      );
+      PullEngine engineWith(PullPageFetcher fetcher) => PullEngine(
+        db: db,
+        metaDao: metaDao,
+        outboxDao: OutboxDao(db),
+        pool: ConcurrencyPool(maxConcurrent: 2),
+        fetcher: fetcher,
+        pageSize: 1,
+        notifier: SyncStateNotifier(),
+        metaResolver: (dt) async =>
+            DocTypeMeta(name: dt, fields: [f('customer_name', 'Data')]),
+      );
+
+      // Run 1: applies page at offset 0, then "crashes" on the next fetch.
+      var run1Calls = 0;
+      await engineWith(
+        PullPageFetcher(
+          listHttp: (doctype, params) async {
+            run1Calls++;
+            if (run1Calls >= 2) throw Exception('crash');
+            return pageAt(params['limit_start'] as int);
+          },
+        ),
+      ).run(closure);
+
+      expect(
+        (await db.query('docs__customer')).length,
+        1,
+        reason: 'only the first page was applied before the crash',
+      );
+
+      // Run 2: fresh engine, same DB. Must start from limit_start == 1.
+      final observedStarts = <int>[];
+      await engineWith(
+        PullPageFetcher(
+          listHttp: (doctype, params) async {
+            final start = params['limit_start'] as int;
+            observedStarts.add(start);
+            return pageAt(start);
+          },
+        ),
+      ).run(closure);
+
+      expect(
+        observedStarts.first,
+        1,
+        reason:
+            'resume must continue from the persisted offset, not re-pull '
+            'page 0',
+      );
+      expect((await db.query('docs__customer')).length, 2);
+      final parsed =
+          jsonDecode((await metaDao.getLastOkCursor('Customer'))!) as Map;
+      expect(
+        parsed['complete'],
+        isTrue,
+        reason: 'doctype fully drained on the second run',
+      );
     },
   );
 }

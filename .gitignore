@@ -90,3 +90,7 @@ test/.test_coverage.dart
 # FVM Version Cache
 .fvm/
 /docs
+# Local dev tooling (not part of the package)
+.mcp.json
+devtools_options.yaml
+/scripts/

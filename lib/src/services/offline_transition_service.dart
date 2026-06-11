@@ -2,6 +2,7 @@ import 'dart:async';
 
 import '../database/app_database.dart';
 import 'sync_service.dart';
+import '../utils/sdk_log.dart';
 
 /// Sealed hierarchy of states emitted on the transition stream.
 sealed class OfflineTransitionState {
@@ -123,9 +124,9 @@ class OfflineTransitionService {
             }
           } catch (e, st) {
             // Probe is best-effort — the drain itself is authoritative.
-            // Log so a misconfigured residueCounter doesn't fail silently.
-            // ignore: avoid_print
-            print('OfflineTransitionService: progress probe failed — $e\n$st');
+            // Logged in debug builds so a misconfigured residueCounter is
+            // visible during development (sdkLog is a no-op in release).
+            sdkLog('OfflineTransitionService: progress probe failed — $e\n$st');
           } finally {
             probeInFlight = false;
           }
@@ -136,8 +137,7 @@ class OfflineTransitionService {
               throw TimeoutException('Drain timed out after $drainTimeout'),
         );
       } catch (e, st) {
-        // ignore: avoid_print
-        print('OfflineTransitionService: pushSync drain failed — $e\n$st');
+        sdkLog('OfflineTransitionService: pushSync drain failed — $e\n$st');
         lastError = e.toString();
       } finally {
         progressTimer?.cancel();
