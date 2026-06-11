@@ -539,6 +539,10 @@ class SyncService {
       }
 
       if (batchRows.isNotEmpty) {
+        final batchServerNames = batchRows
+            .map((r) => r['name'] as String?)
+            .whereType<String>()
+            .toList();
         try {
           await _repository.applyServerPage(
             doctype: doctype,
@@ -548,17 +552,25 @@ class SyncService {
           success += batchRows.length;
         } catch (e, st) {
           sdkLog(
-            'SyncService.pullSync applyServerPage($doctype) failed for ${batchRows.length} rows — $e\n$st',
+            'SyncService.pullSync applyServerPage($doctype) failed for'
+            ' ${batchRows.length} rows — $e\n$st',
           );
           failed += batchRows.length;
           errors.add(
             SyncError(
-              documentId: 'batch',
+              documentId: batchServerNames.firstOrNull ?? 'unknown',
               doctype: doctype,
               operation: 'pull',
-              errorMessage: e.toString(),
+              errorMessage: batchServerNames.length > 1
+                  ? '$e (${batchServerNames.length} docs,'
+                    ' first: ${batchServerNames.first})'
+                  : e.toString(),
             ),
           );
+          // Cursor is not advanced — stop this doctype's pull so the
+          // failed rows are retried on the next sync run rather than
+          // being silently skipped forever.
+          break;
         }
       }
 
