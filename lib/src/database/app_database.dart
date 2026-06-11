@@ -96,6 +96,7 @@ class AppDatabase {
   ) async {
     try {
       sqfliteFfiInit();
+      // Liveness probe only — no schema callbacks; keeps smoke test fast.
       final smokeDb = await databaseFactoryFfi.openDatabase(
         inMemoryDatabasePath,
         options: OpenDatabaseOptions(version: 1),
@@ -121,7 +122,10 @@ class AppDatabase {
       appName: appName,
       onFfiInitFailure: onFfiInitFailure,
       factoryResolver: factoryResolver,
-    );
+    ).catchError((Object e, StackTrace st) {
+      _instanceFuture = null; // allow retry on next call
+      return Future<AppDatabase>.error(e, st);
+    });
   }
 
   static Future<AppDatabase> _createInstance({
@@ -131,7 +135,7 @@ class AppDatabase {
   }) async {
     final resolve = factoryResolver ?? _resolveDatabaseFactory;
     final factory = await resolve(onFfiInitFailure);
-    final documentsDirectory = await getDatabasesPath();
+    final documentsDirectory = await factory.getDatabasesPath();
     final dbName = await _getDatabaseName(appNameOverride: appName);
     final path = join(documentsDirectory, dbName);
     final db = await factory.openDatabase(
@@ -222,8 +226,6 @@ class AppDatabase {
   }
 
   static Future<void> _onConfigure(Database db) async {
-    await db.execute('PRAGMA foreign_keys = ON');
-
     final walResult = await db.rawQuery('PRAGMA journal_mode=WAL');
     final actualMode = walResult.first.values.first?.toString().toLowerCase();
     if (actualMode != 'wal') {
@@ -233,6 +235,7 @@ class AppDatabase {
       );
     }
 
+    await db.execute('PRAGMA foreign_keys = ON');
     await db.execute('PRAGMA synchronous=NORMAL');
     await db.execute('PRAGMA cache_size=-32768');
     await db.execute('PRAGMA mmap_size=268435456');
@@ -353,6 +356,7 @@ class AppDatabase {
     if (identical(this, _instance)) {
       _instance = null;
       _instanceFuture = null;
+      _databaseName = null;
     }
   }
 
@@ -465,5 +469,6 @@ class AppDatabaseTestSeam {
   static void resetSingleton() {
     AppDatabase._instance = null;
     AppDatabase._instanceFuture = null;
+    AppDatabase._databaseName = null;
   }
 }
