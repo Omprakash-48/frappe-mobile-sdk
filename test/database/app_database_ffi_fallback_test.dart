@@ -50,8 +50,9 @@ void main() {
     expect(db, isNotNull);
 
     final raw = db.rawDatabase;
+    await raw.execute('DROP TABLE IF EXISTS _fb_test');
     await raw.execute(
-      'CREATE TABLE IF NOT EXISTS _fb_test (id INTEGER PRIMARY KEY)',
+      'CREATE TABLE _fb_test (id INTEGER PRIMARY KEY)',
     );
     await raw.insert('_fb_test', {'id': 42});
     final rows = await raw.query('_fb_test');

@@ -2,11 +2,18 @@ import 'package:flutter/foundation.dart';
 import 'package:path/path.dart';
 import 'package:package_info_plus/package_info_plus.dart';
 import 'package:sqflite/sqflite.dart';
+import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 import 'daos/doctype_meta_dao.dart';
 import 'daos/link_option_dao.dart';
 import 'daos/auth_token_dao.dart';
 import 'daos/doctype_permission_dao.dart';
 import 'schema/system_tables.dart';
+
+/// Injectable factory resolver — allows tests to substitute their own
+/// factory (e.g. one that always throws) without mocking internals.
+typedef DatabaseFactoryResolver = Future<DatabaseFactory> Function(
+  void Function(Object, StackTrace)? onFailure,
+);
 
 class AppDatabase {
   static const int _version = 3;
@@ -15,6 +22,7 @@ class AppDatabase {
   /// factory does NOT touch this — each call returns an independent instance
   /// for hermetic tests.
   static AppDatabase? _instance;
+  static Future<AppDatabase>? _instanceFuture;
   static String? _databaseName;
 
   /// Underlying sqflite handle. Held per-instance so both production and
@@ -83,19 +91,57 @@ class AppDatabase {
         .replaceAll(RegExp(r'^_|_$'), '');
   }
 
-  /// Get database instance (singleton).
-  static Future<AppDatabase> getInstance({String? appName}) async {
-    if (_instance != null) return _instance!;
+  static Future<DatabaseFactory> _resolveDatabaseFactory(
+    void Function(Object, StackTrace)? onFfiInitFailure,
+  ) async {
+    try {
+      sqfliteFfiInit();
+      final smokeDb = await databaseFactoryFfi.openDatabase(
+        inMemoryDatabasePath,
+        options: OpenDatabaseOptions(version: 1),
+      );
+      await smokeDb.close();
+      return databaseFactoryFfi;
+    } catch (e, st) {
+      debugPrint(
+        'AppDatabase: FFI init failed → falling back to sqflite — $e\n$st',
+      );
+      onFfiInitFailure?.call(e, st);
+      return databaseFactory;
+    }
+  }
 
+  static Future<AppDatabase> getInstance({
+    String? appName,
+    void Function(Object, StackTrace)? onFfiInitFailure,
+    DatabaseFactoryResolver? factoryResolver,
+  }) {
+    if (_instance != null) return Future.value(_instance!);
+    return _instanceFuture ??= _createInstance(
+      appName: appName,
+      onFfiInitFailure: onFfiInitFailure,
+      factoryResolver: factoryResolver,
+    );
+  }
+
+  static Future<AppDatabase> _createInstance({
+    String? appName,
+    void Function(Object, StackTrace)? onFfiInitFailure,
+    DatabaseFactoryResolver? factoryResolver,
+  }) async {
+    final resolve = factoryResolver ?? _resolveDatabaseFactory;
+    final factory = await resolve(onFfiInitFailure);
     final documentsDirectory = await getDatabasesPath();
     final dbName = await _getDatabaseName(appNameOverride: appName);
     final path = join(documentsDirectory, dbName);
-    final db = await openDatabase(
+    final db = await factory.openDatabase(
       path,
-      version: _version,
-      onCreate: _onCreate,
-      onConfigure: _onConfigure,
-      onUpgrade: _onUpgrade,
+      options: OpenDatabaseOptions(
+        version: _version,
+        onCreate: _onCreate,
+        onConfigure: _onConfigure,
+        onUpgrade: _onUpgrade,
+      ),
     );
     _instance = AppDatabase._(db);
     return _instance!;
@@ -175,9 +221,22 @@ class AppDatabase {
     }
   }
 
-  /// Configure database (enable foreign keys)
   static Future<void> _onConfigure(Database db) async {
     await db.execute('PRAGMA foreign_keys = ON');
+
+    final walResult = await db.rawQuery('PRAGMA journal_mode=WAL');
+    final actualMode = walResult.first.values.first?.toString().toLowerCase();
+    if (actualMode != 'wal') {
+      debugPrint(
+        'AppDatabase._onConfigure: WARNING — WAL mode not active '
+        '(got "$actualMode"). Write throughput will be reduced.',
+      );
+    }
+
+    await db.execute('PRAGMA synchronous=NORMAL');
+    await db.execute('PRAGMA cache_size=-32768');
+    await db.execute('PRAGMA mmap_size=268435456');
+    await db.execute('PRAGMA temp_store=MEMORY');
   }
 
   /// Fresh-install path. Builds every table in its final v3 shape.
@@ -293,6 +352,7 @@ class AppDatabase {
     await _db.close();
     if (identical(this, _instance)) {
       _instance = null;
+      _instanceFuture = null;
     }
   }
 
@@ -404,5 +464,6 @@ class AppDatabaseTestSeam {
   /// start from a clean state. Never call from production code.
   static void resetSingleton() {
     AppDatabase._instance = null;
+    AppDatabase._instanceFuture = null;
   }
 }
