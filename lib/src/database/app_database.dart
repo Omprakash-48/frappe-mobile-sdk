@@ -404,6 +404,5 @@ class AppDatabaseTestSeam {
   /// start from a clean state. Never call from production code.
   static void resetSingleton() {
     AppDatabase._instance = null;
-    AppDatabase._instanceFuture = null;
   }
 }
