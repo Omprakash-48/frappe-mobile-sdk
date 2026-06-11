@@ -879,7 +879,7 @@ class FrappeSDK {
   }
 
   /// Imperative sync surface backing the sync error UI: `pendingErrors`,
-  /// `retry(outboxId)`, `retryAll`, `resolveConflict`. Returns `null`
+  /// `retry(outboxId)`, `retryAll`, `retryPaused(outboxId)`, `resolveConflict`. Returns `null`
   /// when the SDK was bootstrapped without an outbox-backed sync engine
   /// (e.g. some test seams) so call sites can render a static banner
   /// without retry affordances.

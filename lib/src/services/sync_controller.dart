@@ -57,7 +57,7 @@ typedef ApplySingleDocFn =
 /// scheduling, dependency tracking, and retry semantics live in
 /// PullEngine / PushEngine. The controller's job is to:
 /// - Provide a consumer-facing API (`syncNow`, `retry`, `retryAll`,
-///   `pause/resume`, `resolveConflict`).
+///   `retryPaused`, `pause/resume`, `resolveConflict`).
 /// - Re-prioritise outbox rows for `Retry all` per Spec §7.4.
 /// - Surface the `SyncState` stream the UI subscribes to.
 ///
@@ -192,10 +192,31 @@ class SyncController {
 
   /// Re-queue a single failed/blocked/conflict row and run a single
   /// push drain. No-op for `done` rows.
+  ///
+  /// For paused SUBMIT/CANCEL rows that cannot auto-retry, use
+  /// [retryPaused] instead.
   Future<void> retry(int outboxId) async {
     final row = await outboxDao.findById(outboxId);
     if (row == null) return;
     if (row.state == OutboxState.done) return;
+    await outboxDao.resetToPending(outboxId);
+    await runPush();
+  }
+
+  /// Resets a single paused row to [OutboxState.pending] and triggers a
+  /// push drain. Use when a terminal server rejection has been resolved
+  /// (e.g. corrected permissions, re-enabled workflow rule) and the user
+  /// explicitly requests a retry.
+  ///
+  /// For SAVE operations, prefer having the user re-save the corrected
+  /// document — [OutboxDao.recordSave] will collapse the paused row
+  /// automatically. This method is intended for SUBMIT and CANCEL rows
+  /// where no re-save mechanism exists.
+  ///
+  /// No-op when [outboxId] is not found.
+  Future<void> retryPaused(int outboxId) async {
+    final row = await outboxDao.findById(outboxId);
+    if (row == null) return;
     await outboxDao.resetToPending(outboxId);
     await runPush();
   }
