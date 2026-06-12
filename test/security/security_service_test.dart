@@ -110,6 +110,20 @@ void main() {
       expect(events.first.checkType, SecurityCheck.root);
       await db.close();
     });
+
+    test('failed run still updates security_state', () async {
+      final db = await AppDatabase.inMemoryDatabase();
+      final svc = _svc(db, rootChecker: () async => true);
+      try {
+        await svc.runChecks();
+      } on SecurityCannotBeAssuredException {
+        // expected
+      }
+      final state = await db.securityStateDao.readState();
+      expect(state['last_wall_time_ms'], isNotNull,
+          reason: 'writeState must be called even when checks fail');
+      await db.close();
+    });
   });
 
   // ── mock location ──────────────────────────────────────────────────────────
