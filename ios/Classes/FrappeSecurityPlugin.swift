@@ -1,5 +1,5 @@
 import Flutter
-import UIKit
+import Darwin
 
 public class FrappeSecurityPlugin: NSObject, FlutterPlugin {
     public static func register(with registrar: FlutterPluginRegistrar) {
@@ -13,7 +13,10 @@ public class FrappeSecurityPlugin: NSObject, FlutterPlugin {
 
     public func handle(_ call: FlutterMethodCall, result: @escaping FlutterResult) {
         if call.method == "getMonotonicMillis" {
-            result(Int64(ProcessInfo.processInfo.systemUptime * 1000))
+            var ts = timespec()
+            clock_gettime(CLOCK_MONOTONIC_RAW, &ts)
+            let millis = Int64(ts.tv_sec) * 1000 + Int64(ts.tv_nsec) / 1_000_000
+            result(millis)
         } else {
             result(FlutterMethodNotImplemented)
         }
