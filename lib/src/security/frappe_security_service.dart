@@ -10,9 +10,16 @@ import 'security_event.dart';
 import 'security_exception.dart';
 import 'security_platform_channel.dart';
 
-typedef _RootChecker = Future<bool> Function();
-typedef _LocationChecker = Future<bool?> Function();
-typedef _MonotonicGetter = Future<int?> Function();
+/// Injectable root/jailbreak checker — returns `true` if the device is rooted.
+typedef RootChecker = Future<bool> Function();
+
+/// Injectable location mock checker — returns `true` if GPS is mocked,
+/// `false` if not, or `null` when location permission is unavailable.
+typedef LocationChecker = Future<bool?> Function();
+
+/// Injectable monotonic-clock getter — returns milliseconds since device boot,
+/// or `null` when the platform channel is unavailable.
+typedef MonotonicGetter = Future<int?> Function();
 
 /// Runs device-integrity checks and throws [SecurityCannotBeAssuredException]
 /// if any enabled check fires. All checks run before throwing so [failedChecks]
@@ -23,9 +30,9 @@ class FrappeSecurityService {
     this.enabled = false,
     this.checks = const {},
     this.restartGapMs = 600000,
-    _RootChecker? rootChecker,
-    _LocationChecker? locationChecker,
-    _MonotonicGetter? monotonicGetter,
+    RootChecker? rootChecker,
+    LocationChecker? locationChecker,
+    MonotonicGetter? monotonicGetter,
   }) : _db = database,
        _rootChecker = rootChecker ?? _defaultRootCheck,
        _locationChecker = locationChecker ?? _defaultLocationCheck,
@@ -41,9 +48,9 @@ class FrappeSecurityService {
   /// than a fresh device restart. Default is 10 minutes (600 000 ms).
   final int restartGapMs;
 
-  final _RootChecker _rootChecker;
-  final _LocationChecker _locationChecker;
-  final _MonotonicGetter _monotonicGetter;
+  final RootChecker _rootChecker;
+  final LocationChecker _locationChecker;
+  final MonotonicGetter _monotonicGetter;
 
   static const _uuid = Uuid();
 
