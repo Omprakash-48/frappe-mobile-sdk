@@ -176,17 +176,18 @@ void main() {
       expect(pragmaBefore.first.values.first, 3);
       await v3.close();
 
-      // 2. Reopen at v4 — _onUpgrade fires with oldVersion=3.
+      // 2. Reopen at v5 — _onUpgrade fires with oldVersion=3, running
+      //    _migrateV3ToV4 then _migrateV4ToV5.
       final v4 = await openDatabase(
         dbPath,
-        version: 4,
+        version: 5,
         onUpgrade: AppDatabaseTestSeam.runOnUpgrade,
         singleInstance: false,
       );
 
-      // 3a. user_version pragma bumped to 4.
+      // 3a. user_version pragma bumped to 5.
       final pragmaAfter = await v4.rawQuery('PRAGMA user_version');
-      expect(pragmaAfter.first.values.first, 4);
+      expect(pragmaAfter.first.values.first, 5);
 
       // 3b. kv table now exists.
       final kvAfter = await v4.rawQuery(
@@ -199,10 +200,10 @@ void main() {
       final colNames = kvCols.map((r) => r['name'] as String).toSet();
       expect(colNames, containsAll(<String>{'lang', 'src', 'tgt'}));
 
-      // 3d. sdk_meta.schema_version updated to 4.
+      // 3d. sdk_meta.schema_version updated to 5 (full v3→v5 chain ran).
       final meta = await v4.query('sdk_meta', where: 'id = 1');
       expect(meta, hasLength(1));
-      expect(meta.first['schema_version'], 4);
+      expect(meta.first['schema_version'], 5);
 
       // 3e. Existing data preserved — auth_tokens still intact.
       final at = await v4.query('auth_tokens');
@@ -245,10 +246,10 @@ void main() {
       ''');
       await v3.close();
 
-      // Reopening at v4 should succeed without "table already exists" error.
+      // Reopening at v5 should succeed without "table already exists" error.
       final v4 = await openDatabase(
         dbPath,
-        version: 4,
+        version: 5,
         onUpgrade: AppDatabaseTestSeam.runOnUpgrade,
         singleInstance: false,
       );

@@ -97,3 +97,30 @@ List<String> doctypeMetaV4ExtensionsDDL() => <String>[
   'ALTER TABLE doctype_meta '
       'ADD COLUMN is_parent_with_children INTEGER NOT NULL DEFAULT 0',
 ];
+
+/// DDL for the two security tables introduced in schema v5.
+/// Both use `CREATE TABLE IF NOT EXISTS` for idempotency.
+/// `security_state` has a singleton row seeded by INSERT OR IGNORE.
+List<String> securityTablesDDL() => <String>[
+  '''
+  CREATE TABLE IF NOT EXISTS security_state (
+    id                INTEGER PRIMARY KEY,
+    last_wall_time_ms  INTEGER,
+    last_monotonic_ms  INTEGER,
+    last_run_at_ms     INTEGER
+  )
+  ''',
+  'INSERT OR IGNORE INTO security_state (id) VALUES (1)',
+  '''
+  CREATE TABLE IF NOT EXISTS security_events (
+    id               TEXT PRIMARY KEY,
+    check_type       TEXT NOT NULL,
+    detected_at_ms   INTEGER NOT NULL,
+    wall_time_ms     INTEGER,
+    server_anchor_ms INTEGER,
+    last_wall_ms     INTEGER,
+    monotonic_ms     INTEGER,
+    metadata         TEXT
+  )
+  ''',
+];

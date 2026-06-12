@@ -37,15 +37,15 @@ void main() {
     );
   });
 
-  test('AppDatabase._version equals 4 and sdk_meta row matches', () async {
+  test('AppDatabase._version equals 5 and sdk_meta row matches', () async {
     final appDb = await AppDatabase.inMemoryDatabase();
-    expect(AppDatabaseTestSeam.version, 4);
+    expect(AppDatabaseTestSeam.version, 5);
     final raw = appDb.rawDatabase;
     final pragma = await raw.rawQuery('PRAGMA user_version');
-    expect(pragma.first.values.first, 4);
+    expect(pragma.first.values.first, 5);
     final meta = await raw.query('sdk_meta', where: 'id = 1');
     expect(meta, hasLength(1));
-    expect(meta.first['schema_version'], 4);
+    expect(meta.first['schema_version'], 5);
     expect(meta.first['offline_enabled'], 0);
     expect(meta.first['bootstrap_done'], 0);
   });
@@ -124,8 +124,8 @@ void main() {
       expect(meta, hasLength(1));
       expect(meta.first['session_user_json'], isNull);
       expect(meta.first['bootstrap_done'], 0);
-      // schema_version bumped to 4 — clearAllData rebuilds from _onCreateBody.
-      expect(meta.first['schema_version'], 4);
+      // schema_version bumped to 5 — clearAllData rebuilds from _onCreateBody.
+      expect(meta.first['schema_version'], 5);
 
       // Engine still functions — re-insert into a recreated table works.
       await raw.insert('outbox', {
