@@ -404,6 +404,9 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
     return normalized;
   }
 
+  static int _tabCount(DocTypeMeta meta) =>
+      meta.fields.where((f) => f.fieldtype == FieldTypes.tabBreak).length;
+
   void _buildFormStructure() {
     _tabs.clear();
     _FormTab? currentTab;
@@ -1112,7 +1115,8 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
       oldWidget.initialData,
       widget.initialData,
     );
-    final metaChanged = oldWidget.meta.name != widget.meta.name;
+    final metaChanged = oldWidget.meta.name != widget.meta.name ||
+        _tabCount(oldWidget.meta) != _tabCount(widget.meta);
     if (initialDataChanged || metaChanged) {
       _progressSubscription?.cancel();
       _linkFieldCoordinator?.dispose();
