@@ -35,6 +35,8 @@ import '../services/offline_repository.dart';
 import '../services/offline_transition_service.dart';
 import '../services/link_option_service.dart';
 import '../services/translation_service.dart';
+import '../security/security_check.dart';
+import '../security/frappe_security_service.dart';
 import '../sync/cursor.dart';
 import '../sync/pull_engine.dart';
 import '../sync/push_engine.dart';
@@ -74,6 +76,10 @@ class FrappeSDK {
   /// Rows per page for general list queries. Default 20.
   final int listDefaultPageSize;
 
+  final bool tamperProtectionEnabled;
+  final Set<SecurityCheck> tamperProtectionChecks;
+  final int tamperProtectionRestartGapMs;
+
   FrappeClient? _client;
   AppDatabase? _database;
   AuthService? _authService;
@@ -86,6 +92,7 @@ class FrappeSDK {
   LinkOptionService? _linkOptionService;
   UnifiedResolver? _resolver;
   SessionUserService? _sessionUserService;
+  FrappeSecurityService? _securityService;
 
   // Push/pull engines + controller wired by [SyncEngineBuilder]. They
   // share `_syncStateNotifier` so the single observable surface for sync
@@ -107,6 +114,9 @@ class FrappeSDK {
   /// Live sync-state notifier. Non-null after [initialize] completes.
   /// Wire into [SyncStatusBar] to surface pull/push activity in the UI.
   SyncStateNotifier? get syncStateNotifier => _syncStateNotifier;
+
+  /// The tamper-detection service. Non-null after [initialize] completes.
+  FrappeSecurityService get security => _securityService!;
 
   bool _initialized = false;
 
@@ -191,6 +201,9 @@ class FrappeSDK {
     this.listChildDocsPageSize = 1000,
     this.listFullDocsPageSize = 1000,
     this.listDefaultPageSize = 20,
+    this.tamperProtectionEnabled = false,
+    this.tamperProtectionChecks = const {},
+    this.tamperProtectionRestartGapMs = 600000,
   });
 
   /// Test-only constructor: accepts a pre-built [AppDatabase] (e.g. in-memory).
@@ -215,6 +228,9 @@ class FrappeSDK {
     this.listChildDocsPageSize = 1000,
     this.listFullDocsPageSize = 1000,
     this.listDefaultPageSize = 20,
+    this.tamperProtectionEnabled = false,
+    this.tamperProtectionChecks = const {},
+    this.tamperProtectionRestartGapMs = 600000,
   }) : databaseAppName = null,
        payloadTransformer = null,
        onFfiInitFailure = null {
@@ -288,6 +304,12 @@ class FrappeSDK {
       residueCounter: _residueCount,
     );
     _sessionUserService = SessionUserService(_database!.rawDatabase);
+    _securityService = FrappeSecurityService(
+      database: database,
+      enabled: tamperProtectionEnabled,
+      checks: tamperProtectionChecks,
+      restartGapMs: tamperProtectionRestartGapMs,
+    );
     _initialized = true;
   }
 
@@ -327,6 +349,12 @@ class FrappeSDK {
     _database = await AppDatabase.getInstance(
       appName: databaseAppName,
       onFfiInitFailure: onFfiInitFailure,
+    );
+    _securityService = FrappeSecurityService(
+      database: _database!,
+      enabled: tamperProtectionEnabled,
+      checks: tamperProtectionChecks,
+      restartGapMs: tamperProtectionRestartGapMs,
     );
     _authService = AuthService();
     _authService!.initialize(baseUrl, database: _database);
@@ -1542,6 +1570,7 @@ class FrappeSDK {
     _pullPool = null;
     _syncStateNotifier = null;
     _sessionUserService = null;
+    _securityService = null;
     _offlineTransitionService = null;
     _modeNotifier = null;
     _syncCompleteController = null;

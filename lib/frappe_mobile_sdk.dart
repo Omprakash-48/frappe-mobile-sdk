@@ -77,6 +77,13 @@ export 'src/services/offline_transition_service.dart'
 export 'src/ui/offline_transition_screen.dart' show OfflineTransitionScreen;
 export 'src/ui/offline_transition_guard.dart' show OfflineTransitionGuard;
 
+// Security / tamper-detection
+export 'src/security/security_check.dart';
+export 'src/security/security_exception.dart';
+export 'src/security/security_event.dart';
+export 'src/security/frappe_security_service.dart';
+export 'src/security/frappe_security_guard.dart';
+
 // UI Components
 export 'src/ui/app_guard.dart';
 export 'src/ui/login_screen.dart';
