@@ -1,9 +1,7 @@
 import 'dart:convert';
 import 'package:flutter/material.dart';
-import 'package:flutter_form_builder/flutter_form_builder.dart';
 import 'package:geolocator/geolocator.dart';
 import 'base_field.dart';
-import 'field_helpers.dart';
 
 /// Frappe Geolocation field — fetches live GPS coordinates and stores them
 /// as a GeoJSON FeatureCollection string (the format Frappe expects).
@@ -27,38 +25,12 @@ class GeolocationField extends BaseField {
 
   @override
   Widget buildField(BuildContext context) {
-    return FormBuilderField<String>(
-      autovalidateMode: AutovalidateMode.onUserInteraction,
-      key: ValueKey('geofield_${field.fieldname}'),
-      name: field.fieldname ?? '',
-      initialValue: value?.toString() ?? field.defaultValue?.toString(),
+    return _GeolocationFieldWidget(
+      value: value,
+      onChanged: onChanged,
       enabled: enabled && !field.readOnly,
-      validator: field.reqd
-          ? (val) => requiredValidator(val, field.displayLabel)
-          : null,
-      builder: (state) {
-        return InputDecorator(
-          decoration: style?.decoration?.copyWith(
-                errorText: state.errorText,
-              ) ??
-              InputDecoration(
-                border: InputBorder.none,
-                errorText: state.errorText,
-                contentPadding: EdgeInsets.zero,
-              ),
-          child: _GeolocationFieldWidget(
-            value: state.value,
-            onChanged: (val) {
-              final geoJson = val?.toString();
-              state.didChange(geoJson);
-              onChanged?.call(geoJson);
-            },
-            enabled: enabled && !field.readOnly,
-            reqd: field.reqd,
-            label: field.displayLabel,
-          ),
-        );
-      },
+      reqd: field.reqd,
+      label: field.displayLabel,
     );
   }
 }
@@ -175,19 +147,33 @@ class _GeolocationFieldWidgetState extends State<_GeolocationFieldWidget> {
         return;
       }
 
-      // Get current position
-      final position = await Geolocator.getCurrentPosition(
-        locationSettings: const LocationSettings(
-          accuracy: LocationAccuracy.high,
-          timeLimit: Duration(seconds: 15),
-        ),
-      );
+      // Get current position with fallback to last known position
+      Position? position;
+      try {
+        position = await Geolocator.getCurrentPosition(
+          locationSettings: const LocationSettings(
+            accuracy: LocationAccuracy.high,
+            timeLimit: Duration(seconds: 15),
+          ),
+        );
+      } catch (e) {
+        debugPrint(
+          'GeolocationField._fetchLocation getCurrentPosition failed: $e. Falling back to last known position.',
+        );
+        position = await Geolocator.getLastKnownPosition();
+        if (position == null) {
+          throw Exception(
+            'Timeout fetching live location and no last known position available.',
+          );
+        }
+      }
 
-      final geoJson = _toGeoJson(position.latitude, position.longitude);
+      final pos = position;
+      final geoJson = _toGeoJson(pos.latitude, pos.longitude);
 
       setState(() {
-        _latitude = position.latitude;
-        _longitude = position.longitude;
+        _latitude = pos.latitude;
+        _longitude = pos.longitude;
         _loading = false;
       });
 
