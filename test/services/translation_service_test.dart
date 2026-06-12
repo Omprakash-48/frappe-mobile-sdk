@@ -1,9 +1,12 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
+import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 import 'package:frappe_mobile_sdk/src/api/client.dart';
+import 'package:frappe_mobile_sdk/src/database/daos/translation_dao.dart';
 import 'package:frappe_mobile_sdk/src/services/translation_service.dart';
 
 /// Build a MockClient that serves the mobile_auth.get_translations response.
@@ -39,6 +42,11 @@ http.Client _scripted(
 }
 
 void main() {
+  setUpAll(() {
+    sqfliteFfiInit();
+    databaseFactory = databaseFactoryFfi;
+  });
+
   test('default currentLang is "en"', () {
     final svc = TranslationService(FrappeClient('http://localhost'));
     expect(svc.currentLang, 'en');
@@ -222,4 +230,79 @@ void main() {
       reason: 'caller mutation must not leak into cache',
     );
   });
+
+  // Regression: clearAll() must prevent an in-flight refreshAsync from
+  // repopulating the wiped in-memory cache and SQLite kv table.
+  // The generation counter (_clearGeneration) bumped in clearAll() causes
+  // the in-flight _doRefresh / loadTranslations to bail before writing.
+  //
+  // Note on assertions:
+  //   clearAll() resets _currentLang to 'en', so translate() would look up
+  //   _cache['en'], not _cache['hi'].  We check getCachedTranslations('hi')
+  //   directly to verify the cache for the fetched language was NOT written.
+  test(
+    'clearAll generation: in-flight refresh does NOT repopulate cache after clearAll',
+    () async {
+      // A Completer lets us hold the HTTP response until we choose to release it.
+      final fetchCompleter = Completer<http.Response>();
+      final mockClient = MockClient((_) => fetchCompleter.future);
+      final svc = TranslationService(
+        FrappeClient('http://localhost', httpClient: mockClient),
+      );
+
+      // Inject an in-memory DAO so we can verify SQLite is not repopulated.
+      final db = await databaseFactory.openDatabase(
+        inMemoryDatabasePath,
+        options: OpenDatabaseOptions(
+          version: 1,
+          singleInstance: false,
+          onCreate: (d, _) => d.execute(
+            'CREATE TABLE kv (lang TEXT NOT NULL, src TEXT NOT NULL, '
+            'tgt TEXT NOT NULL, PRIMARY KEY (lang, src))',
+          ),
+        ),
+      );
+      svc.injectDao(TranslationDao(db));
+
+      // Start a background refresh — HTTP fetch is now blocked.
+      svc.refreshAsync('hi');
+
+      // While the fetch is in-flight, logout clears the service.
+      await svc.clearAll();
+
+      // Unblock the fetch with valid translation data.
+      // Use Response.bytes so the Devanagari string survives the Latin-1 check.
+      fetchCompleter.complete(http.Response.bytes(
+        utf8.encode(jsonEncode({
+          'data': {
+            'translations': {
+              'hi': {'Hello': 'नमस्ते'},
+            },
+          },
+        })),
+        200,
+        headers: {'content-type': 'application/json; charset=utf-8'},
+      ));
+
+      // Give the entire async chain time to complete: MockClient → FrappeClient
+      // response parsing → loadTranslations cache write → _doRefresh bulkUpsert.
+      // Without the generation guard, all these writes will have landed by now.
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+
+      // In-memory cache for 'hi' must remain empty after clearAll.
+      expect(
+        svc.getCachedTranslations('hi'),
+        isEmpty,
+        reason:
+            'cleared cache[hi] must not be repopulated by in-flight request after logout',
+      );
+
+      // SQLite kv table must also be empty.
+      final rows = await db.query('kv');
+      expect(rows, isEmpty,
+          reason: 'kv table must not be repopulated after clearAll');
+
+      await db.close();
+    },
+  );
 }

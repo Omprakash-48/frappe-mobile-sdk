@@ -14,6 +14,13 @@ class TranslationService {
   /// when the DAO/stream have already been closed.
   bool _disposed = false;
 
+  /// Incremented by [clearAll] (logout). In-flight [loadTranslations] and
+  /// [_doRefresh] calls snapshot this value before their first await and
+  /// compare after each suspension point — if the snapshot no longer matches,
+  /// clearAll() fired while they were awaiting and they discard their results
+  /// instead of repopulating the freshly-wiped cache and SQLite table.
+  int _clearGeneration = 0;
+
   /// Optional external delegate to intercept/override translations (e.g. static host app ARB strings).
   String Function(String source, [List<Object>? args])? translateDelegate;
 
@@ -69,8 +76,10 @@ class TranslationService {
   }
 
   Future<void> _doRefresh(String lang) async {
+    final gen = _clearGeneration; // snapshot before any await
     final map = await loadTranslations(lang); // fetches + populates _cache[lang]
-    if (_disposed) return; // guard — dispose may have run during the await
+    // Guard: dispose OR clearAll() may have fired while we were awaiting.
+    if (_disposed || _clearGeneration != gen) return;
     if (map.isEmpty) return;
     try {
       await _dao?.bulkUpsert(lang, map);
@@ -163,11 +172,16 @@ class TranslationService {
   ///   { "data": { "translations": { "hi": { "Source": "Translated" } } } }
   Future<Map<String, String>> loadTranslations(String lang) async {
     if (_disposed) return {};
+    final gen = _clearGeneration; // snapshot before any await
     try {
       final result = await _client?.rest.get(
         '/api/v2/method/mobile_auth.get_translations',
         queryParams: {'lang': lang},
       );
+      // If clearAll() fired while we were awaiting the HTTP response, discard
+      // the result — writing stale data back into the freshly-wiped cache
+      // would re-populate it as if logout had never happened.
+      if (_clearGeneration != gen) return {};
       if (result is! Map<String, dynamic>) return {};
       final data = result['data'] as Map<String, dynamic>? ?? result;
       final translationsMap = data['translations'] as Map<String, dynamic>?;
@@ -220,7 +234,12 @@ class TranslationService {
 
   /// Clears in-memory cache, resets currentLang to 'en', and wipes the
   /// SQLite translation cache. Called on logout.
+  ///
+  /// Bumps [_clearGeneration] first so any in-flight [loadTranslations] or
+  /// [_doRefresh] calls detect the logout and discard their results instead
+  /// of repopulating the freshly-wiped cache.
   Future<void> clearAll() async {
+    _clearGeneration++; // must come before _cache.clear() so in-flight paths see it
     _cache.clear();
     _currentLang = 'en';
     try {
