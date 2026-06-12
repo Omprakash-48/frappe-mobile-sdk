@@ -88,10 +88,52 @@ test/.test_coverage.dart
 
 # FVM Version Cache
 .fvm/
-/docs
-# Local implementation plans (not part of SDK distribution)
+
+# ============================================================
+# PRIVATE LOCAL ARTIFACTS — NEVER COMMIT TO PUBLIC SDK REPO
+# If a file matches any pattern below, it is private and must
+# not be published. This SDK is MIT-licensed and fully public.
+# ============================================================
+
+# Local scratch / generated docs directories
+/docs/
+/scratch/
+/notes/
+/tmp/
+
+# AI agent planning artifacts (superpowers skill output)
+doc/superpowers/
+docs/superpowers/
+**/superpowers/plans/
+**/superpowers/specs/
+
+# Implementation plans, specs, design docs (any name/location)
 PLAN-*.md
 PLANS-INDEX.md
+*_PLAN.md
+*_PLAN_*.md
+*-plan.md
+*-design.md
+*-spec.md
+*_SPEC.md
+*_DESIGN.md
+implementation_plan*.md
+impl_plan*.md
+
+# PR review and tracking files
+*_REVIEW.md
+*_CHECKLIST.md
+*_FIXES_CHECKLIST.md
+PR[0-9]*.md
+*-review.md
+*-checklist.md
+FEEDBACK_TRACKER*.md
+TESTING_GUIDELINES*.md
+TRANSLATION_CHANGES*.md
+SEARCHABLE_SELECT_CHANGES*.md
+PROJECT_MAP*.md
+WALKTHROUGH*.md
+walkthrough*.md
 
 # stray local sqlite scratch
 *.sqlite
@@ -100,3 +142,9 @@ PLANS-INDEX.md
 .mcp.json
 devtools_options.yaml
 /scripts/
+
+# Kilo / Superpowers / local AI tooling directories
+.kilo/
+.superpowers/
+.remember/
+tools/
