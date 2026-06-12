@@ -12,9 +12,9 @@ import 'base_field.dart';
 /// `(value) => requiredValidator(value, field.displayLabel)` (or fold
 /// translation through [BaseField.style]) at the call site.
 String? requiredValidator(dynamic value, String label) {
-  if (value == null || value.toString().isEmpty) {
-    return sdkTr('{0} is required', [label]);
-  }
+  if (value == null) return sdkTr('{0} is required', [label]);
+  if (value is Iterable && value.isEmpty) return sdkTr('{0} is required', [label]);
+  if (value.toString().isEmpty) return sdkTr('{0} is required', [label]);
   return null;
 }
 
