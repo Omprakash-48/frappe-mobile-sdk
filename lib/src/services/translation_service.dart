@@ -97,6 +97,11 @@ class TranslationService {
   Future<void> _doRefreshAll() async {
     if (_disposed) return;
     final langs = await fetchEnabledLanguages();
+    // Serial by design: awaiting each language fetch prevents concurrent
+    // requests from hammering the Frappe server and triggering rate limits.
+    // This is a necessary trade-off given the current single-language API.
+    // TODO(translations): replace serial loop with a paginated bulk-fetch
+    // endpoint once the translations API supports it — avoids N round-trips.
     for (final lang in langs) {
       if (_disposed) return;
       await _doRefresh(lang);

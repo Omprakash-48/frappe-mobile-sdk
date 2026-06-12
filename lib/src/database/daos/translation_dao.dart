@@ -35,6 +35,10 @@ class TranslationDao {
   ///
   /// Uses a batched transaction for efficiency. Handles arbitrarily large maps
   /// by writing all rows inside a single transaction batch.
+  ///
+  /// Known limitation: keys removed from the upstream server are NOT pruned —
+  /// stale entries may linger until the next [deleteAll] (logout). Pruning
+  /// would require a per-language diff on every refresh and is deferred.
   Future<void> bulkUpsert(String lang, Map<String, String> map) async {
     if (map.isEmpty) return;
     await _db.transaction((txn) async {
