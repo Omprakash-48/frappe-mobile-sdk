@@ -19,7 +19,11 @@ import '../sync/pull_engine.dart';
 import '../sync/pull_page_fetcher.dart';
 import '../sync/push_engine.dart';
 import '../sync/push_error.dart';
+import '../sync/error_log_collector.dart';
+import '../sync/mobile_error_poster.dart';
 import '../sync/sync_state_notifier.dart';
+import 'error_capture.dart';
+import 'session_user_service.dart';
 import 'sync_controller.dart';
 import '../utils/sdk_log.dart';
 
@@ -83,6 +87,7 @@ class SyncEngineBuilder {
     SchemaReconcilerFn? schemaReconciler,
     PayloadTransformerFn? payloadTransformer,
     int pullPageSize = 500,
+    SessionUserService? sessionUserService,
   }) async {
     final notifier = sharedNotifier ?? SyncStateNotifier();
     final tier = await DeviceTier.detect(override: concurrencyOverride);
@@ -91,8 +96,35 @@ class SyncEngineBuilder {
 
     final rawDb = database.rawDatabase;
     final outboxDao = OutboxDao(rawDb);
+
+    // Per-drain error-log capture: terminal push failures are side-channelled
+    // here and flushed (best-effort) to mobile_control on drain completion.
+    final errorLogCollector = ErrorLogCollector();
+    final errorLogPoster = MobileErrorPoster(
+      call: (m, a) => client.call(m, args: a),
+    );
     final attachmentDao = PendingAttachmentDao(rawDb);
     final metaDao = database.doctypeMetaDao;
+
+    // Side-channels a terminal push failure into the error-log collector.
+    // Pure-additive: the caller still rethrows the original exception, so
+    // control flow and classification are unchanged.
+    void captureSendFailure(
+      FrappeException e,
+      String method,
+      Map<String, Object?> payload,
+    ) {
+      final user = sessionUserService?.current;
+      recordTerminalFailure(
+        collector: errorLogCollector,
+        method: method,
+        payload: payload,
+        error: e,
+        sessionUserName: user?.name ?? '',
+        sessionUserRoles: user?.roles ?? const [],
+        nowMillis: DateTime.now().toUtc().millisecondsSinceEpoch,
+      );
+    }
 
     // ----- HTTP send callback -----
     Future<Map<String, dynamic>> send(
@@ -130,11 +162,18 @@ class SyncEngineBuilder {
         // A server-side deadlock is transient — translate it to the
         // retryable [DeadlockError] so PushEngine's attempt loop retries it
         // (with jitter) instead of letting the raw ApiException fall through
-        // to the terminal `markFailed(UNKNOWN)` path. All other
-        // ApiExceptions propagate unchanged.
+        // to the terminal `markFailed(UNKNOWN)` path. Deadlocks are retried,
+        // not logged. All other ApiExceptions propagate unchanged.
         if (isDeadlockApiException(e)) {
           throw DeadlockError(message: e.message);
         }
+        captureSendFailure(e, method, payload);
+        rethrow;
+      } on ValidationException catch (e) {
+        captureSendFailure(e, method, payload);
+        rethrow;
+      } on AuthException catch (e) {
+        captureSendFailure(e, method, payload);
         rethrow;
       }
     }
@@ -227,6 +266,7 @@ class SyncEngineBuilder {
       attachmentUploader: attachmentUploader,
       writeQueueResolver: writeQueueResolver,
       payloadTransformer: payloadTransformer,
+      onDrainComplete: () => errorLogPoster.flush(errorLogCollector.drain()),
     );
 
     // PullEngine is built but not auto-invoked. The list-http callback

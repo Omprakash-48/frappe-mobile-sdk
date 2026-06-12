@@ -87,8 +87,10 @@ void main() {
     DocTypeMeta? customMeta,
     IdempotencyStrategy? idempotencyStrategy,
     WriteQueue Function(String doctype)? writeQueueResolver,
+    Future<void> Function()? onDrainComplete,
   }) {
     return PushEngine(
+      onDrainComplete: onDrainComplete,
       db: db,
       outboxDao: outbox,
       attachmentDao: PendingAttachmentDao(db),
@@ -932,5 +934,29 @@ void main() {
     // never the raw UUID.
     expect(sentParentCustomer[childUuid], 'SRV-1');
     expect(sentParentCustomer[childUuid], isNot(parentUuid));
+  });
+
+  test('onDrainComplete fires once after a drain', () async {
+    var fired = 0;
+    final engine = buildEngine(
+      send: (m, p, sn) async => {
+        'name': 'CUST-1',
+        'modified': '2026-01-01 00:00:00',
+      },
+      onDrainComplete: () async => fired++,
+    );
+    await engine.runOnce();
+    expect(fired, 1);
+  });
+
+  test('a throwing onDrainComplete does not escape runOnce', () async {
+    final engine = buildEngine(
+      send: (m, p, sn) async => {
+        'name': 'CUST-1',
+        'modified': '2026-01-01 00:00:00',
+      },
+      onDrainComplete: () async => throw StateError('boom'),
+    );
+    await engine.runOnce(); // must not throw
   });
 }

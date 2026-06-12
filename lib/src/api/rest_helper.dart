@@ -252,7 +252,12 @@ class RestHelper {
           error: null,
         );
 
-        return await _handleResponse(response);
+        return await _handleResponse(
+          response,
+          requestUrl: uri.toString(),
+          requestMethod: method,
+          requestBody: method != 'GET' ? body : null,
+        );
       } on AuthException catch (e) {
         if (e.statusCode == 401 &&
             _bearerToken != null &&
@@ -293,7 +298,26 @@ class RestHelper {
     }
   }
 
-  Future<dynamic> _handleResponse(http.Response response) async {
+  Future<dynamic> _handleResponse(
+    http.Response response, {
+    String? requestUrl,
+    String? requestMethod,
+    Object? requestBody,
+  }) async {
+    // Stamps wire-capture context onto a FrappeException before it is thrown,
+    // so the push-side error-log collector can rebuild the exact request.
+    Never throwStamped(FrappeException e) {
+      e
+        ..requestUrl = requestUrl
+        ..requestMethod = requestMethod
+        ..requestBody = requestBody
+        ..responseBodyRaw = response.body
+        // http lowercases header names; Frappe sets this only when server
+        // monitoring is enabled, so it is best-effort and may be null.
+        ..traceId = response.headers['x-frappe-request-id'];
+      throw e;
+    }
+
     dynamic body;
     try {
       body = await compute(jsonDecode, response.body);
@@ -308,10 +332,12 @@ class RestHelper {
       if (response.statusCode >= 200 && response.statusCode < 300) {
         return response.body;
       }
-      throw ApiException(
-        toUserFriendlyMessage(response.body),
-        response.statusCode,
-        response.body,
+      throwStamped(
+        ApiException(
+          toUserFriendlyMessage(response.body),
+          response.statusCode,
+          response.body,
+        ),
       );
     }
 
@@ -320,27 +346,39 @@ class RestHelper {
     }
 
     if (response.statusCode == 401 || response.statusCode == 403) {
-      throw AuthException(
-        toUserFriendlyMessage(extractErrorMessage(body)),
-        response.statusCode,
+      throwStamped(
+        AuthException(
+          toUserFriendlyMessage(extractErrorMessage(body)),
+          response.statusCode,
+        ),
       );
     }
 
     if (response.statusCode == 417) {
-      throw ValidationException(
-        toUserFriendlyMessage(extractErrorMessage(body)),
-        body is Map<String, dynamic> ? body : null,
+      throwStamped(
+        ValidationException(
+          toUserFriendlyMessage(extractErrorMessage(body)),
+          body is Map<String, dynamic> ? body : null,
+        ),
       );
     }
 
     if (response.statusCode == 404) {
-      throw ApiException(toUserFriendlyMessage(extractErrorMessage(body)), 404);
+      throwStamped(
+        ApiException(
+          toUserFriendlyMessage(extractErrorMessage(body)),
+          404,
+          body,
+        ),
+      );
     }
 
-    throw ApiException(
-      toUserFriendlyMessage(extractErrorMessage(body)),
-      response.statusCode,
-      body,
+    throwStamped(
+      ApiException(
+        toUserFriendlyMessage(extractErrorMessage(body)),
+        response.statusCode,
+        body,
+      ),
     );
   }
 
@@ -405,7 +443,12 @@ class RestHelper {
       var response = await http.Response.fromStream(
         streamedResponse,
       ).timeout(uploadTimeout);
-      return await _handleResponse(response);
+      return await _handleResponse(
+        response,
+        requestUrl: uri.toString(),
+        requestMethod: 'POST',
+        requestBody: fields,
+      );
     } on TimeoutException {
       throw NetworkException(
         'Upload timed out. Check your connection and try again.',

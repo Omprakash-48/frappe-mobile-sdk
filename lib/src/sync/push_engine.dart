@@ -124,6 +124,12 @@ class PushEngine {
   /// and before HTTP dispatch. See [PayloadTransformerFn].
   final PayloadTransformerFn? payloadTransformer;
 
+  /// Optional. Invoked once at the end of every [runOnce] (in the `finally`,
+  /// after the rerun loop completes). Used to flush the per-drain error-log
+  /// collector. Best-effort: exceptions are swallowed so a flush failure can
+  /// never break the push drain.
+  final Future<void> Function()? onDrainComplete;
+
   /// RNG for backoff jitter. Deadlock victims that retry on a fixed
   /// schedule re-collide in lockstep; jitter spreads them out.
   final Random _rng = Random();
@@ -155,6 +161,7 @@ class PushEngine {
     DependenciesForRowFn? dependencyScanner,
     this.writeQueueResolver,
     this.payloadTransformer,
+    this.onDrainComplete,
     this.attachmentBackoff = kDefaultSyncBackoff,
     this.networkBackoff = kDefaultSyncBackoff,
   }) : dependencyScanner = dependencyScanner ?? _defaultDependencyScanner;
@@ -187,6 +194,14 @@ class PushEngine {
     } finally {
       _running = false;
       notifier.value = notifier.value.copyWith(isPushing: false);
+      final hook = onDrainComplete;
+      if (hook != null) {
+        try {
+          await hook();
+        } catch (e, st) {
+          sdkLog('PushEngine.onDrainComplete threw (ignored) — $e\n$st');
+        }
+      }
     }
   }
 
@@ -775,9 +790,7 @@ class PushEngine {
       try {
         childMeta = await childMetaResolver(childDoctype);
       } catch (e, st) {
-        sdkLog(
-          'PushEngine: childMetaResolver($childDoctype) failed — $e\n$st',
-        );
+        sdkLog('PushEngine: childMetaResolver($childDoctype) failed — $e\n$st');
         continue;
       }
       for (final cr in childRows) {
