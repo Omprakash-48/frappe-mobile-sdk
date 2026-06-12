@@ -43,8 +43,7 @@ app.*.map.json
 /android/app/release
 
 # Platform folders - EXCLUDE these (root level)
-/android/
-/ios/
+# NOTE: /android/ and /ios/ are intentionally tracked — they contain the native plugin source.
 /linux/
 /macos/
 /web/
