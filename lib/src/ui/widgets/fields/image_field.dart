@@ -97,6 +97,7 @@ class ImageField extends BaseField {
     final String? imagePath = raw?.trim();
 
     return FormBuilderField<String>(
+      autovalidateMode: AutovalidateMode.onUserInteraction,
       key: ValueKey('image_${field.fieldname}'),
       name: field.fieldname ?? '',
       initialValue: imagePath,

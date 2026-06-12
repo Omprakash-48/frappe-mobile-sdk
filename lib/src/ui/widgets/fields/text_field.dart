@@ -21,6 +21,7 @@ class TextFieldWidget extends BaseField {
     final maxLines = isLongText ? 5 : 3;
 
     return FormBuilderTextField(
+      autovalidateMode: AutovalidateMode.onUserInteraction,
       key: ValueKey('text_${field.fieldname}'),
       name: field.fieldname ?? '',
       initialValue: value?.toString() ?? field.defaultValue ?? '',

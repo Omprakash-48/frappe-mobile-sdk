@@ -22,6 +22,7 @@ class DatetimeField extends BaseField {
   @override
   Widget buildField(BuildContext context) {
     return FormBuilderDateTimePicker(
+      autovalidateMode: AutovalidateMode.onUserInteraction,
       key: ValueKey('datetime_${field.fieldname}'),
       name: field.fieldname ?? '',
       initialValue: parseDateTime(value),

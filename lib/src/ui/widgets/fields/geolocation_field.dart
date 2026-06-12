@@ -1,7 +1,9 @@
 import 'dart:convert';
 import 'package:flutter/material.dart';
+import 'package:flutter_form_builder/flutter_form_builder.dart';
 import 'package:geolocator/geolocator.dart';
 import 'base_field.dart';
+import 'field_helpers.dart';
 
 /// Frappe Geolocation field — fetches live GPS coordinates and stores them
 /// as a GeoJSON FeatureCollection string (the format Frappe expects).
@@ -25,12 +27,38 @@ class GeolocationField extends BaseField {
 
   @override
   Widget buildField(BuildContext context) {
-    return _GeolocationFieldWidget(
-      value: value,
-      onChanged: onChanged,
+    return FormBuilderField<String>(
+      autovalidateMode: AutovalidateMode.onUserInteraction,
+      key: ValueKey('geofield_${field.fieldname}'),
+      name: field.fieldname ?? '',
+      initialValue: value?.toString() ?? field.defaultValue?.toString(),
       enabled: enabled && !field.readOnly,
-      reqd: field.reqd,
-      label: field.displayLabel,
+      validator: field.reqd
+          ? (val) => requiredValidator(val, field.displayLabel)
+          : null,
+      builder: (state) {
+        return InputDecorator(
+          decoration: style?.decoration?.copyWith(
+                errorText: state.errorText,
+              ) ??
+              InputDecoration(
+                border: InputBorder.none,
+                errorText: state.errorText,
+                contentPadding: EdgeInsets.zero,
+              ),
+          child: _GeolocationFieldWidget(
+            value: state.value,
+            onChanged: (val) {
+              final geoJson = val?.toString();
+              state.didChange(geoJson);
+              onChanged?.call(geoJson);
+            },
+            enabled: enabled && !field.readOnly,
+            reqd: field.reqd,
+            label: field.displayLabel,
+          ),
+        );
+      },
     );
   }
 }

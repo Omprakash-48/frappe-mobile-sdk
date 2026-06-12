@@ -133,6 +133,10 @@ class FrappeFormStyle {
 
   final LinkFieldPickerMode linkFieldPickerMode;
 
+  /// Optional bounds evaluators for Date Pickers
+  final DateTime? Function(String doctype, DocField field)? getFirstDate;
+  final DateTime? Function(String doctype, DocField field)? getLastDate;
+
   const FrappeFormStyle({
     this.fieldDecoration,
     this.labelStyle,
@@ -150,6 +154,8 @@ class FrappeFormStyle {
     this.sectionCardColor,
     this.inputFormatters,
     this.linkFieldPickerMode = LinkFieldPickerMode.inline,
+    this.getFirstDate,
+    this.getLastDate,
   });
 }
 
@@ -662,6 +668,8 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
       showDescription: formStyle.showFieldDescription,
       inputFormatters: formStyle.inputFormatters?.call(field),
       linkFieldPickerMode: formStyle.linkFieldPickerMode,
+      getFirstDate: formStyle.getFirstDate != null ? (f) => formStyle.getFirstDate!(widget.meta.name, f) : null,
+      getLastDate: formStyle.getLastDate != null ? (f) => formStyle.getLastDate!(widget.meta.name, f) : null,
     );
 
     final fieldWithEffectiveProps = DocField(
@@ -1376,6 +1384,7 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
 
     return FormBuilder(
       key: _formKey,
+      initialValue: Map<String, dynamic>.from(_formData),
       child: Column(
         children: [
           if (_linkOptionsLoading)

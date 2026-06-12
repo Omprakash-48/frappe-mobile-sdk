@@ -37,6 +37,7 @@ class TimeField extends BaseField {
     }
 
     return FormBuilderDateTimePicker(
+      autovalidateMode: AutovalidateMode.onUserInteraction,
       key: ValueKey('time_${field.fieldname}'),
       name: field.fieldname ?? '',
       initialValue: initialTime != null
