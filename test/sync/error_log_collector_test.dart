@@ -85,4 +85,14 @@ void main() {
     expect(c.drain().length, 1);
     expect(c.drain().length, 0);
   });
+
+  test('collapses an unterminated quoted span (truncated message)', () {
+    // LOW: the quoted-string normalization is a hash tiebreaker. A truncated
+    // server message can drop the closing quote; two such messages differing
+    // only inside the unterminated quote should still collapse to one
+    // signature.
+    final s1 = computeSignature(rec(message: 'save failed for "alpha'));
+    final s2 = computeSignature(rec(message: 'save failed for "beta'));
+    expect(s1, s2);
+  });
 }

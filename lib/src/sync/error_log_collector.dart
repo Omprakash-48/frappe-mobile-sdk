@@ -165,8 +165,11 @@ String _normalizeMessage(String? message) {
     RegExp(r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'),
     '<uuid>',
   );
-  m = m.replaceAll(RegExp(r'"[^"]*"'), '<q>');
-  m = m.replaceAll(RegExp(r"'[^']*'"), '<q>');
+  // Closing quote optional so a truncated message ('...for "alpha') still
+  // collapses its quoted span — this is a tiebreaker, so over-matching a
+  // stray quote is harmless.
+  m = m.replaceAll(RegExp(r'"[^"]*"?'), '<q>');
+  m = m.replaceAll(RegExp(r"'[^']*'?"), '<q>');
   m = m.replaceAll(RegExp(r'\d+'), '<n>');
   m = m.replaceAll(RegExp(r'\s+'), ' ').trim();
   return m;

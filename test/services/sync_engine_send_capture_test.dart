@@ -59,4 +59,25 @@ void main() {
     );
     expect(c.drain(), isEmpty);
   });
+
+  test('recordTerminalFailureSafe never throws even when recording fails', () {
+    // MEDIUM: capture runs inside the push catch block before the original
+    // FrappeException is rethrown. If it throws it masks the real sync error.
+    // A non-String mobile_uuid makes recordTerminalFailure's `as String?`
+    // cast throw — the safe variant must swallow it and record nothing.
+    final c = ErrorLogCollector();
+    expect(
+      () => recordTerminalFailureSafe(
+        collector: c,
+        method: 'POST',
+        payload: const {'doctype': 'Household', 'mobile_uuid': 123},
+        error: stamped(417),
+        sessionUserName: 'u1@x',
+        sessionUserRoles: const ['Mobile User'],
+        nowMillis: 5,
+      ),
+      returnsNormally,
+    );
+    expect(c.drain(), isEmpty);
+  });
 }

@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:math';
 
@@ -196,10 +197,23 @@ class PushEngine {
       notifier.value = notifier.value.copyWith(isPushing: false);
       final hook = onDrainComplete;
       if (hook != null) {
+        // Fire-and-forget: best-effort telemetry must NOT extend the push
+        // critical section. SyncService.pushSync awaits runOnce() while
+        // holding _syncMutex (shared with pullSync), so awaiting a slow or
+        // timing-out flush here would stall pulls. The hook captures its
+        // data synchronously (errorLogCollector.drain() is evaluated when
+        // the closure runs), so the network POST can finish in the
+        // background after runOnce() resolves.
         try {
-          await hook();
+          unawaited(
+            hook().catchError((Object e, StackTrace st) {
+              sdkLog('PushEngine.onDrainComplete threw (ignored) — $e\n$st');
+            }),
+          );
         } catch (e, st) {
-          sdkLog('PushEngine.onDrainComplete threw (ignored) — $e\n$st');
+          sdkLog(
+            'PushEngine.onDrainComplete threw synchronously (ignored) — $e\n$st',
+          );
         }
       }
     }

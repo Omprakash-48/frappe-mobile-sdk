@@ -959,4 +959,29 @@ void main() {
     );
     await engine.runOnce(); // must not throw
   });
+
+  test(
+    'onDrainComplete is fire-and-forget — a slow hook does not block runOnce',
+    () async {
+      // HIGH: SyncService.pushSync awaits runOnce() while holding _syncMutex
+      // (shared with pullSync). Awaiting a slow/timing-out telemetry flush in
+      // the finally would stall pulls. The drain hook must not be awaited.
+      final hookStarted = Completer<void>();
+      final neverFinishes = Completer<void>(); // simulates a hung network POST
+      final engine = buildEngine(
+        send: (m, p, sn) async => {
+          'name': 'CUST-1',
+          'modified': '2026-01-01 00:00:00',
+        },
+        onDrainComplete: () async {
+          hookStarted.complete();
+          await neverFinishes.future;
+        },
+      );
+      // Must return promptly even though the hook never completes.
+      await engine.runOnce().timeout(const Duration(seconds: 2));
+      // The hook was still invoked (drain still flushed) — just not awaited.
+      expect(hookStarted.isCompleted, isTrue);
+    },
+  );
 }

@@ -115,7 +115,9 @@ class SyncEngineBuilder {
       Map<String, Object?> payload,
     ) {
       final user = sessionUserService?.current;
-      recordTerminalFailure(
+      // Safe variant: capture must never throw and mask the original
+      // FrappeException the caller is about to rethrow.
+      recordTerminalFailureSafe(
         collector: errorLogCollector,
         method: method,
         payload: payload,
