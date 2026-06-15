@@ -3,7 +3,6 @@ import 'dart:convert';
 import 'package:sqflite/sqflite.dart';
 import 'package:uuid/uuid.dart';
 
-import '../../security/security_check.dart';
 import '../../security/security_event.dart';
 
 class SecurityEventDao {
