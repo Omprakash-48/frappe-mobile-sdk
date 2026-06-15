@@ -32,7 +32,8 @@ class TranslationService {
 
   final _changedController = StreamController<void>.broadcast();
 
-  /// Emits after [loadFromCache] populates rows or [refreshAsync] completes.
+  /// Emits after [loadFromCache] populates rows, [refreshAsync] completes, or
+  /// [clearAll] wipes the cache — so listeners re-translate on logout too.
   Stream<void> get onChanged => _changedController.stream;
 
   TranslationService(this._client);
@@ -59,8 +60,13 @@ class TranslationService {
   /// Fast (<5 ms). No network. Emits [onChanged] if rows were found.
   Future<void> loadFromCache(String lang) async {
     if (_dao == null || _disposed) return;
+    final gen = _clearGeneration; // snapshot before any await
     try {
       final map = await _dao!.readAll(lang);
+      // Guard: clearAll() (logout) may have fired while the DB read was
+      // pending. Writing these rows back would resurrect logged-out data
+      // into the new session's cache.
+      if (_disposed || _clearGeneration != gen) return;
       if (map.isEmpty) return;
       _cache[lang] = map;
       if (!_changedController.isClosed) _changedController.add(null);
@@ -77,7 +83,9 @@ class TranslationService {
 
   Future<void> _doRefresh(String lang) async {
     final gen = _clearGeneration; // snapshot before any await
-    final map = await loadTranslations(lang); // fetches + populates _cache[lang]
+    final map = await loadTranslations(
+      lang,
+    ); // fetches + populates _cache[lang]
     // Guard: dispose OR clearAll() may have fired while we were awaiting.
     if (_disposed || _clearGeneration != gen) return;
     if (map.isEmpty) return;
@@ -105,14 +113,20 @@ class TranslationService {
 
   Future<void> _doRefreshAll() async {
     if (_disposed) return;
+    final gen = _clearGeneration; // snapshot before any await
     final langs = await fetchEnabledLanguages();
+    // Guard: clearAll() (logout) may have fired while we were fetching the
+    // language list. Without this, the loop below fires N redundant
+    // get_translations requests against the logged-out session.
+    if (_disposed || _clearGeneration != gen) return;
     // Serial by design: awaiting each language fetch prevents concurrent
     // requests from hammering the Frappe server and triggering rate limits.
     // This is a necessary trade-off given the current single-language API.
     // TODO(translations): replace serial loop with a paginated bulk-fetch
     // endpoint once the translations API supports it — avoids N round-trips.
     for (final lang in langs) {
-      if (_disposed) return;
+      // Re-check each iteration so a logout mid-loop stops the remaining calls.
+      if (_disposed || _clearGeneration != gen) return;
       await _doRefresh(lang);
     }
   }
@@ -242,6 +256,9 @@ class TranslationService {
     _clearGeneration++; // must come before _cache.clear() so in-flight paths see it
     _cache.clear();
     _currentLang = 'en';
+    // Notify listeners so any active UI re-translates against the reset
+    // ('en') locale instead of showing the logged-out session's strings.
+    if (!_changedController.isClosed) _changedController.add(null);
     try {
       await _dao?.deleteAll();
     } catch (e, st) {

@@ -32,9 +32,7 @@ http.Client _scripted(
     // { "data": { "translations": { "<lang>": { "Source": "Target" } } } }
     final body = {
       'data': {
-        'translations': {
-          if (requestedLang != null) requestedLang: translations,
-        },
+        'translations': {?requestedLang: translations},
       },
     };
     return http.Response(jsonEncode(body), 200);
@@ -121,47 +119,41 @@ void main() {
     expect(map, isEmpty);
   });
 
-  test(
-    'setLocale sets currentLang and does NOT make a network call',
-    () async {
-      // setLocale is SQLite-only — callers that want a network refresh must
-      // call refreshAsync / refreshAll separately (after confirming a session
-      // is active).  This test asserts that no HTTP request is fired.
-      final calls = <Map<String, dynamic>>[];
-      final client = FrappeClient(
-        'http://localhost',
-        httpClient: _scripted({
-          'my': {'Yes': 'Yes-my'},
-        }, sentSink: calls),
-      );
-      final svc = TranslationService(client);
-      await svc.setLocale('my');
-      await Future<void>.delayed(Duration.zero); // drain microtasks
-      expect(svc.currentLang, 'my');
-      expect(calls, isEmpty, reason: 'setLocale must not fire any HTTP request');
-    },
-  );
+  test('setLocale sets currentLang and does NOT make a network call', () async {
+    // setLocale is SQLite-only — callers that want a network refresh must
+    // call refreshAsync / refreshAll separately (after confirming a session
+    // is active).  This test asserts that no HTTP request is fired.
+    final calls = <Map<String, dynamic>>[];
+    final client = FrappeClient(
+      'http://localhost',
+      httpClient: _scripted({
+        'my': {'Yes': 'Yes-my'},
+      }, sentSink: calls),
+    );
+    final svc = TranslationService(client);
+    await svc.setLocale('my');
+    await Future<void>.delayed(Duration.zero); // drain microtasks
+    expect(svc.currentLang, 'my');
+    expect(calls, isEmpty, reason: 'setLocale must not fire any HTTP request');
+  });
 
-  test(
-    'refreshAsync fires a network request and caches the result',
-    () async {
-      final calls = <Map<String, dynamic>>[];
-      final client = FrappeClient(
-        'http://localhost',
-        httpClient: _scripted({
-          'my': {'Yes': 'Yes-my'},
-        }, sentSink: calls),
-      );
-      final svc = TranslationService(client);
-      await svc.setLocale('my');
-      final loaded = svc.onChanged.first;
-      svc.refreshAsync('my');
-      await loaded.timeout(const Duration(seconds: 2));
-      expect(calls, hasLength(1));
-      expect(calls.first['url'], contains('get_translations'));
-      expect(svc.translate('Yes'), 'Yes-my');
-    },
-  );
+  test('refreshAsync fires a network request and caches the result', () async {
+    final calls = <Map<String, dynamic>>[];
+    final client = FrappeClient(
+      'http://localhost',
+      httpClient: _scripted({
+        'my': {'Yes': 'Yes-my'},
+      }, sentSink: calls),
+    );
+    final svc = TranslationService(client);
+    await svc.setLocale('my');
+    final loaded = svc.onChanged.first;
+    svc.refreshAsync('my');
+    await loaded.timeout(const Duration(seconds: 2));
+    expect(calls, hasLength(1));
+    expect(calls.first['url'], contains('get_translations'));
+    expect(svc.translate('Yes'), 'Yes-my');
+  });
 
   test('setLocale ignores empty string', () async {
     final svc = TranslationService(FrappeClient('http://localhost'));
@@ -272,17 +264,21 @@ void main() {
 
       // Unblock the fetch with valid translation data.
       // Use Response.bytes so the Devanagari string survives the Latin-1 check.
-      fetchCompleter.complete(http.Response.bytes(
-        utf8.encode(jsonEncode({
-          'data': {
-            'translations': {
-              'hi': {'Hello': 'नमस्ते'},
-            },
-          },
-        })),
-        200,
-        headers: {'content-type': 'application/json; charset=utf-8'},
-      ));
+      fetchCompleter.complete(
+        http.Response.bytes(
+          utf8.encode(
+            jsonEncode({
+              'data': {
+                'translations': {
+                  'hi': {'Hello': 'नमस्ते'},
+                },
+              },
+            }),
+          ),
+          200,
+          headers: {'content-type': 'application/json; charset=utf-8'},
+        ),
+      );
 
       // Give the entire async chain time to complete: MockClient → FrappeClient
       // response parsing → loadTranslations cache write → _doRefresh bulkUpsert.
@@ -299,10 +295,136 @@ void main() {
 
       // SQLite kv table must also be empty.
       final rows = await db.query('kv');
-      expect(rows, isEmpty,
-          reason: 'kv table must not be repopulated after clearAll');
+      expect(
+        rows,
+        isEmpty,
+        reason: 'kv table must not be repopulated after clearAll',
+      );
 
       await db.close();
     },
   );
+
+  // Regression: a clearAll() during loadFromCache's pending DB read must NOT
+  // resurrect the logged-out session's rows into the new session's cache.
+  // readAll is gated by a Completer so the interleaving is deterministic and
+  // the returned rows are guaranteed non-empty (so the result can't be masked
+  // by the `if (map.isEmpty) return;` early-out).
+  test(
+    'clearAll generation: loadFromCache does NOT repopulate cache after clearAll',
+    () async {
+      final db = await databaseFactory.openDatabase(
+        inMemoryDatabasePath,
+        options: OpenDatabaseOptions(
+          version: 1,
+          singleInstance: false,
+          onCreate: (d, _) => d.execute(
+            'CREATE TABLE kv (lang TEXT NOT NULL, src TEXT NOT NULL, '
+            'tgt TEXT NOT NULL, PRIMARY KEY (lang, src))',
+          ),
+        ),
+      );
+      final dao = _GatedReadDao(db);
+      final svc = TranslationService.forTesting();
+      svc.injectDao(dao);
+
+      // Start loadFromCache — it suspends on the gated readAll.
+      dao.readGate = Completer<Map<String, String>>();
+      final pending = svc.loadFromCache('hi');
+
+      // Logout fires while the read is in flight.
+      await svc.clearAll();
+
+      // Release the read with non-empty rows from the logged-out session.
+      dao.readGate!.complete({'Hello': 'Bok'});
+      await pending;
+
+      expect(
+        svc.getCachedTranslations('hi'),
+        isEmpty,
+        reason:
+            'rows read before logout must not be written into the post-logout cache',
+      );
+      await db.close();
+    },
+  );
+
+  // Regression: a clearAll() during _doRefreshAll's fetchEnabledLanguages()
+  // await must short-circuit the per-language loop so NO get_translations
+  // requests are fired against the logged-out session.
+  test(
+    'clearAll generation: refreshAll fires no translation calls after logout',
+    () async {
+      final getListGate = Completer<http.Response>();
+      var translationCalls = 0;
+      final mockClient = MockClient((req) async {
+        final url = req.url.toString();
+        if (url.contains('get_list')) return getListGate.future;
+        if (url.contains('get_translations')) {
+          translationCalls++;
+          return http.Response(
+            jsonEncode({
+              'data': {'translations': <String, dynamic>{}},
+            }),
+            200,
+          );
+        }
+        return http.Response('{}', 200);
+      });
+      final svc = TranslationService(
+        FrappeClient('http://localhost', httpClient: mockClient),
+      );
+
+      // refreshAll() awaits fetchEnabledLanguages — now blocked on the gate.
+      final pending = svc.refreshAll();
+
+      // Logout fires while the language list is being fetched.
+      await svc.clearAll();
+
+      // Release the list with two languages; without the guard the loop would
+      // fire two get_translations requests.
+      getListGate.complete(
+        http.Response(
+          jsonEncode({
+            'data': [
+              {'name': 'hi'},
+              {'name': 'fr'},
+            ],
+          }),
+          200,
+        ),
+      );
+      await pending;
+
+      expect(
+        translationCalls,
+        0,
+        reason: 'no translation requests may fire after logout',
+      );
+    },
+  );
+
+  test('clearAll broadcasts on onChanged so UI re-translates', () async {
+    final svc = TranslationService.forTesting();
+    final events = <void>[];
+    final sub = svc.onChanged.listen(events.add);
+
+    await svc.clearAll();
+    await Future<void>.delayed(Duration.zero); // let the broadcast deliver
+
+    expect(events, isNotEmpty, reason: 'clearAll must notify onChanged');
+    await sub.cancel();
+  });
+}
+
+/// Test DAO whose [readAll] can be held open via [readGate] to make the
+/// clearAll-vs-loadFromCache interleaving deterministic.
+class _GatedReadDao extends TranslationDao {
+  _GatedReadDao(super.db);
+
+  Completer<Map<String, String>>? readGate;
+
+  @override
+  Future<Map<String, String>> readAll(String lang) =>
+      readGate?.future ?? super.readAll(lang);
 }
