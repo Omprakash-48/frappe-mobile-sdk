@@ -40,6 +40,18 @@ class _FrappeSecurityGuardState extends State<FrappeSecurityGuard> {
     _run();
   }
 
+  /// Re-runs the integrity checks after a block. Lets the user recover from a
+  /// transient false positive (e.g. a momentary clock skew) without having to
+  /// force-kill and relaunch the app.
+  void _retry() {
+    if (!mounted) return;
+    setState(() {
+      _checking = true;
+      _failedChecks = null;
+    });
+    _run();
+  }
+
   Future<void> _run() async {
     if (!widget.service.enabled) {
       if (mounted) setState(() => _checking = false);
@@ -64,32 +76,32 @@ class _FrappeSecurityGuardState extends State<FrappeSecurityGuard> {
   @override
   Widget build(BuildContext context) {
     if (_checking) {
-      return const Scaffold(
-        body: Center(child: CircularProgressIndicator()),
-      );
+      return const Scaffold(body: Center(child: CircularProgressIndicator()));
     }
     if (_failedChecks != null) {
       return widget.blockingScreen ??
-          _SecurityBlockScreen(failedChecks: _failedChecks!);
+          _SecurityBlockScreen(failedChecks: _failedChecks!, onRetry: _retry);
     }
     return widget.child;
   }
 }
 
 class _SecurityBlockScreen extends StatelessWidget {
-  const _SecurityBlockScreen({required this.failedChecks});
+  const _SecurityBlockScreen({required this.failedChecks, this.onRetry});
 
   final Set<SecurityCheck> failedChecks;
 
+  /// Re-runs the checks. When null, no retry affordance is shown.
+  final VoidCallback? onRetry;
+
   static String _label(SecurityCheck c) => switch (c) {
-        SecurityCheck.root => 'Device is rooted or jailbroken',
-        SecurityCheck.mockLocation => 'Mock GPS location detected',
-        SecurityCheck.timeRollback => 'Device clock has been rolled back',
-        SecurityCheck.monotonicRollback =>
-          'System time inconsistency detected',
-        SecurityCheck.serverTimeAnchor =>
-          'Device clock is behind last known server time',
-      };
+    SecurityCheck.root => 'Device is rooted or jailbroken',
+    SecurityCheck.mockLocation => 'Mock GPS location detected',
+    SecurityCheck.timeRollback => 'Device clock has been rolled back',
+    SecurityCheck.monotonicRollback => 'System time inconsistency detected',
+    SecurityCheck.serverTimeAnchor =>
+      'Device clock is behind last known server time',
+  };
 
   @override
   Widget build(BuildContext context) {
@@ -107,19 +119,13 @@ class _SecurityBlockScreen extends StatelessWidget {
               const Text(
                 'Security Check Failed',
                 textAlign: TextAlign.center,
-                style: TextStyle(
-                  fontSize: 22,
-                  fontWeight: FontWeight.bold,
-                ),
+                style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold),
               ),
               const SizedBox(height: 12),
               ...failedChecks.map(
                 (c) => Padding(
                   padding: const EdgeInsets.symmetric(vertical: 2),
-                  child: Text(
-                    '• ${_label(c)}',
-                    textAlign: TextAlign.center,
-                  ),
+                  child: Text('• ${_label(c)}', textAlign: TextAlign.center),
                 ),
               ),
               const SizedBox(height: 24),
@@ -129,6 +135,14 @@ class _SecurityBlockScreen extends StatelessWidget {
                 textAlign: TextAlign.center,
                 style: TextStyle(color: Colors.grey),
               ),
+              if (onRetry != null) ...[
+                const SizedBox(height: 24),
+                OutlinedButton.icon(
+                  onPressed: onRetry,
+                  icon: const Icon(Icons.refresh),
+                  label: const Text('Retry'),
+                ),
+              ],
             ],
           ),
         ),

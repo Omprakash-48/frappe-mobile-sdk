@@ -374,6 +374,7 @@ class _LinkFieldDropdownState extends State<_LinkFieldDropdown> {
       debugPrint(
         'LinkField: getLinkOptions(${widget.linkedDoctype}) failed — $e\n$st',
       );
+      if (!mounted) return;
       setState(() {
         _options = [];
         _isLoading = false;

@@ -5,6 +5,7 @@ import 'package:root_checker_plus/root_checker_plus.dart';
 import 'package:uuid/uuid.dart';
 
 import '../database/app_database.dart';
+import '../utils/sdk_log.dart';
 import 'security_check.dart';
 import 'security_event.dart';
 import 'security_exception.dart';
@@ -30,6 +31,8 @@ class FrappeSecurityService {
     this.enabled = false,
     this.checks = const {},
     this.restartGapMs = 600000,
+    this.timeRollbackToleranceMs = 10000,
+    this.serverAnchorToleranceMs = 300000,
     RootChecker? rootChecker,
     LocationChecker? locationChecker,
     MonotonicGetter? monotonicGetter,
@@ -48,6 +51,17 @@ class FrappeSecurityService {
   /// than a fresh device restart. Default is 10 minutes (600 000 ms).
   final int restartGapMs;
 
+  /// Grace window (ms) subtracted from the stored wall time before a backward
+  /// jump is treated as a rollback. Absorbs benign backward NTP corrections and
+  /// small clock fixes. Default is 10 seconds.
+  final int timeRollbackToleranceMs;
+
+  /// Grace window (ms) subtracted from the server-anchor time before the device
+  /// clock being behind it is treated as a breach. Absorbs normal network
+  /// latency and modest clock skew between device and server. Default is
+  /// 5 minutes.
+  final int serverAnchorToleranceMs;
+
   final RootChecker _rootChecker;
   final LocationChecker _locationChecker;
   final MonotonicGetter _monotonicGetter;
@@ -55,8 +69,18 @@ class FrappeSecurityService {
   static const _uuid = Uuid();
 
   static Future<bool> _defaultRootCheck() async {
-    // isRootChecker() returns Future<bool?> — treat null as false.
-    return (await RootCheckerPlus.isRootChecker()) == true;
+    try {
+      // isRootChecker() returns Future<bool?> — treat null as false.
+      return (await RootCheckerPlus.isRootChecker()) == true;
+    } catch (e) {
+      // Plugin unavailable (e.g. MissingPluginException) — fail open so a
+      // platform-channel gap can never brick the app.
+      sdkLog(
+        'FrappeSecurityService: root check unavailable, treating as '
+        'not-rooted — $e',
+      );
+      return false;
+    }
   }
 
   static Future<bool?> _defaultLocationCheck() async {
@@ -68,7 +92,10 @@ class FrappeSecurityService {
         ),
       );
       return position.isMocked;
-    } catch (_) {
+    } catch (e) {
+      // Permission denied / location unavailable — null means "unknown",
+      // which the caller treats as a pass (fail open).
+      sdkLog('FrappeSecurityService: location check unavailable — $e');
       return null;
     }
   }
@@ -92,12 +119,14 @@ class FrappeSecurityService {
     if (checks.contains(SecurityCheck.root)) {
       if (await _rootChecker()) {
         failed.add(SecurityCheck.root);
-        await _db.securityEventDao.insert(SecurityEvent(
-          id: _uuid.v4(),
-          checkType: SecurityCheck.root,
-          detectedAtMs: nowMs,
-          wallTimeMs: nowMs,
-        ));
+        await _db.securityEventDao.insert(
+          SecurityEvent(
+            id: _uuid.v4(),
+            checkType: SecurityCheck.root,
+            detectedAtMs: nowMs,
+            wallTimeMs: nowMs,
+          ),
+        );
       }
     }
 
@@ -106,26 +135,31 @@ class FrappeSecurityService {
       final isMocked = await _locationChecker();
       if (isMocked == true) {
         failed.add(SecurityCheck.mockLocation);
-        await _db.securityEventDao.insert(SecurityEvent(
-          id: _uuid.v4(),
-          checkType: SecurityCheck.mockLocation,
-          detectedAtMs: nowMs,
-          wallTimeMs: nowMs,
-        ));
+        await _db.securityEventDao.insert(
+          SecurityEvent(
+            id: _uuid.v4(),
+            checkType: SecurityCheck.mockLocation,
+            detectedAtMs: nowMs,
+            wallTimeMs: nowMs,
+          ),
+        );
       }
     }
 
     // 3. Wall-clock rollback (cross-session): skip on first run (lastWallMs null)
     if (checks.contains(SecurityCheck.timeRollback) && lastWallMs != null) {
-      if (nowMs < lastWallMs) {
+      // Tolerance absorbs benign backward NTP corrections / clock fixes.
+      if (nowMs < lastWallMs - timeRollbackToleranceMs) {
         failed.add(SecurityCheck.timeRollback);
-        await _db.securityEventDao.insert(SecurityEvent(
-          id: _uuid.v4(),
-          checkType: SecurityCheck.timeRollback,
-          detectedAtMs: nowMs,
-          wallTimeMs: nowMs,
-          lastWallMs: lastWallMs,
-        ));
+        await _db.securityEventDao.insert(
+          SecurityEvent(
+            id: _uuid.v4(),
+            checkType: SecurityCheck.timeRollback,
+            detectedAtMs: nowMs,
+            wallTimeMs: nowMs,
+            lastWallMs: lastWallMs,
+          ),
+        );
       }
     }
 
@@ -141,14 +175,16 @@ class FrappeSecurityService {
         lastMonotonicMs != null) {
       if (currentMonotonicMs < lastMonotonicMs) {
         failed.add(SecurityCheck.monotonicRollback);
-        await _db.securityEventDao.insert(SecurityEvent(
-          id: _uuid.v4(),
-          checkType: SecurityCheck.monotonicRollback,
-          detectedAtMs: nowMs,
-          wallTimeMs: nowMs,
-          monotonicMs: currentMonotonicMs,
-          metadata: {'last_monotonic_ms': lastMonotonicMs},
-        ));
+        await _db.securityEventDao.insert(
+          SecurityEvent(
+            id: _uuid.v4(),
+            checkType: SecurityCheck.monotonicRollback,
+            detectedAtMs: nowMs,
+            wallTimeMs: nowMs,
+            monotonicMs: currentMonotonicMs,
+            metadata: {'last_monotonic_ms': lastMonotonicMs},
+          ),
+        );
       }
     }
 
@@ -156,15 +192,21 @@ class FrappeSecurityService {
     // Skipped automatically when no cursor exists (never synced).
     if (checks.contains(SecurityCheck.serverTimeAnchor)) {
       final anchorMs = await _queryServerAnchorMs();
-      if (anchorMs != null && nowMs < anchorMs) {
+      // Tolerance absorbs network latency and modest device/server clock skew.
+      // NOTE: the anchor is parsed as UTC (see [_queryServerAnchorMs]); this
+      // assumes the server writes `modified` in UTC. If a deployment stores
+      // local time, the anchor will be off by the UTC offset.
+      if (anchorMs != null && nowMs < anchorMs - serverAnchorToleranceMs) {
         failed.add(SecurityCheck.serverTimeAnchor);
-        await _db.securityEventDao.insert(SecurityEvent(
-          id: _uuid.v4(),
-          checkType: SecurityCheck.serverTimeAnchor,
-          detectedAtMs: nowMs,
-          wallTimeMs: nowMs,
-          serverAnchorMs: anchorMs,
-        ));
+        await _db.securityEventDao.insert(
+          SecurityEvent(
+            id: _uuid.v4(),
+            checkType: SecurityCheck.serverTimeAnchor,
+            detectedAtMs: nowMs,
+            wallTimeMs: nowMs,
+            serverAnchorMs: anchorMs,
+          ),
+        );
       }
     }
 
@@ -209,13 +251,17 @@ class FrappeSecurityService {
         // The trailing 'Z' is only appended when the original value has no
         // timezone marker, preventing double-appending on already-correct input.
         final iso = modified.replaceFirst(' ', 'T');
-        final utcIso = (iso.endsWith('Z') || iso.contains('+')) ? iso : '${iso}Z';
+        final utcIso = (iso.endsWith('Z') || iso.contains('+'))
+            ? iso
+            : '${iso}Z';
 
         final dt = DateTime.tryParse(utcIso);
         if (dt == null) continue;
         final ms = dt.toUtc().millisecondsSinceEpoch;
         if (maxMs == null || ms > maxMs) maxMs = ms;
-      } catch (_) {
+      } catch (e) {
+        // Malformed cursor JSON / unparseable timestamp — skip this row.
+        sdkLog('FrappeSecurityService: skipping unparseable cursor — $e');
         continue;
       }
     }

@@ -16,16 +16,15 @@ FrappeSecurityService _svc(
   Future<bool?> Function()? locationChecker,
   Future<int?> Function()? monotonicGetter,
   int restartGapMs = 600000,
-}) =>
-    FrappeSecurityService(
-      database: db,
-      enabled: enabled,
-      checks: checks,
-      restartGapMs: restartGapMs,
-      rootChecker: rootChecker ?? () async => false,
-      locationChecker: locationChecker ?? () async => false,
-      monotonicGetter: monotonicGetter ?? () async => 1000000,
-    );
+}) => FrappeSecurityService(
+  database: db,
+  enabled: enabled,
+  checks: checks,
+  restartGapMs: restartGapMs,
+  rootChecker: rootChecker ?? () async => false,
+  locationChecker: locationChecker ?? () async => false,
+  monotonicGetter: monotonicGetter ?? () async => 1000000,
+);
 
 void main() {
   setUpAll(() {
@@ -38,22 +37,24 @@ void main() {
   // ── enabled=false ──────────────────────────────────────────────────────────
 
   group('disabled service', () {
-    test('enabled=false → returns immediately, no throw, checkers not called',
-        () async {
-      final db = await AppDatabase.inMemoryDatabase();
-      var called = false;
-      final svc = _svc(
-        db,
-        enabled: false,
-        rootChecker: () async {
-          called = true;
-          return true;
-        },
-      );
-      await expectLater(svc.runChecks(), completes);
-      expect(called, isFalse);
-      await db.close();
-    });
+    test(
+      'enabled=false → returns immediately, no throw, checkers not called',
+      () async {
+        final db = await AppDatabase.inMemoryDatabase();
+        var called = false;
+        final svc = _svc(
+          db,
+          enabled: false,
+          rootChecker: () async {
+            called = true;
+            return true;
+          },
+        );
+        await expectLater(svc.runChecks(), completes);
+        expect(called, isFalse);
+        await db.close();
+      },
+    );
 
     test('empty checks set → returns immediately even when enabled', () async {
       final db = await AppDatabase.inMemoryDatabase();
@@ -120,8 +121,11 @@ void main() {
         // expected
       }
       final state = await db.securityStateDao.readState();
-      expect(state['last_wall_time_ms'], isNotNull,
-          reason: 'writeState must be called even when checks fail');
+      expect(
+        state['last_wall_time_ms'],
+        isNotNull,
+        reason: 'writeState must be called even when checks fail',
+      );
       await db.close();
     });
   });
@@ -143,17 +147,19 @@ void main() {
       await db.close();
     });
 
-    test('locationChecker returns null (permission denied) → no throw',
-        () async {
-      final db = await AppDatabase.inMemoryDatabase();
-      final svc = _svc(
-        db,
-        checks: {SecurityCheck.mockLocation},
-        locationChecker: () async => null,
-      );
-      await expectLater(svc.runChecks(), completes);
-      await db.close();
-    });
+    test(
+      'locationChecker returns null (permission denied) → no throw',
+      () async {
+        final db = await AppDatabase.inMemoryDatabase();
+        final svc = _svc(
+          db,
+          checks: {SecurityCheck.mockLocation},
+          locationChecker: () async => null,
+        );
+        await expectLater(svc.runChecks(), completes);
+        await db.close();
+      },
+    );
   });
 
   // ── time rollback ──────────────────────────────────────────────────────────
@@ -189,15 +195,32 @@ void main() {
       await db.close();
     });
 
-    test('after passing run, security_state.last_wall_time_ms is updated',
-        () async {
+    test('stored wall time within tolerance window → no throw', () async {
       final db = await AppDatabase.inMemoryDatabase();
+      // Stored wall time only ~3s ahead — inside the default 10s tolerance,
+      // so a benign backward NTP correction must NOT trigger a block.
+      final slightlyAhead = DateTime.now().millisecondsSinceEpoch + 3000;
+      await db.securityStateDao.writeState(
+        wallTimeMs: slightlyAhead,
+        monotonicMs: null,
+        runAtMs: slightlyAhead,
+      );
       final svc = _svc(db, checks: {SecurityCheck.timeRollback});
-      await svc.runChecks();
-      final state = await db.securityStateDao.readState();
-      expect(state['last_wall_time_ms'], isNotNull);
+      await expectLater(svc.runChecks(), completes);
       await db.close();
     });
+
+    test(
+      'after passing run, security_state.last_wall_time_ms is updated',
+      () async {
+        final db = await AppDatabase.inMemoryDatabase();
+        final svc = _svc(db, checks: {SecurityCheck.timeRollback});
+        await svc.runChecks();
+        final state = await db.securityStateDao.readState();
+        expect(state['last_wall_time_ms'], isNotNull);
+        await db.close();
+      },
+    );
   });
 
   // ── monotonic rollback ─────────────────────────────────────────────────────
@@ -274,8 +297,7 @@ void main() {
     test('device time is before max cursor.modified → throws', () async {
       final db = await AppDatabase.inMemoryDatabase();
       // Insert a cursor 2 hours in the future.
-      final futureServer =
-          DateTime.now().toUtc().add(const Duration(hours: 2));
+      final futureServer = DateTime.now().toUtc().add(const Duration(hours: 2));
       final cursorJson = jsonEncode({
         'modified': futureServer
             .toIso8601String()
@@ -311,10 +333,37 @@ void main() {
       await db.close();
     });
 
+    test('cursor within tolerance window → no throw', () async {
+      final db = await AppDatabase.inMemoryDatabase();
+      // Cursor only ~1 min in the future — inside the default 5 min tolerance,
+      // so normal latency / clock skew must NOT trigger a block.
+      final slightlyFuture = DateTime.now().toUtc().add(
+        const Duration(minutes: 1),
+      );
+      final cursorJson = jsonEncode({
+        'modified': slightlyFuture
+            .toIso8601String()
+            .replaceFirst('T', ' ')
+            .substring(0, 19),
+        'name': 'SRV-003',
+        'complete': true,
+      });
+      await db.rawDatabase.insert('doctype_meta', {
+        'doctype': 'TestDoctype',
+        'isMobileForm': 0,
+        'metaJson': '{}',
+        'last_ok_cursor': cursorJson,
+      });
+      final svc = _svc(db, checks: {SecurityCheck.serverTimeAnchor});
+      await expectLater(svc.runChecks(), completes);
+      await db.close();
+    });
+
     test('cursor older than now → no throw', () async {
       final db = await AppDatabase.inMemoryDatabase();
-      final pastServer =
-          DateTime.now().toUtc().subtract(const Duration(hours: 1));
+      final pastServer = DateTime.now().toUtc().subtract(
+        const Duration(hours: 1),
+      );
       final cursorJson = jsonEncode({
         'modified': pastServer
             .toIso8601String()
