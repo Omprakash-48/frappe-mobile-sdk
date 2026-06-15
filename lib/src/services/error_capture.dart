@@ -21,8 +21,10 @@ void recordTerminalFailure({
   final status = error.statusCode;
   if (status == null || status < 400) return; // out of scope
 
-  final mobileUuid = (payload['mobile_uuid'] as String?) ?? '';
-  final doctype = (payload['doctype'] as String?) ?? '';
+  // Coerce rather than cast: a non-String mobile_uuid/doctype must not throw
+  // here, or recordTerminalFailureSafe swallows it and the whole log is lost.
+  final mobileUuid = payload['mobile_uuid']?.toString() ?? '';
+  final doctype = payload['doctype']?.toString() ?? '';
 
   collector.record(
     MobileErrorRecord(
@@ -48,9 +50,8 @@ void recordTerminalFailure({
 
 /// Best-effort variant of [recordTerminalFailure] that NEVER throws. The push
 /// engine invokes this from a `catch` block *before* rethrowing the original
-/// `FrappeException`; if capture were to throw (e.g. an unencodable body or a
-/// non-String `mobile_uuid`/`doctype` failing its cast) it would mask the real
-/// sync failure. Any error here is swallowed and logged.
+/// `FrappeException`; if capture were to throw it would mask the real sync
+/// failure. Any error here is swallowed and logged.
 void recordTerminalFailureSafe({
   required ErrorLogCollector collector,
   required String method,

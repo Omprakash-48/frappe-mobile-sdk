@@ -60,11 +60,11 @@ void main() {
     expect(c.drain(), isEmpty);
   });
 
-  test('recordTerminalFailureSafe never throws even when recording fails', () {
-    // MEDIUM: capture runs inside the push catch block before the original
-    // FrappeException is rethrown. If it throws it masks the real sync error.
-    // A non-String mobile_uuid makes recordTerminalFailure's `as String?`
-    // cast throw — the safe variant must swallow it and record nothing.
+  test('coerces a non-String mobile_uuid instead of dropping the log', () {
+    // Capture runs inside the push catch block before the original
+    // FrappeException is rethrown. A non-String mobile_uuid/doctype must not
+    // throw (recordTerminalFailureSafe would swallow it and lose the whole
+    // log); it is coerced via toString() so the log still survives.
     final c = ErrorLogCollector();
     expect(
       () => recordTerminalFailureSafe(
@@ -78,6 +78,8 @@ void main() {
       ),
       returnsNormally,
     );
-    expect(c.drain(), isEmpty);
+    final out = c.drain();
+    expect(out.length, 1);
+    expect(out.first.examples.single.mobileUuid, '123');
   });
 }

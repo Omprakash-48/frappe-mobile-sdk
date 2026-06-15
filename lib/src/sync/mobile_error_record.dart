@@ -29,6 +29,10 @@ String operationName(String method) {
 /// throw.
 String excTypeFromBody(String? rawBody) {
   if (rawBody == null || rawBody.isEmpty) return '';
+  // Fast bail: a gateway 5xx HTML page would otherwise be scanned end-to-end
+  // by jsonDecode before throwing. Frappe error JSON has no leading whitespace,
+  // so a cheap first-char check is enough (no trimLeft copy of a large body).
+  if (!rawBody.startsWith('{')) return '';
   try {
     final decoded = jsonDecode(rawBody);
     if (decoded is Map && decoded['exc_type'] is String) {
