@@ -48,6 +48,14 @@ Major release: offline-first foundation, server-driven offline-mode toggle, and 
 - `SyncState`, `DoctypeSyncState`, `QueueSummary`, `SyncErrorSummary`, `SyncStateNotifier` — composable sync-state snapshot for UI widgets; per-doctype progress, queue counts, last error.
 - `RetryPriority` — reorders outbox rows for "Retry all" so user-visible errors retry first.
 
+**Error capture**
+
+- Side-channel capture of terminal push failures. When a push drain hits a permanent server rejection (`4XX` / terminal `401` / `5XX`), the SDK records the exact wire request, the raw server response, and the session user's identity and roles — enough for a developer to reconstruct a replayable request with the same payload and permissions. Capture is automatic at the engine's `send()` boundary and rethrows the original error unchanged; the host app wires nothing up.
+- `ErrorLogCollector` — aggregates failures per drain by a stable client-computed `signature`, accumulates an occurrence count, and keeps a rolling window of the most recent 5 example payloads. Emits a `MobileErrorRecord`.
+- `MobileErrorPoster` — best-effort POST of the aggregated record to the server's `mobile_sync.report_error` endpoint after each drain (`PushEngine.onDrainComplete`); failures to report are dropped silently so capture never affects sync.
+- Wire metadata on exceptions. `FrappeException` now carries `requestUrl`, `requestMethod`, request `body`, raw `responseBody`, and `traceId`; `rest_helper` stamps these on any `>= 400` response (and the `403` / `404` paths no longer drop the raw body).
+- `SessionUserService` is created and restored **before** the sync engine is built so captured records carry the real reporting user and roles rather than a guest/empty identity.
+
 **Sync UI**
 
 - `SyncStatusBar`, `SyncProgressScreen`, `SyncErrorsScreen` — status bar, blocking bootstrap-pull screen, errors list with per-row Retry / View error / Open actions and a header Retry-all.
