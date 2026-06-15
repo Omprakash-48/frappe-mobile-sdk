@@ -88,6 +88,7 @@ abstract class BaseField extends StatelessWidget {
                     style?.translate != null
                         ? style!.translate!(field.displayLabel)
                         : field.displayLabel,
+                    softWrap: true,
                     style:
                         style?.labelStyle ??
                         TextStyle(
