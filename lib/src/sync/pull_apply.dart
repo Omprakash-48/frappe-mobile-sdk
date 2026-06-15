@@ -146,15 +146,20 @@ class PullApply {
       if (serverNames.isNotEmpty) {
         final dirtyStatuses = [..._locallyDirtyStatuses, 'deleted'];
         final snPlaceholders = List.filled(serverNames.length, '?').join(',');
-        final dirtyPlaceholders =
-            List.filled(dirtyStatuses.length, '?').join(',');
+        final dirtyPlaceholders = List.filled(
+          dirtyStatuses.length,
+          '?',
+        ).join(',');
 
         final String query;
         final List<Object?> args;
         if (incomingUuids.isNotEmpty) {
-          final uuidPlaceholders =
-              List.filled(incomingUuids.length, '?').join(',');
-          query = '''
+          final uuidPlaceholders = List.filled(
+            incomingUuids.length,
+            '?',
+          ).join(',');
+          query =
+              '''
             SELECT COUNT(*) AS n FROM $parentTable
             WHERE (server_name IN ($snPlaceholders)
                    AND sync_status IN ($dirtyPlaceholders))
@@ -163,7 +168,8 @@ class PullApply {
           ''';
           args = [...serverNames, ...dirtyStatuses, ...incomingUuids];
         } else {
-          query = '''
+          query =
+              '''
             SELECT COUNT(*) AS n FROM $parentTable
             WHERE server_name IN ($snPlaceholders)
               AND sync_status IN ($dirtyPlaceholders)
@@ -225,7 +231,6 @@ class PullApply {
     required Uuid uuidGen,
     required Set<String> parentNormFields,
   }) async {
-
     final batch = txn.batch();
     for (final r in rows) {
       final serverName = r['name'] as String?;
@@ -283,8 +288,7 @@ class PullApply {
         // diverged (e.g. a ghost-success push left server_name NULL while
         // the user made further edits). Overwriting here would cause data
         // loss. Check for any non-done, non-in_flight outbox rows.
-        final mobileUuid =
-            existing.first['mobile_uuid'] as String? ?? '';
+        final mobileUuid = existing.first['mobile_uuid'] as String? ?? '';
         if (mobileUuid.isNotEmpty) {
           final pendingWork = await txn.rawQuery(
             "SELECT id FROM outbox WHERE mobile_uuid = ? "
@@ -292,8 +296,17 @@ class PullApply {
             [mobileUuid],
           );
           if (pendingWork.isNotEmpty) {
-            // Local work still owed; don't overwrite. Stamp server_name and
-            // let the conflict guard below decide.
+            // Local work still owed; don't overwrite the local payload. But the
+            // server HAS this row (it round-tripped our mobile_uuid), so stamp
+            // its server_name now — otherwise the conflict guard below updates
+            // sync_status and `continue`s, leaving the row with a NULL
+            // server_name that can never be pushed/resolved.
+            batch.update(
+              parentTable,
+              {'server_name': serverName},
+              where: 'mobile_uuid = ?',
+              whereArgs: [mobileUuid],
+            );
             isOwnInsertRoundtrip = false;
           }
         }
@@ -564,7 +577,7 @@ class PullApply {
           final rawChildUuid = cr['mobile_uuid']?.toString();
           final hasRawUuid = rawChildUuid != null && rawChildUuid.isNotEmpty;
           final childUuid = hasRawUuid ? rawChildUuid : uuidGen.v4();
-          
+
           final childRow = <String, Object?>{
             'mobile_uuid': childUuid,
             'server_name': serverChildName,
@@ -590,7 +603,7 @@ class PullApply {
         }
       }
     }
-    
+
     await batch.commit(noResult: true);
   }
 }
