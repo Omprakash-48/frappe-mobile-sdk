@@ -226,24 +226,89 @@ void main() {
   // ── monotonic rollback ─────────────────────────────────────────────────────
 
   group('monotonicRollback check', () {
-    test('current < stored AND current >= restartGap → throws', () async {
-      final db = await AppDatabase.inMemoryDatabase();
-      await db.securityStateDao.writeState(
-        wallTimeMs: 1000,
-        monotonicMs: 5000000, // stored high value
-        runAtMs: 1000,
-      );
-      final svc = _svc(
-        db,
-        checks: {SecurityCheck.monotonicRollback},
-        monotonicGetter: () async => 3000000, // lower but > restartGap
-      );
-      await expectLater(
-        svc.runChecks(),
-        throwsA(isA<SecurityCannotBeAssuredException>()),
-      );
-      await db.close();
-    });
+    test(
+      'monotonic drop with no matching wall-time gap (tamper) → throws',
+      () async {
+        final db = await AppDatabase.inMemoryDatabase();
+        // Last run was effectively "just now" in wall-clock terms, yet uptime
+        // dropped from 5000s to 3000s. Only ~milliseconds of real time have
+        // elapsed — far less than the 3000s of reported uptime — so a reboot
+        // cannot explain the drop. That is the monotonic-tamper signature.
+        final nowish = DateTime.now().millisecondsSinceEpoch;
+        await db.securityStateDao.writeState(
+          wallTimeMs: nowish,
+          monotonicMs: 5000000,
+          runAtMs: nowish,
+        );
+        final svc = _svc(
+          db,
+          checks: {SecurityCheck.monotonicRollback},
+          monotonicGetter: () async => 3000000, // lower but > restartGap
+        );
+        await expectLater(
+          svc.runChecks(),
+          throwsA(isA<SecurityCannotBeAssuredException>()),
+        );
+        await db.close();
+      },
+    );
+
+    test(
+      'monotonic drop explained by a real reboot (large wall gap) → passes',
+      () async {
+        final db = await AppDatabase.inMemoryDatabase();
+        // Regression for the post-reboot false positive: the device ran ~13.9h
+        // (stored uptime 50_000_000 ms) and was last seen ~13h ago in wall
+        // time. It then rebooted and the user reopens the app after 15 min of
+        // new uptime (900_000 ms, still > restartGap). Real elapsed time (13h)
+        // vastly exceeds the new uptime, so this is a reboot — NOT a rollback —
+        // and must not block the user.
+        final thirteenHoursMs = const Duration(hours: 13).inMilliseconds;
+        final lastWall =
+            DateTime.now().millisecondsSinceEpoch - thirteenHoursMs;
+        await db.securityStateDao.writeState(
+          wallTimeMs: lastWall,
+          monotonicMs: 50000000,
+          runAtMs: lastWall,
+        );
+        final svc = _svc(
+          db,
+          checks: {SecurityCheck.monotonicRollback},
+          monotonicGetter: () async => 900000, // 15 min uptime, > restartGap
+        );
+        await expectLater(svc.runChecks(), completes);
+        await db.close();
+      },
+    );
+
+    test(
+      'monotonic drop with backward wall jump (rollback after reboot) → throws',
+      () async {
+        final db = await AppDatabase.inMemoryDatabase();
+        // Attacker reboots, then rolls the wall clock backwards. Uptime is a
+        // small-but->restartGap value, and the stored wall time is now *ahead*
+        // of "now" (clock went back), so the elapsed delta is negative and the
+        // reboot escape does not apply — the rollback must be caught.
+        final aheadWall =
+            DateTime.now().millisecondsSinceEpoch +
+            const Duration(hours: 1).inMilliseconds;
+        await db.securityStateDao.writeState(
+          wallTimeMs: aheadWall,
+          monotonicMs: 5000000,
+          runAtMs: aheadWall,
+        );
+        final svc = _svc(
+          db,
+          checks: {SecurityCheck.monotonicRollback},
+          monotonicGetter: () async => 700000, // ~11.6 min uptime, > restartGap
+        );
+        await expectLater(
+          svc.runChecks(),
+          throwsA(isA<SecurityCannotBeAssuredException>()),
+        );
+        await db.close();
+      },
+    );
 
     test('current < restartGap (fresh boot) → skipped', () async {
       final db = await AppDatabase.inMemoryDatabase();

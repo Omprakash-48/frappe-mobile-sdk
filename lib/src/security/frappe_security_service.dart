@@ -32,7 +32,7 @@ class FrappeSecurityService {
     this.checks = const {},
     this.restartGapMs = 600000,
     this.timeRollbackToleranceMs = 10000,
-    this.serverAnchorToleranceMs = 300000,
+    this.serverAnchorToleranceMs = 900000,
     RootChecker? rootChecker,
     LocationChecker? locationChecker,
     MonotonicGetter? monotonicGetter,
@@ -40,7 +40,17 @@ class FrappeSecurityService {
        _rootChecker = rootChecker ?? _defaultRootCheck,
        _locationChecker = locationChecker ?? _defaultLocationCheck,
        _monotonicGetter =
-           monotonicGetter ?? SecurityPlatformChannel.getMonotonicMillis;
+           monotonicGetter ?? SecurityPlatformChannel.getMonotonicMillis {
+    // Footgun guard: a service that is enabled but has no checks silently
+    // passes every run. That is a valid (if unusual) configuration, but it is
+    // far more often a wiring mistake than an intention.
+    if (enabled && checks.isEmpty) {
+      sdkLog(
+        'FrappeSecurityService: enabled=true but `checks` is empty — no '
+        'integrity checks will run. Did you forget to pass `checks`?',
+      );
+    }
+  }
 
   final AppDatabase _db;
   final bool enabled;
@@ -58,8 +68,10 @@ class FrappeSecurityService {
 
   /// Grace window (ms) subtracted from the server-anchor time before the device
   /// clock being behind it is treated as a breach. Absorbs normal network
-  /// latency and modest clock skew between device and server. Default is
-  /// 5 minutes.
+  /// latency and clock skew between device and server. Default is 15 minutes —
+  /// rural deployments without reliable NTP commonly run 6–10 minutes of
+  /// persistent skew, which a tighter window would flag as a false breach.
+  /// Tighten via the constructor only where NTP is guaranteed.
   final int serverAnchorToleranceMs;
 
   final RootChecker _rootChecker;
@@ -87,6 +99,9 @@ class FrappeSecurityService {
     try {
       final position = await Geolocator.getCurrentPosition(
         locationSettings: const LocationSettings(
+          // Keep `lowest`: `isMocked` is a device-side flag that needs no GPS
+          // fix. Raising the accuracy tier adds 5–10s of cold-start latency on
+          // every app launch for zero benefit here — never increase this.
           accuracy: LocationAccuracy.lowest,
           timeLimit: Duration(seconds: 10),
         ),
@@ -164,16 +179,35 @@ class FrappeSecurityService {
     }
 
     // 4. Monotonic clock rollback.
-    // Skipped when:
-    //   • the channel is absent (currentMonotonicMs == null)
-    //   • currentMonotonicMs < restartGapMs (device just rebooted — a drop
-    //     vs. the stored value is expected)
-    //   • no prior monotonic state exists (lastMonotonicMs == null)
+    //
+    // The monotonic clock counts milliseconds since boot and cannot be moved
+    // backwards from device settings, so within a single boot session it only
+    // ever increases. A *drop* (current < stored) therefore means one of:
+    //   • the device rebooted (uptime reset to ~0, then grew again) — benign, or
+    //   • the monotonic source itself was tampered with — a breach.
+    //
+    // We distinguish the two with the wall clock. After a genuine reboot the
+    // real time elapsed since the last run (nowMs − lastWallMs) spans the time
+    // the device was powered off, so it is *larger* than the current uptime.
+    // When that holds we treat the drop as a reboot and pass — this is what
+    // stops every post-reboot launch from being blocked. The rollback attack we
+    // defend against drives the wall clock *backwards*, which makes the elapsed
+    // delta small or negative, so it is never excused. (A same-session wall
+    // rollback never reaches this branch — the monotonic value would not have
+    // dropped — and is caught by check #3 above.)
+    //
+    // Skipped when the channel is absent, when uptime is still below
+    // [restartGapMs] (a drop right after boot is expected and there is no stable
+    // baseline yet), or when there is no prior monotonic state.
     if (checks.contains(SecurityCheck.monotonicRollback) &&
         currentMonotonicMs != null &&
         currentMonotonicMs >= restartGapMs &&
-        lastMonotonicMs != null) {
-      if (currentMonotonicMs < lastMonotonicMs) {
+        lastMonotonicMs != null &&
+        currentMonotonicMs < lastMonotonicMs) {
+      final wallElapsedMs = lastWallMs != null ? nowMs - lastWallMs : null;
+      final explainedByReboot =
+          wallElapsedMs != null && wallElapsedMs > currentMonotonicMs;
+      if (!explainedByReboot) {
         failed.add(SecurityCheck.monotonicRollback);
         await _db.securityEventDao.insert(
           SecurityEvent(
@@ -182,7 +216,10 @@ class FrappeSecurityService {
             detectedAtMs: nowMs,
             wallTimeMs: nowMs,
             monotonicMs: currentMonotonicMs,
-            metadata: {'last_monotonic_ms': lastMonotonicMs},
+            metadata: {
+              'last_monotonic_ms': lastMonotonicMs,
+              'wall_elapsed_ms': wallElapsedMs,
+            },
           ),
         );
       }
@@ -195,7 +232,20 @@ class FrappeSecurityService {
       // Tolerance absorbs network latency and modest device/server clock skew.
       // NOTE: the anchor is parsed as UTC (see [_queryServerAnchorMs]); this
       // assumes the server writes `modified` in UTC. If a deployment stores
-      // local time, the anchor will be off by the UTC offset.
+      // local time, the anchor will be off by the UTC offset — surfaced below.
+      //
+      // Diagnostic: a delta beyond a day almost always means a misconfigured
+      // (non-UTC) server clock rather than a genuine device rollback. Without
+      // this log such a deployment would block every user with no visible
+      // cause. See SECURITY.md → "Server time anchor (UTC assumption)".
+      if (anchorMs != null && (anchorMs - nowMs).abs() > 86400000) {
+        sdkLog(
+          'FrappeSecurityService: server time anchor is '
+          '${((anchorMs - nowMs) / 3600000).toStringAsFixed(1)}h from the '
+          'device clock — check the server stores `modified` in UTC and that '
+          'device/server clocks are roughly aligned.',
+        );
+      }
       if (anchorMs != null && nowMs < anchorMs - serverAnchorToleranceMs) {
         failed.add(SecurityCheck.serverTimeAnchor);
         await _db.securityEventDao.insert(
