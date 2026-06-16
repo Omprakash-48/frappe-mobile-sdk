@@ -34,6 +34,15 @@ class _FrappeSecurityGuardState extends State<FrappeSecurityGuard> {
   bool _checking = true;
   Set<SecurityCheck>? _failedChecks;
 
+  /// Set once a [SecurityCheck.root] failure is seen and never cleared for the
+  /// life of this widget state. In-process retry is then disabled — see
+  /// [_retry]. This closes a Magisk-hide style bypass: on a rooted device an
+  /// attacker could trigger the block, add this app to Magisk's DenyList
+  /// (which hides root from the process *without* a reboot), then tap Retry to
+  /// re-run the check and unlock. A root verdict is therefore sticky and only
+  /// resets on a genuine process restart (which constructs a fresh state).
+  bool _rootPermanentlyBlocked = false;
+
   @override
   void initState() {
     super.initState();
@@ -42,9 +51,10 @@ class _FrappeSecurityGuardState extends State<FrappeSecurityGuard> {
 
   /// Re-runs the integrity checks after a block. Lets the user recover from a
   /// transient false positive (e.g. a momentary clock skew) without having to
-  /// force-kill and relaunch the app.
+  /// force-kill and relaunch the app. A root failure is never retryable
+  /// in-process — see [_rootPermanentlyBlocked].
   void _retry() {
-    if (!mounted) return;
+    if (!mounted || _rootPermanentlyBlocked) return;
     setState(() {
       _checking = true;
       _failedChecks = null;
@@ -61,11 +71,15 @@ class _FrappeSecurityGuardState extends State<FrappeSecurityGuard> {
       await widget.service.runChecks();
       if (mounted) setState(() => _checking = false);
     } on SecurityCannotBeAssuredException catch (e) {
+      final rootFailed = e.failedChecks.contains(SecurityCheck.root);
       if (mounted) {
         setState(() {
           _checking = false;
           _failedChecks = e.failedChecks;
+          if (rootFailed) _rootPermanentlyBlocked = true;
         });
+      } else if (rootFailed) {
+        _rootPermanentlyBlocked = true;
       }
     } catch (e, st) {
       sdkLog('FrappeSecurityGuard: unexpected error — $e\n$st');
@@ -80,7 +94,12 @@ class _FrappeSecurityGuardState extends State<FrappeSecurityGuard> {
     }
     if (_failedChecks != null) {
       return widget.blockingScreen ??
-          _SecurityBlockScreen(failedChecks: _failedChecks!, onRetry: _retry);
+          _SecurityBlockScreen(
+            failedChecks: _failedChecks!,
+            // No Retry affordance once root is confirmed — see
+            // [_rootPermanentlyBlocked].
+            onRetry: _rootPermanentlyBlocked ? null : _retry,
+          );
     }
     return widget.child;
   }

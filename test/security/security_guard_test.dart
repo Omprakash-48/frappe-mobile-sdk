@@ -11,12 +11,13 @@ FrappeSecurityService _svc(
   bool enabled = true,
   Set<SecurityCheck> checks = const {SecurityCheck.root},
   Future<bool> Function()? rootChecker,
+  Future<bool?> Function()? locationChecker,
 }) => FrappeSecurityService(
   database: db,
   enabled: enabled,
   checks: checks,
   rootChecker: rootChecker ?? () async => false,
-  locationChecker: () async => false,
+  locationChecker: locationChecker ?? () async => false,
   monotonicGetter: () async => 1000000,
 );
 
@@ -124,19 +125,25 @@ void main() {
     tester,
   ) async {
     final db = await AppDatabase.inMemoryDatabase();
-    // Fails the first run (rooted), passes every run after — simulating a
-    // transient false positive that clears on retry.
+    // A transient mock-location false positive (e.g. a momentary device-state
+    // flap): fails the first run, passes after. Non-root failures stay
+    // retryable, so Retry must recover. (Root is deliberately not retryable —
+    // see the Magisk-hide test below.)
     var firstRun = true;
-    Future<bool> flakyRootChecker() async {
+    Future<bool?> flakyLocationChecker() async {
       final wasFirst = firstRun;
       firstRun = false;
-      return wasFirst;
+      return wasFirst; // true (mocked) first, false (clean) thereafter
     }
 
     await tester.pumpWidget(
       MaterialApp(
         home: FrappeSecurityGuard(
-          service: _svc(db, rootChecker: flakyRootChecker),
+          service: _svc(
+            db,
+            checks: const {SecurityCheck.mockLocation},
+            locationChecker: flakyLocationChecker,
+          ),
           child: const Text('protected'),
         ),
       ),
@@ -153,6 +160,40 @@ void main() {
     expect(find.text('Security Check Failed'), findsNothing);
     await db.close();
   });
+
+  testWidgets(
+    'root failure is sticky: no Retry affordance, cannot be bypassed in-process '
+    '(M2: Magisk-hide)',
+    (tester) async {
+      final db = await AppDatabase.inMemoryDatabase();
+      // Simulate an attacker who hides root after the first check (e.g. adds
+      // the app to Magisk DenyList) so a re-run would pass. The guard must
+      // never offer that re-run for a root verdict.
+      var runCount = 0;
+      Future<bool> hideRootAfterFirstRun() async {
+        runCount++;
+        return runCount == 1; // rooted on first check, "clean" thereafter
+      }
+
+      await tester.pumpWidget(
+        MaterialApp(
+          home: FrappeSecurityGuard(
+            service: _svc(db, rootChecker: hideRootAfterFirstRun),
+            child: const Text('protected'),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      // Blocked, and the Retry button is absent for a root verdict.
+      expect(find.text('Security Check Failed'), findsOneWidget);
+      expect(find.text('Retry'), findsNothing);
+      expect(find.text('protected'), findsNothing);
+      // The root check only ran once — there is no in-process path to re-run it.
+      expect(runCount, 1);
+      await db.close();
+    },
+  );
 
   testWidgets('blocking screen lists each failed check name', (tester) async {
     final db = await AppDatabase.inMemoryDatabase();
