@@ -96,6 +96,10 @@ class TranslationService {
       // fall through — in-memory cache is valid even if SQLite persistence
       // failed; notify listeners so the UI reflects the updated cache.
     }
+    // clearAll()/dispose may have fired while bulkUpsert was awaiting. The
+    // cache is already wiped in that case, so a second onChanged here is a
+    // spurious re-render of stale (logged-out) state — suppress it.
+    if (_disposed || _clearGeneration != gen) return;
     if (!_changedController.isClosed) _changedController.add(null);
   }
 

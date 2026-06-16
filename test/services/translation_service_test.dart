@@ -415,6 +415,74 @@ void main() {
     expect(events, isNotEmpty, reason: 'clearAll must notify onChanged');
     await sub.cancel();
   });
+
+  // Regression (M4): a clearAll() that fires while _doRefresh is suspended at
+  // the bulkUpsert await must suppress the trailing onChanged. The cache is
+  // already wiped, so emitting again is a spurious re-render of logged-out
+  // state. bulkUpsert is gated so the interleaving is deterministic.
+  test(
+    'clearAll generation: no spurious onChanged when clearAll races bulkUpsert',
+    () async {
+      final db = await databaseFactory.openDatabase(
+        inMemoryDatabasePath,
+        options: OpenDatabaseOptions(
+          version: 1,
+          singleInstance: false,
+          onCreate: (d, _) => d.execute(
+            'CREATE TABLE kv (lang TEXT NOT NULL, src TEXT NOT NULL, '
+            'tgt TEXT NOT NULL, PRIMARY KEY (lang, src))',
+          ),
+        ),
+      );
+      final mockClient = MockClient((req) async {
+        if (req.url.toString().contains('get_translations')) {
+          return http.Response(
+            jsonEncode({
+              'data': {
+                'translations': {'Hello': 'Bonjour'},
+              },
+            }),
+            200,
+          );
+        }
+        return http.Response('{}', 200);
+      });
+      final dao = _GatedUpsertDao(db);
+      final svc = TranslationService(
+        FrappeClient('http://localhost', httpClient: mockClient),
+      );
+      svc.injectDao(dao);
+      dao.upsertGate = Completer<void>();
+
+      final events = <void>[];
+      final sub = svc.onChanged.listen(events.add);
+
+      // Fire refresh: fetches translations, then suspends on gated bulkUpsert.
+      svc.refreshAsync('hi');
+      await Future<void>.delayed(Duration.zero);
+      await Future<void>.delayed(Duration.zero);
+
+      // Logout fires while bulkUpsert is in flight → onChanged emitted here.
+      await svc.clearAll();
+      await Future<void>.delayed(Duration.zero);
+      final emissionsAfterClearAll = events.length;
+
+      // Release bulkUpsert; _doRefresh resumes. Without the M4 guard it would
+      // emit a second onChanged on the already-wiped cache.
+      dao.upsertGate!.complete();
+      await Future<void>.delayed(Duration.zero);
+      await Future<void>.delayed(Duration.zero);
+
+      expect(
+        events.length,
+        emissionsAfterClearAll,
+        reason: 'resumed _doRefresh must not emit onChanged after clearAll',
+      );
+      expect(svc.getCachedTranslations('hi'), isEmpty);
+      await sub.cancel();
+      await db.close();
+    },
+  );
 }
 
 /// Test DAO whose [readAll] can be held open via [readGate] to make the
@@ -427,4 +495,18 @@ class _GatedReadDao extends TranslationDao {
   @override
   Future<Map<String, String>> readAll(String lang) =>
       readGate?.future ?? super.readAll(lang);
+}
+
+/// Test DAO whose [bulkUpsert] can be held open via [upsertGate] to make the
+/// clearAll-vs-bulkUpsert interleaving deterministic.
+class _GatedUpsertDao extends TranslationDao {
+  _GatedUpsertDao(super.db);
+
+  Completer<void>? upsertGate;
+
+  @override
+  Future<void> bulkUpsert(String lang, Map<String, String> map) async {
+    if (upsertGate != null) await upsertGate!.future;
+    return super.bulkUpsert(lang, map);
+  }
 }

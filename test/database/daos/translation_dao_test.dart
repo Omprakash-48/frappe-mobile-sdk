@@ -58,4 +58,42 @@ void main() {
       expect(result.length, 900);
     });
   });
+
+  group('TranslationDao lifecycle (BS2)', () {
+    test(
+      'forTesting() owns its handle: close() actually frees the connection',
+      () async {
+        final dao = await TranslationDao.forTesting();
+        await dao.bulkUpsert('hi', {'Yes': 'हाँ'});
+        await dao.close();
+        // The connection is genuinely closed — a subsequent query throws
+        // rather than silently leaking an open handle.
+        expect(dao.readAll('hi'), throwsA(isA<DatabaseException>()));
+      },
+    );
+
+    test(
+      'production ctor does NOT own the shared handle: close() is a no-op',
+      () async {
+        // Mirror the production wiring: TranslationDao(sharedDb).
+        final sharedDb = await databaseFactory.openDatabase(
+          inMemoryDatabasePath,
+          options: OpenDatabaseOptions(
+            version: 1,
+            singleInstance: false,
+            onCreate: (d, _) => d.execute(
+              'CREATE TABLE kv (lang TEXT NOT NULL, src TEXT NOT NULL, '
+              'tgt TEXT NOT NULL, PRIMARY KEY (lang, src))',
+            ),
+          ),
+        );
+        final dao = TranslationDao(sharedDb);
+        await dao.close();
+        // The shared handle must remain usable — close() must not tear down a
+        // connection AppDatabase still owns.
+        expect(await sharedDb.rawQuery('SELECT 1'), isNotEmpty);
+        await sharedDb.close();
+      },
+    );
+  });
 }
