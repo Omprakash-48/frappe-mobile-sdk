@@ -1,5 +1,6 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:frappe_mobile_sdk/src/database/app_database.dart';
+import 'package:frappe_mobile_sdk/src/database/daos/security_event_dao.dart';
 import 'package:frappe_mobile_sdk/src/security/security_check.dart';
 import 'package:frappe_mobile_sdk/src/security/security_event.dart';
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
@@ -93,4 +94,49 @@ void main() {
     expect(events.first.lastWallMs, 5000000);
     await db.close();
   });
+
+  test(
+    'queryNewestFirst skips a row with an unknown check_type instead of '
+    'throwing (H2: audit log stays readable across enum changes)',
+    () async {
+      final db = await AppDatabase.inMemoryDatabase();
+      // A valid row plus a row from a hypothetical newer/rolled-back build that
+      // wrote a check_type this build does not know about.
+      await db.securityEventDao.insert(
+        _evt(SecurityCheck.root, detectedAtMs: 2000),
+      );
+      await db.rawDatabase.insert('security_events', {
+        'id': 'corrupt-1',
+        'check_type': 'some_future_check',
+        'detected_at_ms': 3000,
+        'wall_time_ms': 3000,
+      });
+      // Must not throw, and must return the readable row(s) only.
+      final events = await db.securityEventDao.queryNewestFirst();
+      expect(events, hasLength(1));
+      expect(events.first.checkType, SecurityCheck.root);
+      await db.close();
+    },
+  );
+
+  test(
+    'insert trims the table to maxRows newest events (H3: bounded growth)',
+    () async {
+      final db = await AppDatabase.inMemoryDatabase();
+      // Drive well past the cap; each insert trims, so the table never exceeds
+      // maxRows and always retains the newest rows.
+      final overflow = SecurityEventDao.maxRows + 25;
+      for (var i = 0; i < overflow; i++) {
+        await db.securityEventDao.insert(
+          _evt(SecurityCheck.root, detectedAtMs: i),
+        );
+      }
+      final all = await db.securityEventDao.queryNewestFirst();
+      expect(all, hasLength(SecurityEventDao.maxRows));
+      // Newest (highest detected_at_ms) retained; oldest trimmed.
+      expect(all.first.detectedAtMs, overflow - 1);
+      expect(all.last.detectedAtMs, overflow - SecurityEventDao.maxRows);
+      await db.close();
+    },
+  );
 }
