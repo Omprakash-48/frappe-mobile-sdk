@@ -32,9 +32,10 @@ Future<Map<String, dynamic>> _postFormEncoded(
     body: body.keys.map((k) => '$k=${Uri.encodeComponent(body[k]!)}').join('&'),
   );
   if (response.statusCode != 200) {
-    throw Exception(
-      '$errorLabel failed: ${response.statusCode} ${response.body}',
-    );
+    // Do NOT embed response.body: OAuth error bodies can carry tokens,
+    // client_secret echoes, or error_description PII that would then leak into
+    // crash reporters and log aggregators via the exception's stack trace.
+    throw Exception('$errorLabel failed: ${response.statusCode}');
   }
   return jsonDecode(response.body) as Map<String, dynamic>;
 }
@@ -199,9 +200,9 @@ class OAuth2Helper {
       headers: {'Authorization': 'Bearer $accessToken'},
     );
     if (response.statusCode != 200) {
-      throw Exception(
-        'Token verification failed: ${response.statusCode} ${response.body}',
-      );
+      // See [_postFormEncoded]: the userinfo body can contain profile PII —
+      // keep it out of the thrown exception (and therefore out of crash logs).
+      throw Exception('Token verification failed: ${response.statusCode}');
     }
     return jsonDecode(response.body) as Map<String, dynamic>;
   }

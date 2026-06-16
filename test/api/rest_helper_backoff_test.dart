@@ -56,5 +56,33 @@ void main() {
       final d = retryBackoffDelay(0, random: Random(1)).inMilliseconds;
       expect(d, inInclusiveRange(250, 500)); // base=500 → [250,500]
     });
+
+    test('maxDelayMs caps the delay window (BW4)', () {
+      // Without a cap, attempt 16 → base ~9.1h. With a 30s cap the delay must
+      // stay in the capped equal-jitter window [maxDelayMs/2, maxDelayMs].
+      const cap = 30000;
+      for (final attempt in [16, 60]) {
+        final d = retryBackoffDelay(
+          attempt,
+          random: Random(1),
+          maxDelayMs: cap,
+        ).inMilliseconds;
+        expect(
+          d,
+          inInclusiveRange(cap ~/ 2, cap),
+          reason: 'attempt $attempt with cap must stay within [cap/2, cap]',
+        );
+      }
+    });
+
+    test('maxDelayMs does not inflate already-small delays', () {
+      // A cap far above the natural base must leave the delay untouched.
+      final d = retryBackoffDelay(
+        1,
+        random: Random(1),
+        maxDelayMs: 30000,
+      ).inMilliseconds;
+      expect(d, inInclusiveRange(500, 1000)); // base=1000 → [500,1000]
+    });
   });
 }
