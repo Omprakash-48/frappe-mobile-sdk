@@ -266,6 +266,29 @@ class PullApply {
         }
       }
 
+      // UUID-uniqueness assumption: `mobile_uuid` is a v4 UUID minted on this
+      // device and treated as globally unique, so a fallback match means *this*
+      // device created the row. We deliberately do NOT add a hard consistency
+      // assertion against the incoming server row — it would mis-fire on
+      // legitimate server-side edits and risk dropping good data. As a
+      // non-fatal tripwire we log (never block) when a uuid-matched local row
+      // is already bound to a *different* server_name: that mismatch is the
+      // only observable signature of a cross-device UUID clash or a bad data
+      // migration reusing a mobile_uuid. The incoming row is still applied.
+      if (matchedByUuid) {
+        final priorServerName = existing.first['server_name'] as String?;
+        if (priorServerName != null &&
+            priorServerName.isNotEmpty &&
+            priorServerName != serverName) {
+          sdkLog(
+            'PullApply: mobile_uuid "${r['mobile_uuid']}" matched a local row '
+            'in $parentTable already bound to server_name "$priorServerName", '
+            'but the incoming server row is "$serverName" — possible UUID reuse '
+            '/ cross-device collision; applying the incoming row.',
+          );
+        }
+      }
+
       // Tombstoned rows never resurrect — local DELETE is queued in
       // outbox waiting to push. Skip silently; once the DELETE outbox
       // row drains, the row is hard-deleted server-side too.
