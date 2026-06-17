@@ -8,10 +8,18 @@ class TranslationDao {
 
   final Database _db;
 
-  TranslationDao(this._db);
+  /// Whether this DAO opened [_db] itself (via [forTesting]) and therefore owns
+  /// its lifecycle. The production constructor receives the shared AppDatabase
+  /// handle, which it must never close — see [close].
+  final bool _ownsDb;
+
+  TranslationDao(this._db) : _ownsDb = false;
+
+  TranslationDao._owned(this._db) : _ownsDb = true;
 
   /// Use in tests only — opens an in-memory database so no filesystem I/O
-  /// occurs and each [TranslationDao.forTesting()] instance is isolated.
+  /// occurs and each [TranslationDao.forTesting()] instance is isolated. The
+  /// returned DAO owns the handle: [close] actually frees it.
   static Future<TranslationDao> forTesting() async {
     final db = await openDatabase(
       inMemoryDatabasePath,
@@ -28,13 +36,17 @@ class TranslationDao {
         ''');
       },
     );
-    return TranslationDao(db);
+    return TranslationDao._owned(db);
   }
 
   /// Inserts or replaces all entries in [map] for [lang].
   ///
   /// Uses a batched transaction for efficiency. Handles arbitrarily large maps
   /// by writing all rows inside a single transaction batch.
+  ///
+  /// Known limitation: keys removed from the upstream server are NOT pruned —
+  /// stale entries may linger until the next [deleteAll] (logout). Pruning
+  /// would require a per-language diff on every refresh and is deferred.
   Future<void> bulkUpsert(String lang, Map<String, String> map) async {
     if (map.isEmpty) return;
     await _db.transaction((txn) async {
@@ -69,8 +81,11 @@ class TranslationDao {
     await _db.delete(_tableName);
   }
 
-  /// Closes the underlying database connection.
+  /// Closes the underlying database connection **only** when this DAO opened it
+  /// itself (i.e. [forTesting]). For the production DAO the handle is the shared
+  /// AppDatabase singleton, whose lifecycle AppDatabase owns, so this is a
+  /// no-op — closing it would tear down the connection other DAOs still use.
   Future<void> close() async {
-    // Let AppDatabase manage connection lifecycle; do nothing here.
+    if (_ownsDb) await _db.close();
   }
 }

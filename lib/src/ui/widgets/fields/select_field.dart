@@ -57,6 +57,7 @@ class SelectField extends BaseField {
 
     if (rawOptions.isEmpty) {
       return FormBuilderTextField(
+        autovalidateMode: AutovalidateMode.onUserInteraction,
         key: ValueKey('${field.fieldname}_no_options'),
         name: field.fieldname ?? '',
         initialValue: value?.toString() ?? field.defaultValue ?? '',
@@ -91,6 +92,7 @@ class SelectField extends BaseField {
       }
 
       return FormBuilderCheckboxGroup<String>(
+        autovalidateMode: AutovalidateMode.onUserInteraction,
         key: ValueKey('${field.fieldname}_multi_${rawOptions.length}'),
         name: field.fieldname ?? '',
         initialValue: displayList,
@@ -140,6 +142,7 @@ class SelectField extends BaseField {
     }
 
     return FormBuilderDropdown<String>(
+      autovalidateMode: AutovalidateMode.onUserInteraction,
       key: ValueKey('select_${field.fieldname}_${rawOptions.length}'),
       name: field.fieldname ?? '',
       initialValue: validInitialValue,

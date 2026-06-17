@@ -40,6 +40,7 @@ class RatingField extends BaseField {
     }
 
     return FormBuilderField<int>(
+      autovalidateMode: AutovalidateMode.onUserInteraction,
       key: ValueKey('rating_${field.fieldname}'),
       name: field.fieldname ?? '',
       initialValue: initialRating,

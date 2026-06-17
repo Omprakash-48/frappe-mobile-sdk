@@ -73,6 +73,7 @@ class LinkField extends BaseField {
       }
 
       return FormBuilderDropdown<String>(
+        autovalidateMode: AutovalidateMode.onUserInteraction,
         key: ValueKey('link_${field.fieldname}_${options!.length}'),
         name: field.fieldname ?? '',
         initialValue: validInitialValue,
@@ -104,6 +105,7 @@ class LinkField extends BaseField {
         field.options!.isNotEmpty &&
         effectiveService != null) {
       return FormBuilderField<String>(
+        autovalidateMode: AutovalidateMode.onUserInteraction,
         key: ValueKey('linkfield_${field.fieldname}'),
         name: field.fieldname ?? '',
         initialValue: value?.toString() ?? field.defaultValue?.toString(),
@@ -137,6 +139,7 @@ class LinkField extends BaseField {
 
     // Fallback to text field
     return FormBuilderTextField(
+      autovalidateMode: AutovalidateMode.onUserInteraction,
       key: ValueKey('link_text_${field.fieldname}'),
       name: field.fieldname ?? '',
       initialValue: value?.toString() ?? field.defaultValue ?? '',
@@ -371,6 +374,7 @@ class _LinkFieldDropdownState extends State<_LinkFieldDropdown> {
       debugPrint(
         'LinkField: getLinkOptions(${widget.linkedDoctype}) failed — $e\n$st',
       );
+      if (!mounted) return;
       setState(() {
         _options = [];
         _isLoading = false;

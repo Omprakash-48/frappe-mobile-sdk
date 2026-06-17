@@ -22,6 +22,7 @@ class NumericField extends BaseField {
     final isPercent = field.fieldtype == 'Percent';
 
     return FormBuilderTextField(
+      autovalidateMode: AutovalidateMode.onUserInteraction,
       key: ValueKey('numeric_${field.fieldname}'),
       name: field.fieldname ?? '',
       initialValue: value?.toString() ?? field.defaultValue ?? '',

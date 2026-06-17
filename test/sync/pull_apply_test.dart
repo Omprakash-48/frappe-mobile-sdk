@@ -776,4 +776,68 @@ void main() {
     );
     expect(row['server_name'], 'SO-002');
   });
+
+  test(
+    'pull stamps server_name AND flags conflict when matched by mobile_uuid '
+    'with NULL server_name but local edits are still owed (ghost-success)',
+    () async {
+      // Ghost-success: our INSERT committed server-side but the writeback never
+      // stamped server_name. The user then made FURTHER offline edits, so there
+      // is still owed outbox work. The pulled row carries the same mobile_uuid
+      // and a newer `modified` (server advanced).
+      await db.insert('docs__sales_order', {
+        'mobile_uuid': 'uuid-C',
+        'server_name': null,
+        'sync_status': 'dirty',
+        'local_modified': 0,
+        'modified': '2026-01-01 09:00:00.000000',
+        'customer': 'LocalEdit',
+      });
+      await db.insert('outbox', {
+        'doctype': 'Sales Order',
+        'mobile_uuid': 'uuid-C',
+        'operation': 'update',
+        'state': 'pending', // owed work — not done/in_flight
+        'created_at': 0,
+      });
+
+      await PullApply.applyPage(
+        db: db,
+        parentMeta: parentMeta,
+        parentTable: 'docs__sales_order',
+        childMetasByFieldname: const {},
+        rows: [
+          {
+            'name': 'SO-003',
+            'mobile_uuid': 'uuid-C',
+            'modified': '2026-02-01 10:00:00.000000',
+            'customer': 'ServerVersion',
+          },
+        ],
+      );
+
+      final row = (await db.query(
+        'docs__sales_order',
+        where: 'mobile_uuid = ?',
+        whereArgs: ['uuid-C'],
+      )).single;
+      expect(
+        row['sync_status'],
+        'conflict',
+        reason:
+            'diverged local edits must be flagged, not silently overwritten',
+      );
+      expect(
+        row['server_name'],
+        'SO-003',
+        reason:
+            'server_name must be stamped so the conflict can be resolved/pushed',
+      );
+      expect(
+        row['customer'],
+        'LocalEdit',
+        reason: 'local payload must be preserved for conflict resolution',
+      );
+    },
+  );
 }
