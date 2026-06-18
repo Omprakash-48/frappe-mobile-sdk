@@ -186,6 +186,58 @@ void main() {
     await db.close();
   });
 
+  test(
+    'v4→v5 backfills the named mobile_uuid index on existing docs__ tables (H4)',
+    () async {
+      final v4db = await openDatabase(
+        dbPath,
+        version: 4,
+        onCreate: (db, v) async {
+          await _v4OnCreate(db, v);
+          // A docs__ table as a v3/v4 device would have it: mobile_uuid is the
+          // PRIMARY KEY (auto-indexed) but the NAMED ix_<suffix>_mobile_uuid
+          // index that newer IndexPolicy emits is absent.
+          await db.execute(
+            'CREATE TABLE docs__demo ('
+            '  mobile_uuid TEXT PRIMARY KEY,'
+            '  server_name TEXT,'
+            '  sync_status TEXT'
+            ')',
+          );
+        },
+        singleInstance: false,
+      );
+      // Precondition: the named index does not exist yet on the v4 table.
+      final before = (await v4db.rawQuery(
+        "SELECT name FROM sqlite_master WHERE type='index' "
+        "AND tbl_name='docs__demo'",
+      )).map((r) => r['name'] as String).toSet();
+      expect(before, isNot(contains('ix_demo_mobile_uuid')));
+      await v4db.close();
+
+      AppDatabaseTestSeam.resetSingleton();
+      final v5db = await openDatabase(
+        dbPath,
+        version: 5,
+        onConfigure: AppDatabaseTestSeam.runOnConfigure,
+        onUpgrade: AppDatabaseTestSeam.runOnUpgrade,
+        singleInstance: false,
+      );
+
+      final after = (await v5db.rawQuery(
+        "SELECT name FROM sqlite_master WHERE type='index' "
+        "AND tbl_name='docs__demo'",
+      )).map((r) => r['name'] as String).toSet();
+      expect(
+        after,
+        contains('ix_demo_mobile_uuid'),
+        reason: 'migration must backfill the named mobile_uuid index',
+      );
+
+      await v5db.close();
+    },
+  );
+
   test('migration is idempotent — running v4→v5 twice does not throw', () async {
     final v4db = await openDatabase(
       dbPath,
