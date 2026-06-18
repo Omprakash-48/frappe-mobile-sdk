@@ -21,8 +21,13 @@ class FieldStyle {
     this.descriptionStyle,
     this.decoration,
     this.translate,
-    this.showLabel = false,
-    this.showDescription = false,
+    // Default to showing labels/descriptions for backward compatibility — a
+    // consumer constructing FieldStyle for an unrelated reason (e.g. a custom
+    // decoration) must not silently lose them (PR#36 round-4 B6).
+    // FrappeFormBuilder always passes these explicitly (form_builder.dart),
+    // so this default only affects external consumers.
+    this.showLabel = true,
+    this.showDescription = true,
   });
 }
 

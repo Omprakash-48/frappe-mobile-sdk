@@ -112,7 +112,7 @@ For each hit, replace per the table below:
 
 | 1.x usage | 2.0 replacement |
 |---|---|
-| `sdk.documentDao.getAll(doctype: 'X')` | `(await sdk.unifiedResolver.resolve(doctype: 'X')).rows` |
+| `sdk.documentDao.getAll(doctype: 'X')` | `(await sdk.resolver.resolve(doctype: 'X')).rows` |
 | `sdk.documentDao.create(doctype, data)` | `sdk.offlineRepository.saveDocument(doctype: 'X', data: data)` |
 | `sdk.documentDao.update(localId, data)` | `sdk.offlineRepository.saveDocument(doctype: 'X', data: {...data, 'mobile_uuid': mobileUuid})` |
 | `sdk.documentDao.delete(localId)` | `sdk.offlineRepository.deleteDocument(doctype: 'X', mobileUuid: mobileUuid)` |

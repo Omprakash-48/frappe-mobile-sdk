@@ -32,6 +32,31 @@ class TimeoutError extends PushError {
   String toString() => 'TimeoutError: $message';
 }
 
+/// A transient server-side contention failure that the request should be
+/// retried after a short delay — most commonly MySQL/MariaDB error 1213
+/// ("Deadlock found when trying to get lock; try restarting transaction"),
+/// which Frappe surfaces as `QueryDeadlockError` (HTTP 500).
+///
+/// This is raised by the consumer's `send` callback when it recognises a
+/// deadlock in the server response, so that [PushEngine]'s attempt loop
+/// retries it (with backoff + jitter) instead of letting the raw
+/// `ApiException` escape to the terminal `markFailed` path. Deadlocks are
+/// inherently transient: a retry against a now-uncontended `tabSeries`
+/// row almost always succeeds.
+///
+/// If every retry is exhausted it maps to [ErrorCode.NETWORK] — the
+/// closest "transient, retry later" code the error UI already groups under
+/// `retryAll` — rather than `UNKNOWN`, which reads as a hard failure.
+class DeadlockError extends PushError {
+  @override
+  final String message;
+  DeadlockError({required this.message});
+  @override
+  ErrorCode toErrorCode() => ErrorCode.NETWORK;
+  @override
+  String toString() => 'DeadlockError: $message';
+}
+
 /// Frappe `check_if_latest` failed — the row has been modified on the
 /// server since our snapshot. Engine catches this and triggers a
 /// three-way merge + retry-once cycle.

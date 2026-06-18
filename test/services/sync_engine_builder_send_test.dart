@@ -1,5 +1,6 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:frappe_mobile_sdk/src/api/client.dart';
+import 'package:frappe_mobile_sdk/src/api/exceptions.dart';
 import 'package:frappe_mobile_sdk/src/database/app_database.dart';
 import 'package:frappe_mobile_sdk/src/models/doc_field.dart';
 import 'package:frappe_mobile_sdk/src/models/doc_type_meta.dart';
@@ -48,6 +49,40 @@ void main() {
   });
 
   tearDown(() async => appDb.close());
+
+  group('isDeadlockApiException', () {
+    test('true for exc_type == QueryDeadlockError', () {
+      final e = ApiException('Internal Server Error', 500, {
+        'exc_type': 'QueryDeadlockError',
+        'exception':
+            "frappe.exceptions.QueryDeadlockError: (1213, 'Deadlock "
+            "found when trying to get lock; try restarting transaction')",
+      });
+      expect(isDeadlockApiException(e), isTrue);
+    });
+
+    test('true when only the message text carries the signature', () {
+      final e = ApiException(
+        "QueryDeadlockError: (1213, 'Deadlock found when trying to get lock')",
+        500,
+      );
+      expect(isDeadlockApiException(e), isTrue);
+    });
+
+    test('false for an unrelated 500 (no false positives)', () {
+      final e = ApiException('Something else broke', 500, {
+        'exc_type': 'ValidationError',
+      });
+      expect(isDeadlockApiException(e), isFalse);
+    });
+
+    test('false for a permission error', () {
+      final e = ApiException('Not permitted', 403, {
+        'exc_type': 'PermissionError',
+      });
+      expect(isDeadlockApiException(e), isFalse);
+    });
+  });
 
   test('PushEngine drives the send callback to POST /api/resource/{doctype} '
       'on INSERT', () async {

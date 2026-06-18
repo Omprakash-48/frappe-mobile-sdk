@@ -41,12 +41,11 @@ typedef SchemaReconcilerFn =
 ///    edits in flight.
 /// 2. Resolve parent + child metas.
 /// 3. Loop pages via [PullPageFetcher]. Each page → [PullApply.applyPage]
-///    in a transaction. Cursor is held in memory until the doctype is
-///    fully drained (last page returned < pageSize rows or threw); then
-///    persisted via [DoctypeMetaDao.setLastOkCursor].
-/// 4. Cursor advance is per-doctype atomic — partial pulls leave the
-///    persisted cursor untouched, so a relaunch resumes from the last
-///    fully-applied page.
+///    in a transaction, then the advanced cursor (complete:false) is
+///    checkpointed via [DoctypeMetaDao.setLastOkCursor] (#64). When the
+///    doctype drains, the cursor is flipped to complete:true.
+/// 4. A relaunch mid initial-sync resumes from the last checkpointed page
+///    (limit_start = cursor.start) instead of page 0.
 ///
 /// Doctypes drain in parallel through [pool] (typically PullPool, sized by
 /// [DeviceTier]).
@@ -244,6 +243,18 @@ class PullEngine {
             startedAt: startedAt,
           ),
         );
+
+        // #64: checkpoint the cursor after every successfully-applied page so
+        // an app-kill mid initial-sync resumes from here (limit_start =
+        // scratch.start) instead of page 0. `scratch` is complete:false; the
+        // post-loop markComplete() flip remains the only writer of
+        // complete:true. Mirrors SyncService._pullOneInternal's per-page
+        // journal. A crash between the page apply and this write re-applies
+        // the page on resume — idempotent via PullApply's UPSERT.
+        final pageCursorJson = scratch.toJson();
+        if (pageCursorJson != null) {
+          await metaDao.setLastOkCursor(doctype, jsonEncode(pageCursorJson));
+        }
 
         // Spec §5.1: only break on empty page. A short non-empty page is
         // still followed by one confirmatory empty fetch — Frappe doesn't

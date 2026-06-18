@@ -23,13 +23,13 @@ The core of the 2.0 release. Every form save writes to a normalized per-doctype 
 final sdk = await FrappeSDK.initialize(autoRestoreAndSync: true);
 
 // Offline-first save (when offline mode is on)
-final localId = await sdk.offlineRepository.createDocument(
+final localId = await sdk.offlineRepository.saveDocument(
   doctype: 'Customer',
   data: {'customer_name': 'Acme', 'customer_type': 'Company'},
 );
 
 // Reads go through UnifiedResolver — DB-first, background refresh.
-final result = await sdk.unifiedResolver.resolve(
+final result = await sdk.resolver.resolve(
   doctype: 'Customer',
   filters: [['customer_type', '=', 'Company']],
 );

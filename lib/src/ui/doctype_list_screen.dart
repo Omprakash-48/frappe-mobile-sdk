@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import '../models/app_config.dart';
 import '../query/unified_resolver.dart';
 import '../services/offline_repository.dart';
+import '../utils/sdk_log.dart';
 
 enum HomeScreenLayout { list, folder }
 
@@ -74,14 +75,12 @@ class _DoctypeListScreenState extends State<DoctypeListScreen> {
         try {
           _documentCounts[doctype] = await widget.resolver.count(doctype);
         } catch (e, st) {
-          // ignore: avoid_print
-          print('DoctypeListScreen: count($doctype) failed — $e\n$st');
+          sdkLog('DoctypeListScreen: count($doctype) failed — $e\n$st');
           _documentCounts[doctype] = 0;
         }
       }
     } catch (e, st) {
-      // ignore: avoid_print
-      print('DoctypeListScreen: _loadDocumentCounts failed — $e\n$st');
+      sdkLog('DoctypeListScreen: _loadDocumentCounts failed — $e\n$st');
     } finally {
       setState(() {
         _isLoading = false;

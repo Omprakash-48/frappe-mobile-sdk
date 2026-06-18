@@ -2,8 +2,10 @@
 // For license information, please see license.txt
 
 import 'dart:async';
+import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
+import 'package:http/http.dart' as http;
 
 import '../api/client.dart';
 import '../api/exceptions.dart';
@@ -11,6 +13,7 @@ import '../concurrency/concurrency_pool.dart';
 import '../concurrency/connectivity_watcher.dart';
 import '../database/app_database.dart';
 import '../database/daos/doctype_meta_dao.dart';
+import '../database/daos/outbox_dao.dart';
 import '../database/daos/sdk_meta_dao.dart';
 import '../models/doc_type_meta.dart';
 import '../models/offline_mode.dart';
@@ -29,8 +32,10 @@ import '../services/offline_repository.dart';
 import '../services/offline_transition_service.dart';
 import '../services/link_option_service.dart';
 import '../services/translation_service.dart';
+import '../sync/cursor.dart';
 import '../sync/pull_engine.dart';
 import '../sync/push_engine.dart';
+import '../sync/sync_details.dart';
 import '../sync/sync_state.dart';
 import '../sync/sync_state_notifier.dart';
 
@@ -81,6 +86,13 @@ class FrappeSDK {
   /// constructing parallel sets of services. Cleared when the body
   /// finishes (success or failure); on failure callers can retry.
   Completer<void>? _initInFlight;
+
+  /// Coalesces concurrent [_initialMetaAndDataSync] runs. login(),
+  /// verifyLoginOtp(), and initialize() each fire it `unawaited`; two rapid
+  /// auth events (or a login racing an in-progress run) would otherwise
+  /// execute two concurrent meta+config+closure pulls, both writing
+  /// `doctype_meta`/`sdk_meta` with no ordering guarantee (PR#36 round-4 H5).
+  Completer<void>? _metaSyncInFlight;
 
   /// Set when [OfflineTransitionService.runDrainAndWipe] is fired
   /// in the background from [initialize] / [login]. [_runUpgradeClosurePull]
@@ -157,13 +169,16 @@ class FrappeSDK {
       enabled: true,
       isPersisted: true,
     ),
+    http.Client? httpClient,
   }) : databaseAppName = null {
     _database = database;
     _modeNotifier = OfflineModeNotifier(offlineMode);
     _syncCompleteController = StreamController<void>.broadcast();
     // Create FrappeClient directly — avoids AuthService.initialize() which
     // writes to FlutterSecureStorage and is unavailable in widget tests.
-    _client = FrappeClient(baseUrl);
+    // [httpClient] lets tests stub the transport (e.g. the /sync_details
+    // pre-flight) without a real network.
+    _client = FrappeClient(baseUrl, httpClient: httpClient);
     // Use AuthService.forTesting so the client and database are wired up
     // without touching FlutterSecureStorage. This means sdk.auth methods
     // (e.g. getOrCreateMobileUuid, restoreSession) won't throw "not
@@ -341,6 +356,11 @@ class FrappeSDK {
       getMobileUuid: _resolveMobileUuid,
       offlineModeNotifier: _modeNotifier!,
       pushRunner: () => _pushEngine!.runOnce(),
+      // Parity with PullEngine's guard: SyncService's pull paths
+      // (pullSyncWaiting, pullSyncMany, forcePullAll) defer a doctype while a
+      // push is active for it, so a pull can't insert a duplicate over an
+      // in-flight push INSERT (#43). OutboxDao is a thin wrapper over rawDb.
+      hasActivePush: (doctype) => OutboxDao(rawDb).hasActivePushFor(doctype),
     );
     // Build UnifiedResolver — single read path for all offline queries.
     // Probe connectivity once here AND subscribe to the platform
@@ -368,8 +388,9 @@ class FrappeSDK {
         try {
           await syncSvc.pullSyncWaiting(doctype: doctype);
         } catch (e, st) {
-          // ignore: avoid_print
-          print('FrappeSDK: background pullSync($doctype) failed — $e\n$st');
+          debugPrint(
+            'FrappeSDK: background pullSync($doctype) failed — $e\n$st',
+          );
         }
       },
       metaResolver: metaFn,
@@ -959,8 +980,7 @@ class FrappeSDK {
         setAtMs: DateTime.now().millisecondsSinceEpoch,
       );
     } catch (e, st) {
-      // ignore: avoid_print
-      print('FrappeSDK: failed to persist offline_enabled — $e\n$st');
+      debugPrint('FrappeSDK: failed to persist offline_enabled — $e\n$st');
       return;
     }
 
@@ -1030,7 +1050,29 @@ class FrappeSDK {
   /// 1) Sync doctypes from login mobile_form_names (checkAndSyncDoctypes)
   /// 2) Resync configuration from server (mobile_auth.configuration)
   /// 3) Pull records for all mobile doctypes into the offline DB
-  Future<void> _initialMetaAndDataSync() async {
+  /// Guarded entry point: concurrent callers join the single in-flight run
+  /// instead of starting a parallel meta/data sync (PR#36 round-4 H5). The
+  /// guard lives here — not in initialize()'s [_initInFlight] — because
+  /// login()/verifyLoginOtp() reach the body directly, bypassing initialize().
+  Future<void> _initialMetaAndDataSync() {
+    final inFlight = _metaSyncInFlight;
+    if (inFlight != null) return inFlight.future;
+    final completer = Completer<void>();
+    _metaSyncInFlight = completer;
+    () async {
+      try {
+        await _runInitialMetaAndDataSync();
+        completer.complete();
+      } catch (e, st) {
+        completer.completeError(e, st);
+      } finally {
+        _metaSyncInFlight = null;
+      }
+    }();
+    return completer.future;
+  }
+
+  Future<void> _runInitialMetaAndDataSync() async {
     if (_metaService == null || _syncService == null) return;
 
     // Offline launch: every call below is pure-network and would block
@@ -1067,8 +1109,7 @@ class FrappeSDK {
           at: DateTime.now(),
         ),
       );
-      // ignore: avoid_print
-      print('FrappeSDK: boot sync — server unreachable: $e\n$st');
+      debugPrint('FrappeSDK: boot sync — server unreachable: $e\n$st');
       _setInitialSyncFlag(initialSyncNotifier, false);
       return;
     } catch (e, st) {
@@ -1079,8 +1120,7 @@ class FrappeSDK {
           at: DateTime.now(),
         ),
       );
-      // ignore: avoid_print
-      print('FrappeSDK: permissions.syncFromApi failed — $e\n$st');
+      debugPrint('FrappeSDK: permissions.syncFromApi failed — $e\n$st');
       // Non-network failure: continue with other steps so a partial
       // outage (e.g. one method 500) doesn't block the rest of boot.
     }
@@ -1088,22 +1128,19 @@ class FrappeSDK {
     try {
       await _translationService?.loadTranslations('en');
     } catch (e, st) {
-      // ignore: avoid_print
-      print('FrappeSDK: translations.loadTranslations failed — $e\n$st');
+      debugPrint('FrappeSDK: translations.loadTranslations failed — $e\n$st');
     }
 
     try {
       await _metaService!.checkAndSyncDoctypes();
     } catch (e, st) {
-      // ignore: avoid_print
-      print('FrappeSDK: meta.checkAndSyncDoctypes failed — $e\n$st');
+      debugPrint('FrappeSDK: meta.checkAndSyncDoctypes failed — $e\n$st');
     }
 
     try {
       await _metaService!.resyncMobileConfiguration();
     } catch (e, st) {
-      // ignore: avoid_print
-      print('FrappeSDK: meta.resyncMobileConfiguration failed — $e\n$st');
+      debugPrint('FrappeSDK: meta.resyncMobileConfiguration failed — $e\n$st');
     }
 
     // Online mode stops here — closure pull is offline-only.
@@ -1156,8 +1193,7 @@ class FrappeSDK {
         // Drain failure is surfaced via the transition stream; we just
         // need to know it has settled before writing to per-doctype tables.
         // Log so the failure mode is visible at the boot path too.
-        // ignore: avoid_print
-        print('FrappeSDK: pending drain awaited with error — $e\n$st');
+        debugPrint('FrappeSDK: pending drain awaited with error — $e\n$st');
       }
     }
     try {
@@ -1180,8 +1216,9 @@ class FrappeSDK {
           try {
             metasByDoctype[dt] = await _metaService!.getMeta(dt);
           } catch (e, st) {
-            // ignore: avoid_print
-            print('FrappeSDK: closure pull — getMeta($dt) failed — $e\n$st');
+            debugPrint(
+              'FrappeSDK: closure pull — getMeta($dt) failed — $e\n$st',
+            );
           }
         }
         try {
@@ -1190,8 +1227,7 @@ class FrappeSDK {
             childDoctypes: closure.childDoctypes,
           );
         } catch (e, st) {
-          // ignore: avoid_print
-          print(
+          debugPrint(
             'FrappeSDK: closure pull — ensureSchemaForClosure failed — $e\n$st',
           );
         }
@@ -1207,15 +1243,55 @@ class FrappeSDK {
         pullable.add(doctype);
       }
       if (pullable.isEmpty) return const <String>{};
+
+      // #49 pre-flight: ask the server which INCREMENTAL doctypes actually
+      // changed, and skip pulling the rest. Only doctypes with a complete
+      // (delta-ready) cursor are eligible — INITIAL/RESUME doctypes have no
+      // trustworthy watermark and are always pulled. Any failure (missing
+      // endpoint, network) leaves `allowed == pullable` → full pull.
+      var allowed = pullable;
+      final eligible = <String, String>{}; // doctype -> since (cursor.modified)
+      for (final dt in pullable) {
+        try {
+          final raw = await _database!.doctypeMetaDao.getLastOkCursor(dt);
+          if (raw == null || raw.isEmpty) continue;
+          final cursor = Cursor.fromJson(
+            jsonDecode(raw) as Map<String, dynamic>,
+          );
+          if (cursor.complete && cursor.modified != null) {
+            eligible[dt] = cursor.modified!;
+          }
+        } catch (e, st) {
+          debugPrint(
+            'FrappeSDK: sync_details cursor read($dt) failed — $e\n$st',
+          );
+        }
+      }
+      if (eligible.isNotEmpty) {
+        final manifest = await _client!.doctype.getSyncDetails([
+          for (final entry in eligible.entries)
+            {'doctype': entry.key, 'since': entry.value},
+        ]);
+        if (manifest != null) {
+          final skip = doctypesToSkip(eligible.keys.toSet(), manifest);
+          if (skip.isNotEmpty) {
+            allowed = pullable.difference(skip);
+            debugPrint(
+              'FrappeSDK: sync_details skipped ${skip.length}/'
+              '${eligible.length} unchanged doctypes',
+            );
+          }
+        }
+      }
+
       // Hold the SyncMutex for the entire closure pull so concurrent
       // single-doctype callers (pullSync, pullSyncWaiting) serialise
       // behind it — same contract as the former pullSyncMany call path.
       return await _syncService!.protect(
-        () => _pullEngine!.run(closure, allowedDoctypes: pullable),
+        () => _pullEngine!.run(closure, allowedDoctypes: allowed),
       );
     } catch (e, st) {
-      // ignore: avoid_print
-      print('FrappeSDK: closure pull failed — $e\n$st');
+      debugPrint('FrappeSDK: closure pull failed — $e\n$st');
       return const <String>{};
     } finally {
       _syncCompleteController?.add(null);
@@ -1287,8 +1363,7 @@ class FrappeSDK {
         try {
           await dao.clearLastOkCursor(doctype);
         } catch (e, st) {
-          // ignore: avoid_print
-          print(
+          debugPrint(
             'FrappeSDK: forcePullAll cursor-clear($doctype) failed — $e\n$st',
           );
         }
@@ -1297,13 +1372,11 @@ class FrappeSDK {
       for (final entry in results.entries) {
         final err = entry.value.error;
         if (err != null && err.isNotEmpty) {
-          // ignore: avoid_print
-          print('FrappeSDK: forcePullAll(${entry.key}) failed — $err');
+          debugPrint('FrappeSDK: forcePullAll(${entry.key}) failed — $err');
         }
       }
     } catch (e, st) {
-      // ignore: avoid_print
-      print('FrappeSDK: forcePullAll failed — $e\n$st');
+      debugPrint('FrappeSDK: forcePullAll failed — $e\n$st');
     }
     _syncCompleteController?.add(null);
   }

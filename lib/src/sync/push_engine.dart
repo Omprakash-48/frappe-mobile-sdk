@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:math';
 
 import 'package:flutter/foundation.dart';
 import 'package:sqflite/sqflite.dart';
@@ -23,6 +24,7 @@ import 'sync_state_notifier.dart';
 import 'tier_computer.dart';
 import 'three_way_merge.dart';
 import 'uuid_rewriter.dart';
+import '../utils/uuid_pattern.dart';
 
 /// Sends a push request. [method] is one of POST / PUT / SUBMIT / CANCEL /
 /// DELETE — the consumer maps it to the right Frappe endpoint. [payload]
@@ -104,6 +106,19 @@ class PushEngine {
   /// when [writeQueueResolver] is non-null.
   final Map<String, WriteQueue> _writeQueues = {};
 
+  /// RNG for backoff jitter. Deadlock victims that retry on a fixed
+  /// schedule re-collide in lockstep; jitter spreads them out.
+  final Random _rng = Random();
+
+  /// Returns [base] plus up to +50% random jitter. A zero base (tests)
+  /// yields zero so suites stay instant; a real backoff (2s/5s/10s) is
+  /// spread across a window so concurrent retries don't re-collide.
+  Duration _withJitter(Duration base) {
+    if (base == Duration.zero) return base;
+    final extraMs = (base.inMilliseconds * 0.5 * _rng.nextDouble()).round();
+    return base + Duration(milliseconds: extraMs);
+  }
+
   PushEngine({
     required this.db,
     required this.outboxDao,
@@ -133,20 +148,49 @@ class PushEngine {
     ],
   }) : dependencyScanner = dependencyScanner ?? _defaultDependencyScanner;
 
+  bool _running = false;
+  bool _rerunRequested = false;
+
   /// Drains the outbox once. Call this on user save (debounced), on
   /// connectivity restore, on app resume, or via SyncController.syncNow().
+  ///
+  /// Reentrancy guard: multiple triggers can fire concurrently (a user save
+  /// racing a connectivity restore racing syncNow). Without serialization
+  /// each call independently resets in_flight rows back to pending and
+  /// re-fetches the outbox, dispatching the same row twice in parallel
+  /// (PR#36 round-4 B1). A concurrent caller does not start a second drain;
+  /// it requests exactly one more drain after the current one finishes, so
+  /// work enqueued mid-drain is still picked up.
   Future<void> runOnce() async {
+    if (_running) {
+      _rerunRequested = true;
+      return;
+    }
+    _running = true;
     notifier.value = notifier.value.copyWith(isPushing: true);
     try {
-      // Resume any in_flight rows left over from a crash mid-dispatch.
-      await outboxDao.resetInFlightToPending();
+      do {
+        _rerunRequested = false;
+        await _drainOnce();
+      } while (_rerunRequested);
+    } finally {
+      _running = false;
+      notifier.value = notifier.value.copyWith(isPushing: false);
+    }
+  }
 
-      // Supersede pass — for any (doctype, mobile_uuid, operation) tuple
-      // with both a `failed` row AND a newer `pending` row, delete the
-      // older failed row directly. Keeps the outbox a true pending-work-
-      // only table (Invariant 2) and avoids a redundant retry that the
-      // newer pending row already covers.
-      await db.execute('''
+  /// One full drain pass over the outbox. Always invoked under the
+  /// [runOnce] reentrancy guard — never call directly.
+  Future<void> _drainOnce() async {
+    // Resume any in_flight rows left over from a crash mid-dispatch.
+    await outboxDao.resetInFlightToPending();
+
+    // Supersede pass — for any (doctype, mobile_uuid, operation) tuple
+    // with both a `failed` row AND a newer `pending` row, delete the
+    // older failed row directly. Keeps the outbox a true pending-work-
+    // only table (Invariant 2) and avoids a redundant retry that the
+    // newer pending row already covers.
+    await db.execute('''
         DELETE FROM outbox
          WHERE id IN (
            SELECT older.id
@@ -161,34 +205,64 @@ class PushEngine {
          )
       ''');
 
-      final pending = await outboxDao.findByState(OutboxState.pending);
-      if (pending.isEmpty) return;
+    final pending = await outboxDao.findByState(OutboxState.pending);
+    if (pending.isEmpty) return;
 
-      // Precompute real dependencies by scanning each pending row's
-      // `docs__<doctype>` mirror (+ children) for `<field>__is_local=1`
-      // Link values. Without this the default scanner returns `[]`
-      // (no `payload` column on outbox), and TierComputer collapses
-      // every row into tier 0 — racing parent INSERTs against dependent
-      // child INSERTs whose UuidRewriter then sees the parent's
-      // `server_name` as still-null and throws BlockedByUpstream.
-      final depsByRowId = <int, List<String>>{};
-      for (final row in pending) {
-        depsByRowId[row.id] = await _scanLocalDepsFor(row);
-      }
-
-      final tiers = TierComputer.compute(
-        rows: pending,
-        dependenciesForRow: (r) => depsByRowId[r.id] ?? dependencyScanner(r),
-      );
-
-      for (final tier in tiers) {
-        await Future.wait(
-          tier.map((r) => pool.submit<void>(() => _process(r))),
-        );
-      }
-    } finally {
-      notifier.value = notifier.value.copyWith(isPushing: false);
+    // Precompute real dependencies by scanning each pending row's
+    // `docs__<doctype>` mirror (+ children) for `<field>__is_local=1`
+    // Link values. Without this the default scanner returns `[]`
+    // (no `payload` column on outbox), and TierComputer collapses
+    // every row into tier 0 — racing parent INSERTs against dependent
+    // child INSERTs whose UuidRewriter then sees the parent's
+    // `server_name` as still-null and throws BlockedByUpstream.
+    final depsByRowId = <int, List<String>>{};
+    for (final row in pending) {
+      depsByRowId[row.id] = await _scanLocalDepsFor(row);
     }
+
+    final tiers = TierComputer.compute(
+      rows: pending,
+      dependenciesForRow: (r) => depsByRowId[r.id] ?? dependencyScanner(r),
+    );
+
+    for (final tier in tiers) {
+      await Future.wait(_dispatchUnits(tier).map((u) => pool.submit<void>(u)));
+    }
+  }
+
+  /// Splits a dispatch tier into independently-runnable units. INSERT rows
+  /// that share a doctype are chained into ONE sequential unit so the
+  /// server increments that doctype's naming-series counter (`tabSeries`)
+  /// one row at a time — N concurrent same-series INSERTs deadlock on that
+  /// counter row (MySQL/MariaDB 1213). Rows of different doctypes, and all
+  /// non-INSERT operations (which don't touch `tabSeries`), stay separate
+  /// units so cross-doctype throughput is preserved; the [pool] still caps
+  /// overall concurrency. Tiering already guarantees rows within a tier are
+  /// mutually independent, so the order within a same-doctype chain is
+  /// arbitrary but always safe.
+  List<Future<void> Function()> _dispatchUnits(List<OutboxRow> tier) {
+    final insertsByDoctype = <String, List<OutboxRow>>{};
+    final units = <Future<void> Function()>[];
+    for (final r in tier) {
+      if (r.operation == OutboxOperation.insert) {
+        (insertsByDoctype[r.doctype] ??= <OutboxRow>[]).add(r);
+      } else {
+        units.add(() => _process(r));
+      }
+    }
+    for (final group in insertsByDoctype.values) {
+      if (group.length == 1) {
+        final only = group.first;
+        units.add(() => _process(only));
+      } else {
+        units.add(() async {
+          for (final r in group) {
+            await _process(r);
+          }
+        });
+      }
+    }
+    return units;
   }
 
   Future<void> _process(OutboxRow row, {bool mergeAttempted = false}) async {
@@ -225,6 +299,15 @@ class PushEngine {
       await outboxDao.markFailed(
         row.id,
         errorCode: ErrorCode.TIMEOUT,
+        errorMessage: e.message,
+      );
+    } on DeadlockError catch (e) {
+      // All deadlock retries exhausted. Record as NETWORK (the retryable
+      // transient bucket, via toErrorCode) — not UNKNOWN — so the error UI
+      // groups it under retryAll for a later, less-contended attempt.
+      await outboxDao.markFailed(
+        row.id,
+        errorCode: e.toErrorCode(),
         errorMessage: e.message,
       );
     } on ServerRejection catch (e) {
@@ -344,14 +427,22 @@ class PushEngine {
         lastTransient = e;
       } on TimeoutError catch (e) {
         lastTransient = e;
+      } on DeadlockError catch (e) {
+        // Transient server contention (e.g. concurrent naming-series
+        // INSERTs racing on `tabSeries`). The deadlocked transaction rolled
+        // back, so nothing committed — retry the whole request after a
+        // jittered delay. Without this branch the deadlock escaped as a raw
+        // ApiException to `_process`'s terminal `markFailed(UNKNOWN)`.
+        lastTransient = e;
       }
       if (attempt < networkBackoff.length) {
-        await Future<void>.delayed(networkBackoff[attempt]);
+        await Future<void>.delayed(_withJitter(networkBackoff[attempt]));
       }
     }
     // Re-raise the last transient so the caller's catch-block records it.
     if (lastTransient is NetworkError) throw lastTransient;
     if (lastTransient is TimeoutError) throw lastTransient;
+    if (lastTransient is DeadlockError) throw lastTransient;
     throw NetworkError(message: 'unknown network failure');
   }
 
@@ -679,10 +770,17 @@ class PushEngine {
       final name = f.fieldname;
       if (name == null) continue;
       if (f.fieldtype != 'Link' && f.fieldtype != 'Dynamic Link') continue;
-      if ((row['${name}__is_local'] as int?) != 1) continue;
       final v = row[name]?.toString();
       if (v == null || v.isEmpty) continue;
-      out.add(v);
+      // Treat a Link value as a local dependency when the form flagged it
+      // (`__is_local == 1`) OR when the value is shaped like a mobile_uuid.
+      // The shape check mirrors [UuidRewriter] so tiering and rewriting
+      // agree: without it, a UUID-valued Link populated by a non-picker
+      // path (no `__is_local`) is invisible to the dependency scan, lands
+      // in the same tier as its parent, and races — exactly the
+      // "not synced in order" symptom.
+      final flagged = (row['${name}__is_local'] as int?) == 1;
+      if (flagged || looksLikeMobileUuid(v)) out.add(v);
     }
   }
 }

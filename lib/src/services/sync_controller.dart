@@ -6,12 +6,23 @@ import '../models/outbox_row.dart';
 import '../sync/sync_state.dart';
 import '../sync/sync_state_notifier.dart';
 import 'retry_priority.dart';
+import '../utils/sdk_log.dart';
 
 /// Choice the user makes on a conflict row in the SyncErrorsScreen.
 /// `pullAndOverwriteLocal` accepts the server snapshot (local edits
 /// discarded); `keepLocalAndRetry` re-queues the row so the push engine
 /// re-fetches the server version and runs ThreeWayMerge again.
 enum ConflictAction { pullAndOverwriteLocal, keepLocalAndRetry }
+
+/// Selects how much of the sync cycle [SyncController.syncNow] runs.
+///
+/// Cost profile (document for app authors choosing a background cadence):
+/// - [pushOnly]  — cheap; one outbox drain. Recommended default for periodic
+///   background wakeups (WorkManager / BGTaskScheduler) on metered networks.
+/// - [pullOnly]  — moderate; reads changed doctypes, no writes.
+/// - [full]      — heaviest; recommended on charge + Wi-Fi, or on explicit
+///   user action.
+enum SyncMode { full, pushOnly, pullOnly }
 
 typedef RunFn = Future<void> Function();
 
@@ -93,12 +104,32 @@ class SyncController {
   SyncState get state => notifier.value;
   Stream<SyncState> get state$ => notifier.stream;
 
-  /// Pull then push. Doctypes deferred during the pull (because a push
-  /// was active for them) are re-pulled after the push completes — SIG-2.
-  /// Used by `Sync now` button + connectivity-restore hooks. No-ops while
-  /// paused.
-  Future<void> syncNow() async {
+  /// Runs the sync cycle selected by [mode]. No-ops while paused.
+  ///
+  /// - [SyncMode.full] (default): pull → push → re-pull the doctypes the pull
+  ///   deferred because a push was active for them (SIG-2). Used by the
+  ///   `Sync now` button + connectivity-restore hooks.
+  /// - [SyncMode.pushOnly]: drain the outbox only. Safe to run concurrently
+  ///   with a foreground pull (#43 closes the race). No deferred handling.
+  /// - [SyncMode.pullOnly]: pull only; no push. The deferred set is NOT
+  ///   re-pulled here — without a push to clear those rows an immediate
+  ///   re-pull would just defer again; they are picked up by the next full
+  ///   sync.
+  ///
+  /// Best-effort: a failed pull still lets push drain in [SyncMode.full];
+  /// failures are surfaced via [SyncState], not thrown.
+  Future<void> syncNow({SyncMode mode = SyncMode.full}) async {
     if (notifier.value.isPaused) return;
+
+    if (mode == SyncMode.pushOnly) {
+      try {
+        await runPush();
+      } catch (e, st) {
+        sdkLog('SyncController.syncNow(pushOnly): runPush failed — $e\n$st');
+      }
+      return;
+    }
+
     Set<String> deferred = const <String>{};
     try {
       deferred = await runPull();
@@ -107,16 +138,25 @@ class SyncController {
       // when the server-read side has issues. PullEngine.run's own
       // finally already resets `isPulling`. syncNow is best-effort:
       // surface via SyncState.lastError, not by throwing.
-      // ignore: avoid_print
-      print('SyncController.syncNow: runPull failed — $e\n$st');
+      sdkLog('SyncController.syncNow: runPull failed — $e\n$st');
     }
+
+    if (mode == SyncMode.pullOnly) {
+      if (deferred.isNotEmpty) {
+        sdkLog(
+          'SyncController.syncNow(pullOnly): ${deferred.length} doctype(s) '
+          'deferred for active push; left for next full sync — $deferred',
+        );
+      }
+      return;
+    }
+
     try {
       await runPush();
     } catch (e, st) {
       // PushEngine.runOnce wraps its body in try/finally, so isPushing
       // is already reset. Same best-effort contract as the pull above.
-      // ignore: avoid_print
-      print('SyncController.syncNow: runPush failed — $e\n$st');
+      sdkLog('SyncController.syncNow: runPush failed — $e\n$st');
     }
     if (deferred.isNotEmpty) {
       try {
@@ -124,8 +164,7 @@ class SyncController {
       } catch (e, st) {
         // SIG-2 deferred re-pull is best-effort; the doctypes will be
         // picked up on the next syncNow when push activity has settled.
-        // ignore: avoid_print
-        print(
+        sdkLog(
           'SyncController.syncNow: runPullForDoctypes($deferred) failed — '
           '$e\n$st',
         );
@@ -226,10 +265,10 @@ class SyncController {
           try {
             await clearLocalConflict!(row.doctype, row.mobileUuid);
           } catch (e, st) {
-            // Best-effort. The outbox row still gets closed; logging
-            // surfaces the cleanup failure without blocking resolution.
-            // ignore: avoid_print
-            print(
+            // Best-effort. The outbox row still gets closed; the debug log
+            // surfaces the cleanup failure without blocking resolution
+            // (sdkLog is a no-op in release).
+            sdkLog(
               'SyncController.resolveConflict: clearLocalConflict failed '
               'for ${row.doctype}/${row.mobileUuid} — $e\n$st',
             );
@@ -283,8 +322,7 @@ class SyncController {
           );
         }
       } catch (e, st) {
-        // ignore: avoid_print
-        print(
+        sdkLog(
           'SyncController.previewDeleteCascade: blockedBy parse failed — $e\n$st',
         );
         blocked = const {};
