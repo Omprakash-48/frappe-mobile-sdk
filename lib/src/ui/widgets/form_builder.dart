@@ -404,8 +404,35 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
     return normalized;
   }
 
-  static int _tabCount(DocTypeMeta meta) =>
-      meta.fields.where((f) => f.fieldtype == FieldTypes.tabBreak).length;
+  /// The number of tabs [_buildFormStructure] will actually produce for [meta]
+  /// — i.e. the live `_tabs.length`, which is what the [TabController] length
+  /// must match.
+  ///
+  /// A plain count of `Tab Break` fields is NOT equivalent and must not be used
+  /// for the [didUpdateWidget] rebuild guard: [_buildFormStructure] skips
+  /// `hidden` fields (so a hidden Tab Break yields no tab) and synthesises an
+  /// implicit leading "Details" tab when content precedes the first Tab Break.
+  /// Counting raw Tab Break fields would miss both, letting the guard skip a
+  /// needed [TabController] rebuild and crash with a length/`_tabs` mismatch.
+  static int _effectiveTabCount(DocTypeMeta meta) {
+    var tabs = 0;
+    var sawContentBeforeFirstTab = false;
+    var inTab = false;
+    for (final field in meta.fields) {
+      if (field.hidden) continue;
+      final type = field.fieldtype;
+      if (type == FieldTypes.tabBreak) {
+        tabs++;
+        inTab = true;
+      } else if (type != FieldTypes.sectionBreak &&
+          type != FieldTypes.columnBreak) {
+        // A real content field outside any tab → implicit "Details" tab.
+        if (!inTab) sawContentBeforeFirstTab = true;
+      }
+    }
+    if (sawContentBeforeFirstTab) tabs++;
+    return tabs;
+  }
 
   void _buildFormStructure() {
     _tabs.clear();
@@ -1116,7 +1143,7 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
       widget.initialData,
     );
     final metaChanged = oldWidget.meta.name != widget.meta.name ||
-        _tabCount(oldWidget.meta) != _tabCount(widget.meta);
+        _effectiveTabCount(oldWidget.meta) != _effectiveTabCount(widget.meta);
     if (initialDataChanged || metaChanged) {
       _progressSubscription?.cancel();
       _linkFieldCoordinator?.dispose();
