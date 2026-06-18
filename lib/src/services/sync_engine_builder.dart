@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/foundation.dart';
@@ -21,6 +22,7 @@ import '../sync/push_engine.dart';
 import '../sync/push_error.dart';
 import '../sync/error_log_collector.dart';
 import '../sync/mobile_error_poster.dart';
+import '../sync/mobile_error_record.dart' show excTypeFromBody;
 import '../sync/sync_state_notifier.dart';
 import 'error_capture.dart';
 import 'session_user_service.dart';
@@ -49,6 +51,125 @@ bool isDeadlockApiException(ApiException e) {
       haystack.contains('deadlock found') ||
       haystack.contains('(1213,') ||
       haystack.contains('error 1213');
+}
+
+/// Bridges the API-layer `FrappeException` hierarchy
+/// (`ApiException`/`ValidationException`/`AuthException`/`NetworkException`,
+/// thrown by `RestHelper`) onto the push-layer [PushError] hierarchy that
+/// [PushEngine] classifies. Without this, every server rejection escaped as a
+/// raw `ApiException` to the engine's catch-all `markFailed(UNKNOWN)`, so the
+/// timestamp auto-merge, duplicate reconcile, terminal→`paused`, and
+/// network-retry paths were all unreachable.
+///
+/// Routing is by Frappe `exc_type` first (most precise), then HTTP status.
+/// Anything unrecognised becomes a [ServerRejection], whose `toErrorCode()`
+/// maps known `exc_type`s (PermissionError/ValidationError/MandatoryError) and
+/// otherwise falls back to status — preserving the prior `UNKNOWN` outcome for
+/// genuinely unclassifiable failures.
+PushError frappeToPushError({
+  int? status,
+  required String? excType,
+  required String rawBody,
+}) {
+  switch (excType) {
+    case 'TimestampMismatchError':
+      return TimestampMismatchError();
+    case 'DuplicateEntryError':
+      return DuplicateEntryError();
+    case 'LinkExistsError':
+      return LinkExistsError(linked: const {});
+  }
+  // 409 with no exc_type: optimistic-lock mismatch is the common case.
+  if (excType == null && status == 409) {
+    return TimestampMismatchError();
+  }
+  return ServerRejection(status: status ?? 500, rawBody: rawBody);
+}
+
+/// `exc_type` from a stamped FrappeException's response body, or null when
+/// absent ([excTypeFromBody] returns '' for "not present"; normalise to null
+/// so [frappeToPushError]'s status fallbacks engage).
+String? _excTypeOf(FrappeException e) {
+  final raw = excTypeFromBody(e.responseBodyRaw);
+  return raw.isEmpty ? null : raw;
+}
+
+/// The real HTTP dispatch used by [SyncEngineBuilder]'s push engine. Routes a
+/// push operation to the matching `DocumentService` call and translates the
+/// API-layer `FrappeException` it may throw onto the push-layer [PushError]
+/// the engine classifies. [onFailure] (the per-drain error-log capture) is
+/// invoked for terminal HTTP failures before the translated error is thrown —
+/// identical to the prior capture-then-rethrow, so error-log behaviour is
+/// unchanged. Top-level (not a closure) so tests can exercise the exact
+/// production path instead of a mirror.
+Future<Map<String, dynamic>> dispatchHttpSend(
+  FrappeClient client,
+  String method,
+  Map<String, Object?> payload,
+  String? serverName, {
+  void Function(FrappeException e, String method, Map<String, Object?> payload)?
+  onFailure,
+}) async {
+  final doctype = payload['doctype'] as String;
+  try {
+    switch (method) {
+      case 'POST':
+        return await client.document.createDocument(
+          doctype,
+          Map<String, dynamic>.from(payload),
+        );
+      case 'PUT':
+        return await client.document.updateDocument(
+          doctype,
+          serverName!,
+          Map<String, dynamic>.from(payload),
+        );
+      case 'SUBMIT':
+        return await client.document.submitDocument(doctype, serverName!);
+      case 'CANCEL':
+        return await client.document.cancelDocument(doctype, serverName!);
+      case 'DELETE':
+        await client.document.deleteDocument(doctype, serverName!);
+        return const <String, dynamic>{};
+      default:
+        throw StateError('dispatchHttpSend: unknown method "$method"');
+    }
+  } on ApiException catch (e) {
+    // A server-side deadlock is transient — translate it to the retryable
+    // [DeadlockError] so PushEngine's attempt loop retries it (with jitter).
+    // Deadlocks are retried, not logged.
+    if (isDeadlockApiException(e)) {
+      throw DeadlockError(message: e.message);
+    }
+    onFailure?.call(e, method, payload);
+    throw frappeToPushError(
+      status: e.statusCode,
+      excType: _excTypeOf(e),
+      rawBody: e.responseBodyRaw ?? jsonEncode({'message': e.message}),
+    );
+  } on ValidationException catch (e) {
+    // HTTP 417 validate()-hook failure. The body may carry a more specific
+    // exc_type (MandatoryError/LinkExistsError).
+    onFailure?.call(e, method, payload);
+    throw frappeToPushError(
+      status: 417,
+      excType: _excTypeOf(e),
+      rawBody: e.responseBodyRaw ?? jsonEncode({'exc_type': 'ValidationError'}),
+    );
+  } on AuthException catch (e) {
+    // HTTP 401/403 — terminal permission rejection.
+    onFailure?.call(e, method, payload);
+    throw frappeToPushError(
+      status: e.statusCode ?? 403,
+      excType: 'PermissionError',
+      rawBody:
+          e.responseBodyRaw ??
+          jsonEncode({'exc_type': 'PermissionError', 'message': e.message}),
+    );
+  } on NetworkException catch (e) {
+    // Transient connectivity failure — retryable bucket, not logged (spec §6).
+    throw NetworkError(message: e.message);
+  }
 }
 
 /// Bundle of the engines + façade that `FrappeSDK` stashes after wiring.
@@ -107,8 +228,10 @@ class SyncEngineBuilder {
     final metaDao = database.doctypeMetaDao;
 
     // Side-channels a terminal push failure into the error-log collector.
-    // Pure-additive: the caller still rethrows the original exception, so
-    // control flow and classification are unchanged.
+    // Wired as [dispatchHttpSend]'s `onFailure`: it runs (best-effort, never
+    // throws) on the original FrappeException *before* that exception is
+    // translated to a PushError and thrown. So error-log capture is
+    // independent of — and unchanged by — the PushError classification.
     void captureSendFailure(
       FrappeException e,
       String method,
@@ -129,56 +252,21 @@ class SyncEngineBuilder {
     }
 
     // ----- HTTP send callback -----
+    // Delegates to the top-level [dispatchHttpSend] (so tests exercise the
+    // real path, not a mirror). The error-log capture is wired as `onFailure`,
+    // preserving the prior capture-then-throw behaviour; `dispatchHttpSend`
+    // then translates the FrappeException onto the engine's PushError types.
     Future<Map<String, dynamic>> send(
       String method,
       Map<String, Object?> payload,
       String? serverName,
-    ) async {
-      final doctype = payload['doctype'] as String;
-      try {
-        switch (method) {
-          case 'POST':
-            return await client.document.createDocument(
-              doctype,
-              Map<String, dynamic>.from(payload),
-            );
-          case 'PUT':
-            return await client.document.updateDocument(
-              doctype,
-              serverName!,
-              Map<String, dynamic>.from(payload),
-            );
-          case 'SUBMIT':
-            return await client.document.submitDocument(doctype, serverName!);
-          case 'CANCEL':
-            return await client.document.cancelDocument(doctype, serverName!);
-          case 'DELETE':
-            await client.document.deleteDocument(doctype, serverName!);
-            return const <String, dynamic>{};
-          default:
-            throw StateError(
-              'SyncEngineBuilder.send: unknown method "$method"',
-            );
-        }
-      } on ApiException catch (e) {
-        // A server-side deadlock is transient — translate it to the
-        // retryable [DeadlockError] so PushEngine's attempt loop retries it
-        // (with jitter) instead of letting the raw ApiException fall through
-        // to the terminal `markFailed(UNKNOWN)` path. Deadlocks are retried,
-        // not logged. All other ApiExceptions propagate unchanged.
-        if (isDeadlockApiException(e)) {
-          throw DeadlockError(message: e.message);
-        }
-        captureSendFailure(e, method, payload);
-        rethrow;
-      } on ValidationException catch (e) {
-        captureSendFailure(e, method, payload);
-        rethrow;
-      } on AuthException catch (e) {
-        captureSendFailure(e, method, payload);
-        rethrow;
-      }
-    }
+    ) => dispatchHttpSend(
+      client,
+      method,
+      payload,
+      serverName,
+      onFailure: captureSendFailure,
+    );
 
     // ----- serverFetcher -----
     Future<Map<String, dynamic>> serverFetcher(
