@@ -21,8 +21,10 @@ void main() {
       titleField: 'customer_name',
       fields: [f('customer_name', 'Data')],
     );
-    for (final s
-        in buildParentSchemaDDL(custMeta, tableName: 'docs__customer')) {
+    for (final s in buildParentSchemaDDL(
+      custMeta,
+      tableName: 'docs__customer',
+    )) {
       await db.execute(s);
     }
     await db.insert('docs__customer', {
@@ -46,10 +48,7 @@ void main() {
       name: 'SO',
       fields: [f('customer', 'Link', options: 'Customer')],
     );
-    final row = <String, Object?>{
-      'customer': 'u-new',
-      'customer__is_local': 1,
-    };
+    final row = <String, Object?>{'customer': 'u-new', 'customer__is_local': 1};
     final out = await LinkDecorator.decorate(
       db: db,
       parentMeta: soMeta,
@@ -128,10 +127,7 @@ void main() {
       name: 'SO',
       fields: [f('item', 'Link', options: 'Item')], // no docs__item created
     );
-    final row = <String, Object?>{
-      'item': 'ITEM-1',
-      'item__is_local': 0,
-    };
+    final row = <String, Object?>{'item': 'ITEM-1', 'item__is_local': 0};
     final out = await LinkDecorator.decorate(
       db: db,
       parentMeta: soMeta,

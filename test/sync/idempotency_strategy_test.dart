@@ -7,8 +7,7 @@ DocTypeMeta meta({
   String name = 'X',
   String? autoname,
   List<DocField> fields = const [],
-}) =>
-    DocTypeMeta(name: name, autoname: autoname, fields: fields);
+}) => DocTypeMeta(name: name, autoname: autoname, fields: fields);
 
 void main() {
   test('L1 when autoname=field:mobile_uuid', () {

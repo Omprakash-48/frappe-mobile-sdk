@@ -145,11 +145,7 @@ class OfflineRepository {
           final ddls = isChild
               ? buildChildSchemaDDL(meta, tableName: tableName)
               : buildParentSchemaDDL(meta, tableName: tableName);
-          await db.transaction((txn) async {
-            for (final stmt in ddls) {
-              await txn.execute(stmt);
-            }
-          });
+          await _executeDDL(ddls);
           try {
             await _database.doctypeMetaDao.setTableName(doctype, tableName);
           } catch (e, st) {
@@ -283,8 +279,9 @@ class OfflineRepository {
 
   /// Outbox rows for a single document (matched by `mobile_uuid`),
   /// filtered to states the user can act on: `failed`, `blocked`,
-  /// `conflict`. `done`, `pending`, and `inFlight` are intentionally
-  /// excluded — only stuck-and-needs-attention rows reach the UI.
+  /// `conflict`, `paused`. `done`, `pending`, and `inFlight` are
+  /// intentionally excluded — only stuck-and-needs-attention rows reach
+  /// the UI.
   Future<List<OutboxRow>> getSyncErrorsForDoc({
     required String doctype,
     required String mobileUuid,
@@ -297,7 +294,8 @@ class OfflineRepository {
           (r) =>
               r.state == OutboxState.failed ||
               r.state == OutboxState.blocked ||
-              r.state == OutboxState.conflict,
+              r.state == OutboxState.conflict ||
+              r.state == OutboxState.paused,
         )
         .toList();
   }
@@ -428,7 +426,19 @@ class OfflineRepository {
             opt != null &&
             opt.isNotEmpty) {
           final cm = await _loadMeta(opt);
-          if (cm != null) childMetasByDoctype[opt] = cm;
+          if (cm != null) {
+            childMetasByDoctype[opt] = cm;
+          } else {
+            // Match LocalWriter.writeParent's loud-on-failure pattern —
+            // a missing child meta means the save will silently drop the
+            // child rows, and visibility into that is critical when
+            // debugging "child data went missing" reports.
+            developer.log(
+              'OfflineRepository.saveDocument: child meta missing for '
+              '$opt (skipping child rows for this fieldtype)',
+              name: 'OfflineRepository',
+            );
+          }
         }
       }
     }
@@ -701,6 +711,21 @@ class OfflineRepository {
     required String serverName,
     required Map<String, dynamic> data,
   }) async {
+    await applyServerPage(
+      doctype: doctype,
+      rows: [data],
+    );
+  }
+
+  /// Applies a page of server-pulled snapshots via PullApply.
+  /// Used by SyncService to batch apply a whole page of data.
+  Future<void> applyServerPage({
+    required String doctype,
+    required List<Map<String, dynamic>> rows,
+    bool isInitialSync = false,
+  }) async {
+    if (rows.isEmpty) return;
+    
     final meta = await _loadMeta(doctype);
     if (meta == null) {
       // Meta absent means the DocType schema was never synced — we cannot
@@ -709,8 +734,8 @@ class OfflineRepository {
       // error message) rather than silently skipping the apply and marking
       // the outbox row as done.
       throw StateError(
-        'OfflineRepository.applyServerDocument: meta missing for $doctype; '
-        'cannot apply server snapshot for $serverName',
+        'OfflineRepository.applyServerPage: meta missing for $doctype; '
+        'cannot apply server snapshot for ${rows.length} rows',
       );
     }
     final tableName = normalizeDoctypeTableName(doctype);
@@ -721,8 +746,23 @@ class OfflineRepository {
       parentMeta: meta,
       parentTable: tableName,
       childMetasByFieldname: childMetas,
-      rows: [data],
+      rows: rows,
+      isInitialSync: isInitialSync,
     );
+  }
+
+  /// Runs a list of DDL statements inside a single SQLite transaction.
+  /// Shared by [ensureSchemaForClosure], [_resolveChildMetas] (child-table
+  /// fallback create), and [_ensurePerDoctypeTable] so any future change
+  /// to DDL execution (retry, logging, savepoint wrapping) only needs to
+  /// happen in one place.
+  Future<void> _executeDDL(List<String> ddls) async {
+    final db = _database.rawDatabase;
+    await db.transaction((txn) async {
+      for (final stmt in ddls) {
+        await txn.execute(stmt);
+      }
+    });
   }
 
   Future<DocTypeMeta?> _loadMeta(String doctype) async {
@@ -790,12 +830,9 @@ class OfflineRepository {
       if (!_ensuredTables.contains(childTable)) {
         final db = _database.rawDatabase;
         if (!await sqliteTableExists(db, childTable)) {
-          final ddls = buildChildSchemaDDL(childMeta, tableName: childTable);
-          await db.transaction((txn) async {
-            for (final stmt in ddls) {
-              await txn.execute(stmt);
-            }
-          });
+          await _executeDDL(
+            buildChildSchemaDDL(childMeta, tableName: childTable),
+          );
         }
         _ensuredTables.add(childTable);
       }
@@ -815,12 +852,7 @@ class OfflineRepository {
     if (_ensuredTables.contains(tableName)) return;
     final db = _database.rawDatabase;
     if (!await sqliteTableExists(db, tableName)) {
-      final ddls = buildParentSchemaDDL(meta, tableName: tableName);
-      await db.transaction((txn) async {
-        for (final stmt in ddls) {
-          await txn.execute(stmt);
-        }
-      });
+      await _executeDDL(buildParentSchemaDDL(meta, tableName: tableName));
       // Persist the table-name mapping so future code (UnifiedResolver
       // etc.) can route through DoctypeMetaDao.getTableName(...).
       try {

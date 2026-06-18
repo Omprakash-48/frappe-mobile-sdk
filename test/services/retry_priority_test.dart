@@ -30,10 +30,18 @@ void main() {
 
   test('preserves created_at order within same priority bucket', () {
     final rows = [
-      row(2, OutboxState.failed, ErrorCode.NETWORK,
-          at: DateTime.utc(2026, 1, 2)),
-      row(1, OutboxState.failed, ErrorCode.NETWORK,
-          at: DateTime.utc(2026, 1, 1)),
+      row(
+        2,
+        OutboxState.failed,
+        ErrorCode.NETWORK,
+        at: DateTime.utc(2026, 1, 2),
+      ),
+      row(
+        1,
+        OutboxState.failed,
+        ErrorCode.NETWORK,
+        at: DateTime.utc(2026, 1, 1),
+      ),
     ];
     final ordered = RetryPriority.sort(rows);
     expect(ordered.map((r) => r.id).toList(), [1, 2]);

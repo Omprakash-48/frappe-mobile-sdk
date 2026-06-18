@@ -16,6 +16,10 @@ export 'src/models/document.dart';
 export 'src/models/mobile_form_name.dart';
 export 'src/models/workflow_transition.dart';
 export 'src/models/link_filter_result.dart';
+// #53 (A5): outbox types on the public surface so app teams build type-safe
+// outbox UI without reaching into `src/` via implementation_imports.
+export 'src/models/outbox_row.dart'
+    show OutboxRow, OutboxState, OutboxOperation, ErrorCode, ErrorCodeHelpers;
 
 // Database
 export 'src/database/app_database.dart';
@@ -73,6 +77,13 @@ export 'src/services/offline_transition_service.dart'
 export 'src/ui/offline_transition_screen.dart' show OfflineTransitionScreen;
 export 'src/ui/offline_transition_guard.dart' show OfflineTransitionGuard;
 
+// Security / tamper-detection
+export 'src/security/security_check.dart';
+export 'src/security/security_exception.dart';
+export 'src/security/security_event.dart';
+export 'src/security/frappe_security_service.dart';
+export 'src/security/frappe_security_guard.dart';
+
 // UI Components
 export 'src/ui/app_guard.dart';
 export 'src/ui/login_screen.dart';
@@ -95,6 +106,9 @@ export 'src/ui/widgets/fields/button_field.dart';
 export 'src/ui/widgets/fields/numeric_field.dart';
 export 'src/ui/widgets/fields/link_field.dart';
 export 'src/ui/widgets/fields/phone_field.dart';
+export 'src/ui/widgets/fields/link_field_picker_mode.dart';
+export 'src/ui/widgets/fields/child_table_field.dart'
+    show ChildTableFormBuilder;
 
 // Constants
 export 'src/constants/field_types.dart';
@@ -121,6 +135,7 @@ export 'src/services/sync_controller.dart'
 export 'src/sync/sync_state.dart'
     show SyncState, DoctypeSyncState, QueueSummary, SyncErrorSummary;
 export 'src/sync/sync_state_notifier.dart' show SyncStateNotifier;
+export 'src/sync/push_engine.dart' show PayloadTransformerFn;
 export 'src/ui/widgets/sync_status_bar.dart' show SyncStatusBar;
 export 'src/ui/widgets/document_list_filter_chip.dart'
     show DocumentListFilterChip, DocumentListFilter, DocumentListFilterCounts;
@@ -135,3 +150,4 @@ export 'src/ui/dialogs/force_logout_confirm.dart' show showForceLogoutConfirm;
 // Utils (debug tracer + user-friendly errors)
 export 'src/api/utils.dart' show extractErrorMessage, toUserFriendlyMessage;
 export 'src/utils/api_tracer.dart' show ApiTracer;
+export 'src/utils/translate.dart';

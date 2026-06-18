@@ -29,8 +29,9 @@ Future<DeleteCascadeAction> showDeleteCascadePrompt(
         children: [
           const Text('This record is linked to other records:'),
           const SizedBox(height: 8),
-          ...blockedBy.entries
-              .map((e) => Text('  • ${e.key}: ${e.value.length}')),
+          ...blockedBy.entries.map(
+            (e) => Text('  • ${e.key}: ${e.value.length}'),
+          ),
           const SizedBox(height: 12),
           const Text('Delete all of these too?'),
         ],
@@ -41,13 +42,11 @@ Future<DeleteCascadeAction> showDeleteCascadePrompt(
           child: const Text('Cancel'),
         ),
         TextButton(
-          onPressed: () =>
-              Navigator.pop(c, DeleteCascadeAction.fixManually),
+          onPressed: () => Navigator.pop(c, DeleteCascadeAction.fixManually),
           child: const Text('Fix manually'),
         ),
         ElevatedButton(
-          onPressed: () =>
-              Navigator.pop(c, DeleteCascadeAction.deleteAll),
+          onPressed: () => Navigator.pop(c, DeleteCascadeAction.deleteAll),
           style: ElevatedButton.styleFrom(backgroundColor: Colors.red),
           child: const Text('Delete all'),
         ),

@@ -286,4 +286,49 @@ void main() {
       expect(out['logo'], 'pending:42');
     },
   );
+
+  // Regression: fileName! at attachment_pipeline.dart:124 threw a null-assert
+  // when a row had serverFileUrl set (upload already done) but serverFileName
+  // missing (corrupt / legacy row). The fix uses fileName ?? fileUrl.
+  test(
+    'does not crash when serverFileUrl is set but serverFileName is null',
+    () async {
+      final id = await dao.enqueue(
+        parentDoctype: 'Patient',
+        parentUuid: 'uuid-parent',
+        parentFieldname: 'attachment',
+        topParentDoctype: 'Patient',
+        topParentUuid: 'uuid-parent',
+        localPath: '/fake/path.jpg',
+        fileName: 'path.jpg',
+        isPrivate: false,
+      );
+      // Simulate a legacy/corrupt row: serverFileUrl present, serverFileName null.
+      await db.rawUpdate(
+        'UPDATE pending_attachments SET server_file_url = ?, state = ? WHERE id = ?',
+        ['/files/path.jpg', 'uploading', id],
+      );
+
+      int uploadCalls = 0;
+      final pipeline = AttachmentPipeline(
+        dao: dao,
+        uploader: (file, {doctype, docname, fileName, isPrivate = false}) async {
+          uploadCalls++;
+          return {'file_url': '/files/path.jpg', 'name': 'path.jpg'};
+        },
+        fileFromPath: (p) => _FakeFile(p),
+        // Zero-duration backoff so the test doesn't sleep between retry attempts.
+        backoff: const [Duration.zero],
+      );
+
+      // Must not throw — should fall back to fileUrl as the fileName.
+      await expectLater(
+        pipeline.uploadPendingForTopParent('uuid-parent'),
+        completes,
+      );
+      // Upload must NOT be re-attempted (fileUrl already set).
+      expect(uploadCalls, 0,
+          reason: 'must not re-upload when serverFileUrl is already set');
+    },
+  );
 }

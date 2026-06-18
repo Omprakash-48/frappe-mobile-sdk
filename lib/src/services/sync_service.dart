@@ -60,6 +60,8 @@ class SyncService {
   /// (`pull_engine.dart:133`). Null in tests / when unwired → no defer.
   final Future<bool> Function(String doctype)? _hasActivePush;
 
+  final int pageSize;
+
   SyncService(
     this._client,
     this._repository,
@@ -72,6 +74,7 @@ class SyncService {
     OfflineModeNotifier? offlineModeNotifier,
     Future<void> Function()? pushRunner,
     Future<bool> Function(String doctype)? hasActivePush,
+    this.pageSize = 1000,
   }) : _getMobileUuid = getMobileUuid,
        _modeNotifier = offlineModeNotifier ?? OfflineModeNotifier(offlineMode),
        _pushRunner = pushRunner,
@@ -114,14 +117,7 @@ class SyncService {
       sdkLog('SyncService.pushSync: isOnline() threw — $e\n$st');
     }
     if (!online) {
-      return SyncResult(
-        0,
-        0,
-        0,
-        'No internet connection',
-        errors: const [],
-        status: SyncStatus.noConnectivity,
-      );
+      return SyncResult.noConnectivity();
     }
     final runner = _pushRunner;
     if (runner == null) {
@@ -189,14 +185,7 @@ class SyncService {
       return SyncResult.empty(status: SyncStatus.offlineModeDisabled);
     }
     if (!await isOnline()) {
-      return SyncResult(
-        0,
-        0,
-        0,
-        'No internet connection',
-        errors: const [],
-        status: SyncStatus.noConnectivity,
-      );
+      return SyncResult.noConnectivity();
     }
     final result = await _syncMutex.tryProtect(
       () => _pullOneInternal(doctype: doctype, since: since),
@@ -226,14 +215,7 @@ class SyncService {
       return SyncResult.empty(status: SyncStatus.offlineModeDisabled);
     }
     if (!await isOnline()) {
-      return SyncResult(
-        0,
-        0,
-        0,
-        'No internet connection',
-        errors: const [],
-        status: SyncStatus.noConnectivity,
-      );
+      return SyncResult.noConnectivity();
     }
     return _syncMutex.protect(
       () => _pullOneInternal(doctype: doctype, since: since),
@@ -268,17 +250,7 @@ class SyncService {
       };
     }
     if (!await isOnline()) {
-      return {
-        for (final dt in doctypes)
-          dt: SyncResult(
-            0,
-            0,
-            0,
-            'No internet connection',
-            errors: const [],
-            status: SyncStatus.noConnectivity,
-          ),
-      };
+      return {for (final dt in doctypes) dt: SyncResult.noConnectivity()};
     }
     final results = await _syncMutex.tryProtect(() async {
       final out = <String, SyncResult>{};
@@ -393,17 +365,29 @@ class SyncService {
   Future<SyncResult> pullOneInternalForTest({required String doctype}) =>
       _pullOneInternal(doctype: doctype);
 
-  Future<bool> _isChildTable(String doctype) async {
+  /// Reads and parses the persisted meta JSON for [doctype], returning
+  /// null when the row is absent, empty, or fails to decode. The empty
+  /// sentinel `'{}'` is treated as absent (legacy rows from earlier
+  /// schema bumps). Shared by [_isChildTable] and [_doctypeHasChildTables]
+  /// so the null-guard and parse pattern lives in exactly one place
+  /// within this class. Caller is responsible for logging the [where]
+  /// label so the stack trace on a parse failure remains diagnosable.
+  Future<DocTypeMeta?> _loadMetaFromDao(String doctype, String where) async {
     final raw = await _database.doctypeMetaDao.getMetaJson(doctype);
-    if (raw == null || raw.isEmpty || raw == '{}') return false;
+    if (raw == null || raw.isEmpty || raw == '{}') return null;
     try {
       final parsed = jsonDecode(raw) as Map<String, dynamic>;
-      if (parsed.isEmpty) return false;
-      return DocTypeMeta.fromJson(parsed).isTable;
+      if (parsed.isEmpty) return null;
+      return DocTypeMeta.fromJson(parsed);
     } catch (e, st) {
-      sdkLog('SyncService._isChildTable($doctype) parse failed — $e\n$st');
-      return false;
+      sdkLog('SyncService.$where($doctype) parse failed — $e\n$st');
+      return null;
     }
+  }
+
+  Future<bool> _isChildTable(String doctype) async {
+    final meta = await _loadMetaFromDao(doctype, '_isChildTable');
+    return meta?.isTable ?? false;
   }
 
   Future<SyncResult> _pullOneInternal({
@@ -478,8 +462,7 @@ class SyncService {
     // Paginate via `limit_start` until the server returns a short page
     // (fewer rows than requested). Without this, doctypes with > 1000
     // rows (Village, Hamlet, etc.) silently truncate at the first page.
-    // Page size is the API cap, not a UX choice.
-    const int pageSize = 1000;
+    // Page size is configured via SDK initialization.
     // Stable order is required for the cursor to be valid: the server
     // must return the unprocessed suffix in the same order on every
     // call. `name asc` breaks ties when multiple rows share `modified`.
@@ -526,14 +509,13 @@ class SyncService {
         lookahead = fetchPage(start + pageSize);
       }
 
-      // Track the cursor advance for this page so we can persist it
-      // exactly once after the page drains. Updating per-row would
-      // burn extra UPDATE statements without changing crash-safety.
+      // Apply the current page to SQLite. We batch them together so
+      // `PullApply.applyPage` can execute a single transaction block for the
+      // entire page, bypassing per-row overhead.
+      final batchRows = <Map<String, dynamic>>[];
       String? pageLastModified;
       String? pageLastName;
 
-      // Apply the current page to SQLite. When `lookahead` was fired,
-      // this work overlaps with the network request.
       for (final docData in page) {
         if (docData is! Map<String, dynamic>) continue;
         final serverId =
@@ -551,28 +533,44 @@ class SyncService {
           if (modCmp == 0 && serverId.compareTo(cursorName) <= 0) continue;
         }
 
+        batchRows.add(docData);
+        pageLastModified = modifiedAt;
+        pageLastName = serverId;
+      }
+
+      if (batchRows.isNotEmpty) {
+        final batchServerNames = batchRows
+            .map((r) => r['name'] as String?)
+            .whereType<String>()
+            .toList();
         try {
-          await _repository.applyServerDocument(
+          await _repository.applyServerPage(
             doctype: doctype,
-            serverName: serverId,
-            data: docData,
+            rows: batchRows,
+            isInitialSync: !cursorComplete,
           );
-          success++;
-          pageLastModified = modifiedAt;
-          pageLastName = serverId;
+          success += batchRows.length;
         } catch (e, st) {
           sdkLog(
-            'SyncService.pullSync applyServerDocument($doctype/$serverId) failed — $e\n$st',
+            'SyncService.pullSync applyServerPage($doctype) failed for'
+            ' ${batchRows.length} rows — $e\n$st',
           );
-          failed++;
+          failed += batchRows.length;
           errors.add(
             SyncError(
-              documentId: serverId,
+              documentId: batchServerNames.firstOrNull ?? 'unknown',
               doctype: doctype,
               operation: 'pull',
-              errorMessage: e.toString(),
+              errorMessage: batchServerNames.length > 1
+                  ? '$e (${batchServerNames.length} docs,'
+                    ' first: ${batchServerNames.first})'
+                  : e.toString(),
             ),
           );
+          // Cursor is not advanced — stop this doctype's pull so the
+          // failed rows are retried on the next sync run rather than
+          // being silently skipped forever.
+          break;
         }
       }
 
@@ -637,23 +635,14 @@ class SyncService {
   // `SyncEngineBuilder._resolveServerNameFor`.
 
   Future<bool> _doctypeHasChildTables(String doctype) async {
-    final raw = await _database.doctypeMetaDao.getMetaJson(doctype);
-    if (raw == null || raw.isEmpty || raw == '{}') return false;
-    try {
-      final parsed = jsonDecode(raw) as Map<String, dynamic>;
-      final meta = DocTypeMeta.fromJson(parsed);
-      for (final f in meta.fields) {
-        if (f.fieldtype == 'Table' || f.fieldtype == 'Table MultiSelect') {
-          return true;
-        }
+    final meta = await _loadMetaFromDao(doctype, '_doctypeHasChildTables');
+    if (meta == null) return false;
+    for (final f in meta.fields) {
+      if (f.fieldtype == 'Table' || f.fieldtype == 'Table MultiSelect') {
+        return true;
       }
-      return false;
-    } catch (e, st) {
-      sdkLog(
-        'SyncService._doctypeHasChildTables($doctype) parse failed — $e\n$st',
-      );
-      return false;
     }
+    return false;
   }
 
   // `syncDoctype` was deleted in retirement Phase 6 — no production
@@ -734,6 +723,19 @@ class SyncResult {
   /// "tried, no work".
   factory SyncResult.empty({SyncStatus status = SyncStatus.ran}) =>
       SyncResult(0, 0, 0, null, status: status);
+
+  /// Canonical no-connectivity result used by every sync entry point
+  /// (`pushSync`, `pullSync`, `pullSyncWaiting`, `pullSyncMany`) when the
+  /// pre-flight connectivity check fails. Defined once so a wording or
+  /// status change applies to all four callers atomically.
+  factory SyncResult.noConnectivity() => SyncResult(
+    0,
+    0,
+    0,
+    'No internet connection',
+    errors: const [],
+    status: SyncStatus.noConnectivity,
+  );
 }
 
 /// Individual sync error details

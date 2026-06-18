@@ -7,6 +7,7 @@ import '../database/normalize_for_search.dart';
 import '../database/schema/system_columns.dart';
 import '../database/table_name.dart';
 import '../models/doc_type_meta.dart';
+import '../utils/sdk_log.dart';
 import 'child_table_info.dart';
 
 /// Frappe returns `modified` as `"YYYY-MM-DD HH:MM:SS.ffffff"` with no
@@ -95,6 +96,7 @@ class PullApply {
     required String parentTable,
     required Map<String, PullApplyChildInfo> childMetasByFieldname,
     required List<Map<String, dynamic>> rows,
+    bool isInitialSync = false,
   }) async {
     await db.transaction((txn) async {
       await applyPageInTxn(
@@ -103,6 +105,7 @@ class PullApply {
         parentTable: parentTable,
         childMetasByFieldname: childMetasByFieldname,
         rows: rows,
+        isInitialSync: isInitialSync,
       );
     });
   }
@@ -116,10 +119,119 @@ class PullApply {
     required String parentTable,
     required Map<String, PullApplyChildInfo> childMetasByFieldname,
     required List<Map<String, dynamic>> rows,
+    bool isInitialSync = false,
   }) async {
     final uuidGen = const Uuid();
     final parentNormFields = parentMeta.normFieldNames;
 
+    if (isInitialSync) {
+      // Bulk path is an optimisation for the clean-slate initial sync —
+      // it skips per-row queries. Before using it, check whether any
+      // existing rows need the sequential guards (tombstone skip,
+      // dirty-row conflict detection, ghost-success UUID reconciliation).
+      // If any such rows exist, fall back to the sequential path for the
+      // entire page. The pre-check is a single COUNT query, O(1).
+      final serverNames = rows
+          .map((r) => r['name'] as String?)
+          .where((n) => n != null && n.isNotEmpty)
+          .cast<String>()
+          .toList();
+      final incomingUuids = rows
+          .map((r) => r['mobile_uuid']?.toString())
+          .where((u) => u != null && u.isNotEmpty)
+          .cast<String>()
+          .toList();
+
+      var useSequential = false;
+      if (serverNames.isNotEmpty) {
+        final dirtyStatuses = [..._locallyDirtyStatuses, 'deleted'];
+        final snPlaceholders = List.filled(serverNames.length, '?').join(',');
+        final dirtyPlaceholders = List.filled(
+          dirtyStatuses.length,
+          '?',
+        ).join(',');
+
+        final String query;
+        final List<Object?> args;
+        if (incomingUuids.isNotEmpty) {
+          final uuidPlaceholders = List.filled(
+            incomingUuids.length,
+            '?',
+          ).join(',');
+          query =
+              '''
+            SELECT COUNT(*) AS n FROM $parentTable
+            WHERE (server_name IN ($snPlaceholders)
+                   AND sync_status IN ($dirtyPlaceholders))
+               OR (mobile_uuid IN ($uuidPlaceholders)
+                   AND (server_name IS NULL OR server_name = ''))
+          ''';
+          args = [...serverNames, ...dirtyStatuses, ...incomingUuids];
+        } else {
+          query =
+              '''
+            SELECT COUNT(*) AS n FROM $parentTable
+            WHERE server_name IN ($snPlaceholders)
+              AND sync_status IN ($dirtyPlaceholders)
+          ''';
+          args = [...serverNames, ...dirtyStatuses];
+        }
+
+        final result = await txn.rawQuery(query, args);
+        final unsafeCount = (result.first['n'] as int? ?? 0);
+        if (unsafeCount > 0) {
+          sdkLog(
+            'PullApply.applyPageInTxn: $unsafeCount unsafe rows detected'
+            ' — falling back to sequential for $parentTable',
+          );
+          useSequential = true;
+        }
+      }
+
+      if (!useSequential) {
+        sdkLog(
+          'PullApply.applyPageInTxn: Bulk insert of ${rows.length} rows'
+          ' into $parentTable',
+        );
+        await _applyPageInTxnBulk(
+          txn: txn,
+          parentMeta: parentMeta,
+          parentTable: parentTable,
+          childMetasByFieldname: childMetasByFieldname,
+          rows: rows,
+          uuidGen: uuidGen,
+          parentNormFields: parentNormFields,
+        );
+        return;
+      }
+    }
+    // Sequential path — handles all edge cases. Used for incremental
+    // sync and for initial-sync pages that failed the bulk safety check.
+    sdkLog(
+      'PullApply.applyPageInTxn: Sequential write of ${rows.length} rows'
+      ' into $parentTable',
+    );
+    await _applyPageInTxnSequential(
+      txn: txn,
+      parentMeta: parentMeta,
+      parentTable: parentTable,
+      childMetasByFieldname: childMetasByFieldname,
+      rows: rows,
+      uuidGen: uuidGen,
+      parentNormFields: parentNormFields,
+    );
+  }
+
+  static Future<void> _applyPageInTxnSequential({
+    required Transaction txn,
+    required DocTypeMeta parentMeta,
+    required String parentTable,
+    required Map<String, PullApplyChildInfo> childMetasByFieldname,
+    required List<Map<String, dynamic>> rows,
+    required Uuid uuidGen,
+    required Set<String> parentNormFields,
+  }) async {
+    final batch = txn.batch();
     for (final r in rows) {
       final serverName = r['name'] as String?;
       if (serverName == null) continue;
@@ -154,6 +266,29 @@ class PullApply {
         }
       }
 
+      // UUID-uniqueness assumption: `mobile_uuid` is a v4 UUID minted on this
+      // device and treated as globally unique, so a fallback match means *this*
+      // device created the row. We deliberately do NOT add a hard consistency
+      // assertion against the incoming server row — it would mis-fire on
+      // legitimate server-side edits and risk dropping good data. As a
+      // non-fatal tripwire we log (never block) when a uuid-matched local row
+      // is already bound to a *different* server_name: that mismatch is the
+      // only observable signature of a cross-device UUID clash or a bad data
+      // migration reusing a mobile_uuid. The incoming row is still applied.
+      if (matchedByUuid) {
+        final priorServerName = existing.first['server_name'] as String?;
+        if (priorServerName != null &&
+            priorServerName.isNotEmpty &&
+            priorServerName != serverName) {
+          sdkLog(
+            'PullApply: mobile_uuid "${r['mobile_uuid']}" matched a local row '
+            'in $parentTable already bound to server_name "$priorServerName", '
+            'but the incoming server row is "$serverName" — possible UUID reuse '
+            '/ cross-device collision; applying the incoming row.',
+          );
+        }
+      }
+
       // Tombstoned rows never resurrect — local DELETE is queued in
       // outbox waiting to push. Skip silently; once the DELETE outbox
       // row drains, the row is hard-deleted server-side too.
@@ -169,8 +304,36 @@ class PullApply {
       final localServerName = existing.isEmpty
           ? null
           : existing.first['server_name'] as String?;
-      final isOwnInsertRoundtrip =
+      bool isOwnInsertRoundtrip =
           matchedByUuid && (localServerName == null || localServerName.isEmpty);
+      if (isOwnInsertRoundtrip && existing.isNotEmpty) {
+        // Confirm no owed outbox work — if there is, local edits may have
+        // diverged (e.g. a ghost-success push left server_name NULL while
+        // the user made further edits). Overwriting here would cause data
+        // loss. Check for any non-done, non-in_flight outbox rows.
+        final mobileUuid = existing.first['mobile_uuid'] as String? ?? '';
+        if (mobileUuid.isNotEmpty) {
+          final pendingWork = await txn.rawQuery(
+            "SELECT id FROM outbox WHERE mobile_uuid = ? "
+            "AND state NOT IN ('done','in_flight') LIMIT 1",
+            [mobileUuid],
+          );
+          if (pendingWork.isNotEmpty) {
+            // Local work still owed; don't overwrite the local payload. But the
+            // server HAS this row (it round-tripped our mobile_uuid), so stamp
+            // its server_name now — otherwise the conflict guard below updates
+            // sync_status and `continue`s, leaving the row with a NULL
+            // server_name that can never be pushed/resolved.
+            batch.update(
+              parentTable,
+              {'server_name': serverName},
+              where: 'mobile_uuid = ?',
+              whereArgs: [mobileUuid],
+            );
+            isOwnInsertRoundtrip = false;
+          }
+        }
+      }
       if (existing.isNotEmpty &&
           !isOwnInsertRoundtrip &&
           _locallyDirtyStatuses.contains(existing.first['sync_status'])) {
@@ -188,7 +351,7 @@ class PullApply {
             (storedModified == null ||
                 incomingModified.isAfter(storedModified));
         if (serverAdvanced) {
-          await txn.update(
+          batch.update(
             parentTable,
             <String, Object?>{
               'sync_status': 'conflict',
@@ -238,9 +401,9 @@ class PullApply {
       }
 
       if (existing.isEmpty) {
-        await txn.insert(parentTable, parentRow);
+        batch.insert(parentTable, parentRow);
       } else {
-        await txn.update(
+        batch.update(
           parentTable,
           parentRow,
           where: 'mobile_uuid = ?',
@@ -285,7 +448,7 @@ class PullApply {
           if (sn != null && sn.isNotEmpty) byServerName[sn] = mu;
         }
 
-        await txn.delete(
+        batch.delete(
           childTable,
           where: 'parent_uuid = ? AND parentfield = ?',
           whereArgs: [uuid, fieldname],
@@ -328,9 +491,142 @@ class PullApply {
               childRow['${cn}__is_local'] = 0;
             }
           }
-          await txn.insert(childTable, childRow);
+          batch.insert(childTable, childRow);
         }
       }
     }
+    await batch.commit(noResult: true);
+  }
+
+  static Future<void> _applyPageInTxnBulk({
+    required Transaction txn,
+    required DocTypeMeta parentMeta,
+    required String parentTable,
+    required Map<String, PullApplyChildInfo> childMetasByFieldname,
+    required List<Map<String, dynamic>> rows,
+    required Uuid uuidGen,
+    required Set<String> parentNormFields,
+  }) async {
+    final serverNames = rows
+        .map((r) => r['name'] as String?)
+        .where((n) => n != null && n.isNotEmpty)
+        .cast<String>()
+        .toList();
+
+    if (serverNames.isEmpty) return;
+
+    // Fetch existing UUIDs for mid-sync resumes where rows might already exist.
+    final existingUuids = <String, String>{};
+    const chunkSize = 500;
+    for (var i = 0; i < serverNames.length; i += chunkSize) {
+      final chunk = serverNames.sublist(
+        i,
+        i + chunkSize > serverNames.length ? serverNames.length : i + chunkSize,
+      );
+      final placeholders = List.filled(chunk.length, '?').join(',');
+      final res = await txn.query(
+        parentTable,
+        columns: ['server_name', 'mobile_uuid'],
+        where: 'server_name IN ($placeholders)',
+        whereArgs: chunk,
+      );
+      for (final row in res) {
+        final sn = row['server_name'] as String?;
+        final mu = row['mobile_uuid'] as String?;
+        if (sn != null && mu != null) {
+          existingUuids[sn] = mu;
+        }
+      }
+    }
+
+    final batch = txn.batch();
+    final nowMs = DateTime.now().toUtc().millisecondsSinceEpoch;
+
+    for (final r in rows) {
+      final serverName = r['name'] as String?;
+      if (serverName == null || serverName.isEmpty) continue;
+
+      final uuid = existingUuids[serverName] ?? uuidGen.v4();
+
+      final parentRow = <String, Object?>{
+        'mobile_uuid': uuid,
+        'server_name': serverName,
+        'sync_status': 'synced',
+        'docstatus': r['docstatus'] ?? 0,
+        'modified': r['modified'],
+        'local_modified': nowMs,
+        'pulled_at': nowMs,
+      };
+
+      for (final f in parentMeta.fields) {
+        final name = f.fieldname;
+        final type = f.fieldtype;
+        if (name == null) continue;
+        if (type == 'Table' || type == 'Table MultiSelect') continue;
+        if (sqliteColumnTypeFor(type) == null) continue;
+        if (_systemParentColumnNames.contains(name)) continue;
+        final v = r[name];
+        parentRow[name] = v;
+        if (isLinkFieldType(type)) {
+          parentRow['${name}__is_local'] = 0;
+        }
+        if (parentNormFields.contains(name) &&
+            sqliteColumnTypeFor(type) == 'TEXT') {
+          parentRow['${name}__norm'] = normalizeForSearch(v?.toString());
+        }
+      }
+
+      batch.insert(
+        parentTable,
+        parentRow,
+        conflictAlgorithm: ConflictAlgorithm.replace,
+      );
+
+      for (final entry in childMetasByFieldname.entries) {
+        final fieldname = entry.key;
+        final childInfo = entry.value;
+        final childTable = normalizeDoctypeTableName(childInfo.doctype);
+        final list = (r[fieldname] as List?) ?? const [];
+
+        batch.delete(
+          childTable,
+          where: 'parent_uuid = ? AND parentfield = ?',
+          whereArgs: [uuid, fieldname],
+        );
+
+        for (var idx = 0; idx < list.length; idx++) {
+          final cr = Map<String, dynamic>.from(list[idx] as Map);
+          final serverChildName = cr['name'] as String?;
+          final rawChildUuid = cr['mobile_uuid']?.toString();
+          final hasRawUuid = rawChildUuid != null && rawChildUuid.isNotEmpty;
+          final childUuid = hasRawUuid ? rawChildUuid : uuidGen.v4();
+
+          final childRow = <String, Object?>{
+            'mobile_uuid': childUuid,
+            'server_name': serverChildName,
+            'parent_uuid': uuid,
+            'parent_doctype': parentMeta.name,
+            'parentfield': fieldname,
+            'idx': idx,
+            'modified': cr['modified'] as String?,
+          };
+
+          for (final cf in childInfo.meta.fields) {
+            final cn = cf.fieldname;
+            final ct = cf.fieldtype;
+            if (cn == null) continue;
+            if (sqliteColumnTypeFor(ct) == null) continue;
+            if (_systemChildColumnNames.contains(cn)) continue;
+            childRow[cn] = cr[cn];
+            if (isLinkFieldType(ct)) {
+              childRow['${cn}__is_local'] = 0;
+            }
+          }
+          batch.insert(childTable, childRow);
+        }
+      }
+    }
+
+    await batch.commit(noResult: true);
   }
 }

@@ -23,6 +23,9 @@ import '../sync/sync_state_notifier.dart';
 import 'sync_controller.dart';
 import '../utils/sdk_log.dart';
 
+// Re-export so callers building the SDK pack can name the typedef.
+export '../sync/push_engine.dart' show PayloadTransformerFn;
+
 /// True when [e] is Frappe's `QueryDeadlockError` — MySQL/MariaDB error
 /// 1213 ("Deadlock found when trying to get lock; try restarting
 /// transaction"), surfaced as HTTP 500. Concurrent INSERTs that share a
@@ -78,6 +81,8 @@ class SyncEngineBuilder {
     int? concurrencyOverride,
     SyncStateNotifier? sharedNotifier,
     SchemaReconcilerFn? schemaReconciler,
+    PayloadTransformerFn? payloadTransformer,
+    int pullPageSize = 500,
   }) async {
     final notifier = sharedNotifier ?? SyncStateNotifier();
     final tier = await DeviceTier.detect(override: concurrencyOverride);
@@ -221,6 +226,7 @@ class SyncEngineBuilder {
       resolveServerName: resolveServerName,
       attachmentUploader: attachmentUploader,
       writeQueueResolver: writeQueueResolver,
+      payloadTransformer: payloadTransformer,
     );
 
     // PullEngine is built but not auto-invoked. The list-http callback
@@ -235,7 +241,7 @@ class SyncEngineBuilder {
         filters: (params['filters'] as List?)?.cast<List<dynamic>>(),
         fields: (params['fields'] as List?)?.cast<String>(),
         orderBy: params['order_by'] as String?,
-        limitPageLength: params['limit_page_length'] as int? ?? 500,
+        limitPageLength: params['limit_page_length'] as int? ?? pullPageSize,
         limitStart: params['limit_start'] as int? ?? 0,
       );
       return result
@@ -250,7 +256,7 @@ class SyncEngineBuilder {
       outboxDao: outboxDao,
       pool: pullPool,
       fetcher: PullPageFetcher(listHttp: listHttp),
-      pageSize: 500,
+      pageSize: pullPageSize,
       notifier: notifier,
       metaResolver: metaResolver,
       writeQueueResolver: writeQueueResolver,

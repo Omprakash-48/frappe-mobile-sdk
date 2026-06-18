@@ -17,25 +17,23 @@ class DependencyGraphBuilder {
       if (type == 'Link') {
         final opt = (f.options ?? '').trim();
         if (opt.isEmpty) continue;
-        edges.add(DepEdge(
-          field: name,
-          targetDoctype: opt,
-          kind: DepEdgeKind.link,
-        ));
+        edges.add(
+          DepEdge(field: name, targetDoctype: opt, kind: DepEdgeKind.link),
+        );
       } else if (type == 'Dynamic Link') {
-        edges.add(DepEdge(
-          field: name,
-          targetDoctype: dynamicLinkSentinel,
-          kind: DepEdgeKind.link,
-        ));
+        edges.add(
+          DepEdge(
+            field: name,
+            targetDoctype: dynamicLinkSentinel,
+            kind: DepEdgeKind.link,
+          ),
+        );
       } else if (isChildTableFieldType(type)) {
         final opt = (f.options ?? '').trim();
         if (opt.isEmpty) continue;
-        edges.add(DepEdge(
-          field: name,
-          targetDoctype: opt,
-          kind: DepEdgeKind.child,
-        ));
+        edges.add(
+          DepEdge(field: name, targetDoctype: opt, kind: DepEdgeKind.child),
+        );
       }
     }
     return DepGraph(

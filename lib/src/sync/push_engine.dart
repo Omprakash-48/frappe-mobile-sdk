@@ -1,7 +1,6 @@
 import 'dart:convert';
 import 'dart:math';
 
-import 'package:flutter/foundation.dart';
 import 'package:sqflite/sqflite.dart';
 
 import '../concurrency/concurrency_pool.dart';
@@ -24,6 +23,7 @@ import 'sync_state_notifier.dart';
 import 'tier_computer.dart';
 import 'three_way_merge.dart';
 import 'uuid_rewriter.dart';
+import '../utils/sdk_log.dart';
 import '../utils/uuid_pattern.dart';
 
 /// Sends a push request. [method] is one of POST / PUT / SUBMIT / CANCEL /
@@ -54,6 +54,20 @@ typedef PushServerFetchFn =
 /// init warning surfaces this risk.
 typedef PushServerLookupByUuidFn =
     Future<Map<String, dynamic>?> Function(String doctype, String mobileUuid);
+
+/// Optional transformer invoked just before the SDK pushes a row to the
+/// server. Receives the doctype, the assembled payload, and the parent
+/// meta; returns a (possibly modified) payload that gets sent.
+///
+/// Use case: consumers can override `docstatus` (e.g. auto-submit
+/// submittable doctypes on sync) or strip/inject metadata without
+/// changing the local row's representation.
+typedef PayloadTransformerFn =
+    Map<String, dynamic> Function(
+      String doctype,
+      Map<String, dynamic> payload,
+      DocTypeMeta meta,
+    );
 
 /// Top-level orchestrator for the offline-first push path. Spec §5.2.
 ///
@@ -106,6 +120,10 @@ class PushEngine {
   /// when [writeQueueResolver] is non-null.
   final Map<String, WriteQueue> _writeQueues = {};
 
+  /// Optional payload transformer; runs after [PayloadAssembler.assemble]
+  /// and before HTTP dispatch. See [PayloadTransformerFn].
+  final PayloadTransformerFn? payloadTransformer;
+
   /// RNG for backoff jitter. Deadlock victims that retry on a fixed
   /// schedule re-collide in lockstep; jitter spreads them out.
   final Random _rng = Random();
@@ -136,16 +154,9 @@ class PushEngine {
     required this.attachmentUploader,
     DependenciesForRowFn? dependencyScanner,
     this.writeQueueResolver,
-    this.attachmentBackoff = const [
-      Duration(seconds: 2),
-      Duration(seconds: 5),
-      Duration(seconds: 10),
-    ],
-    this.networkBackoff = const [
-      Duration(seconds: 2),
-      Duration(seconds: 5),
-      Duration(seconds: 10),
-    ],
+    this.payloadTransformer,
+    this.attachmentBackoff = kDefaultSyncBackoff,
+    this.networkBackoff = kDefaultSyncBackoff,
   }) : dependencyScanner = dependencyScanner ?? _defaultDependencyScanner;
 
   bool _running = false;
@@ -186,10 +197,10 @@ class PushEngine {
     await outboxDao.resetInFlightToPending();
 
     // Supersede pass — for any (doctype, mobile_uuid, operation) tuple
-    // with both a `failed` row AND a newer `pending` row, delete the
-    // older failed row directly. Keeps the outbox a true pending-work-
-    // only table (Invariant 2) and avoids a redundant retry that the
-    // newer pending row already covers.
+    // with both a `failed` or `paused` row AND a newer `pending` row,
+    // delete the older failed/paused row directly. Keeps the outbox a
+    // true pending-work-only table (Invariant 2) and avoids a redundant
+    // retry that the newer pending row already covers.
     await db.execute('''
         DELETE FROM outbox
          WHERE id IN (
@@ -199,7 +210,7 @@ class PushEngine {
                ON older.doctype     = newer.doctype
               AND older.mobile_uuid = newer.mobile_uuid
               AND older.operation   = newer.operation
-              AND older.state       = '${OutboxState.failed.wireName}'
+              AND older.state       IN ('${OutboxState.failed.wireName}', '${OutboxState.paused.wireName}')
               AND newer.state       = '${OutboxState.pending.wireName}'
               AND older.created_at  < newer.created_at
          )
@@ -311,13 +322,26 @@ class PushEngine {
         errorMessage: e.message,
       );
     } on ServerRejection catch (e) {
-      await outboxDao.markFailed(
-        row.id,
-        errorCode: e.toErrorCode(),
-        errorMessage: e.message,
-      );
+      // #53: a terminal rejection (validation/mandatory/permission/link) can
+      // never succeed on retry. Park it in `paused` (the drain reads only
+      // `pending`, so it won't loop) instead of `failed`, which the user/retry
+      // flow may re-attempt. A re-save of the corrected record re-queues it.
+      final code = e.toErrorCode();
+      if (code.isTerminal) {
+        await outboxDao.markPaused(
+          row.id,
+          errorCode: code,
+          errorMessage: e.message,
+        );
+      } else {
+        await outboxDao.markFailed(
+          row.id,
+          errorCode: code,
+          errorMessage: e.message,
+        );
+      }
     } catch (e, st) {
-      debugPrint(
+      sdkLog(
         'PushEngine: row(${row.id}, ${row.doctype}/${row.mobileUuid}) failed with unknown error — $e\n$st',
       );
       await outboxDao.markFailed(
@@ -361,9 +385,7 @@ class PushEngine {
     );
 
     final childMetas = await _childMetasFor(meta);
-    final parentTable =
-        await metaDao.getTableName(row.doctype) ??
-        normalizeDoctypeTableName(row.doctype);
+    final parentTable = await metaDao.tableNameFor(row.doctype);
 
     // Read the per-doc snapshot — it's the canonical source of truth for
     // server_name and retry counters. The slim outbox no longer carries
@@ -399,6 +421,16 @@ class PushEngine {
       resolveServerName: resolveServerName,
     );
     payload = AttachmentPipeline.inlinePayload(payload, resolved: uploaded);
+
+    final transformer = payloadTransformer;
+    if (transformer != null) {
+      try {
+        payload = transformer(row.doctype, payload, meta);
+      } catch (e, st) {
+        sdkLog('PushEngine._dispatchOnce: payloadTransformer threw — $e\n$st');
+        // Fall through with un-transformed payload — never block the push.
+      }
+    }
 
     final method = _methodFor(row.operation);
     final isInsert = row.operation == OutboxOperation.insert;
@@ -481,9 +513,7 @@ class PushEngine {
         entry.value.doctype,
       );
     }
-    final parentTable =
-        await metaDao.getTableName(row.doctype) ??
-        normalizeDoctypeTableName(row.doctype);
+    final parentTable = await metaDao.tableNameFor(row.doctype);
     if (writeQueueResolver != null) {
       final wq = _writeQueues.putIfAbsent(
         row.doctype,
@@ -513,9 +543,7 @@ class PushEngine {
     OutboxRow row,
     TimestampMismatchError err,
   ) async {
-    final parentTable =
-        await metaDao.getTableName(row.doctype) ??
-        normalizeDoctypeTableName(row.doctype);
+    final parentTable = await metaDao.tableNameFor(row.doctype);
     final currentRows = await db.query(
       parentTable,
       where: 'mobile_uuid = ?',
@@ -717,7 +745,7 @@ class PushEngine {
     try {
       meta = await metaResolver(row.doctype);
     } catch (e, st) {
-      debugPrint('PushEngine: metaResolver(${row.doctype}) failed — $e\n$st');
+      sdkLog('PushEngine: metaResolver(${row.doctype}) failed — $e\n$st');
       return const [];
     }
 
@@ -747,7 +775,7 @@ class PushEngine {
       try {
         childMeta = await childMetaResolver(childDoctype);
       } catch (e, st) {
-        debugPrint(
+        sdkLog(
           'PushEngine: childMetaResolver($childDoctype) failed — $e\n$st',
         );
         continue;

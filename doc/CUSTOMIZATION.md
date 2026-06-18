@@ -10,6 +10,8 @@ This guide explains how to keep default UI or switch to configurable layouts/col
 - **Form section style**: section card color, padding/margins, fonts, field spacing.
 - **Field label rendering**: show/hide external label and description.
 - **Form action buttons**: save/delete button styling through `FormScreenStyle`.
+- **Link field picker mode**: inline type-ahead search (`LinkFieldPickerMode.inline`, default) or modal search dialog (`LinkFieldPickerMode.dialog`).
+
 
 ## Material style label behavior (duplicate label fix)
 
@@ -123,8 +125,23 @@ DocumentListScreen(
 - `tabHeaderLayout`, `stepHeaderStyle`
 - `showFieldLabel`, `showFieldDescription`
 - `sectionCardColor`
+- `linkFieldPickerMode` (defaults to `LinkFieldPickerMode.inline`)
+
+## Configuring Link Field Picker Mode
+
+By default, Link fields and Table MultiSelect fields use inline type-ahead search suggestions (`LinkFieldPickerMode.inline`). To configure the form to open a modal search dialog instead, set `linkFieldPickerMode` in your style:
+
+```dart
+final style = FrappeFormStyle(
+  linkFieldPickerMode: LinkFieldPickerMode.dialog,
+  // Other form styling properties...
+);
+```
+
+Pass this style to `FormScreen(style: style)` or `FrappeFormBuilder(style: style)`.
 
 ## Extensibility points
+
 
 - Custom field factory mapping for specific field types/field names.
 - Custom field widgets for special behavior.

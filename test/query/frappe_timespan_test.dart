@@ -72,7 +72,9 @@ void main() {
   });
 
   test('unknown keyword throws ArgumentError', () {
-    expect(() => FrappeTimespan.resolve('banana', now: nowFn),
-        throwsA(isA<ArgumentError>()));
+    expect(
+      () => FrappeTimespan.resolve('banana', now: nowFn),
+      throwsA(isA<ArgumentError>()),
+    );
   });
 }

@@ -7,20 +7,24 @@ DocField f(String n, String t, {String? options}) =>
     DocField(fieldname: n, fieldtype: t, label: n, options: options);
 
 Map<String, DocTypeMeta> catalog() => {
-      'Sales Order': DocTypeMeta(name: 'Sales Order', fields: [
-        f('customer', 'Link', options: 'Customer'),
-        f('items', 'Table', options: 'Sales Order Item'),
-      ]),
-      'Customer': DocTypeMeta(name: 'Customer', fields: [
-        f('territory', 'Link', options: 'Territory'),
-      ]),
-      'Territory': DocTypeMeta(name: 'Territory', fields: const []),
-      'Sales Order Item': DocTypeMeta(
-        name: 'Sales Order Item',
-        isTable: true,
-        fields: [f('item_code', 'Data')],
-      ),
-    };
+  'Sales Order': DocTypeMeta(
+    name: 'Sales Order',
+    fields: [
+      f('customer', 'Link', options: 'Customer'),
+      f('items', 'Table', options: 'Sales Order Item'),
+    ],
+  ),
+  'Customer': DocTypeMeta(
+    name: 'Customer',
+    fields: [f('territory', 'Link', options: 'Territory')],
+  ),
+  'Territory': DocTypeMeta(name: 'Territory', fields: const []),
+  'Sales Order Item': DocTypeMeta(
+    name: 'Sales Order Item',
+    isTable: true,
+    fields: [f('item_code', 'Data')],
+  ),
+};
 
 void main() {
   group('ClosureBuilder', () {
@@ -31,10 +35,12 @@ void main() {
         metaFetcher: (dt) async => cat[dt]!,
       );
 
-      expect(
-        result.doctypes.toSet(),
-        {'Sales Order', 'Customer', 'Territory', 'Sales Order Item'},
-      );
+      expect(result.doctypes.toSet(), {
+        'Sales Order',
+        'Customer',
+        'Territory',
+        'Sales Order Item',
+      });
       expect(result.graph['Sales Order']!.tier, 0);
       expect(result.graph['Customer']!.tier, 1);
       expect(result.graph['Territory']!.tier, 2);
@@ -55,9 +61,12 @@ void main() {
 
     test('skips Dynamic Link targets, records warning', () async {
       final cat = {
-        'Comment': DocTypeMeta(name: 'Comment', fields: [
-          f('reference_name', 'Dynamic Link', options: 'reference_doctype'),
-        ]),
+        'Comment': DocTypeMeta(
+          name: 'Comment',
+          fields: [
+            f('reference_name', 'Dynamic Link', options: 'reference_doctype'),
+          ],
+        ),
       };
       final result = await ClosureBuilder.build(
         entryPoints: const ['Comment'],
@@ -69,8 +78,14 @@ void main() {
 
     test('cycle — A→B→A — is walked once per doctype', () async {
       final cat = {
-        'A': DocTypeMeta(name: 'A', fields: [f('b_ref', 'Link', options: 'B')]),
-        'B': DocTypeMeta(name: 'B', fields: [f('a_ref', 'Link', options: 'A')]),
+        'A': DocTypeMeta(
+          name: 'A',
+          fields: [f('b_ref', 'Link', options: 'B')],
+        ),
+        'B': DocTypeMeta(
+          name: 'B',
+          fields: [f('a_ref', 'Link', options: 'A')],
+        ),
       };
       final result = await ClosureBuilder.build(
         entryPoints: const ['A'],
@@ -83,7 +98,10 @@ void main() {
 
     test('missing target meta → warning, closure continues', () async {
       final cat = {
-        'A': DocTypeMeta(name: 'A', fields: [f('miss', 'Link', options: 'Ghost')]),
+        'A': DocTypeMeta(
+          name: 'A',
+          fields: [f('miss', 'Link', options: 'Ghost')],
+        ),
       };
       final result = await ClosureBuilder.build(
         entryPoints: const ['A'],
@@ -98,8 +116,14 @@ void main() {
 
     test('multiple entry points merged', () async {
       final cat = {
-        'A': DocTypeMeta(name: 'A', fields: [f('x', 'Link', options: 'X')]),
-        'B': DocTypeMeta(name: 'B', fields: [f('y', 'Link', options: 'Y')]),
+        'A': DocTypeMeta(
+          name: 'A',
+          fields: [f('x', 'Link', options: 'X')],
+        ),
+        'B': DocTypeMeta(
+          name: 'B',
+          fields: [f('y', 'Link', options: 'Y')],
+        ),
         'X': DocTypeMeta(name: 'X', fields: const []),
         'Y': DocTypeMeta(name: 'Y', fields: const []),
       };
@@ -115,12 +139,18 @@ void main() {
       // Customer exactly once and fetch its meta exactly once — so the
       // initial-sync caller pulls Customer once, not three times.
       final cat = {
-        'Order': DocTypeMeta(name: 'Order',
-            fields: [f('customer', 'Link', options: 'Customer')]),
-        'Quote': DocTypeMeta(name: 'Quote',
-            fields: [f('customer', 'Link', options: 'Customer')]),
-        'Invoice': DocTypeMeta(name: 'Invoice',
-            fields: [f('customer', 'Link', options: 'Customer')]),
+        'Order': DocTypeMeta(
+          name: 'Order',
+          fields: [f('customer', 'Link', options: 'Customer')],
+        ),
+        'Quote': DocTypeMeta(
+          name: 'Quote',
+          fields: [f('customer', 'Link', options: 'Customer')],
+        ),
+        'Invoice': DocTypeMeta(
+          name: 'Invoice',
+          fields: [f('customer', 'Link', options: 'Customer')],
+        ),
         'Customer': DocTypeMeta(name: 'Customer', fields: const []),
       };
       final fetchCount = <String, int>{};
@@ -131,12 +161,22 @@ void main() {
           return cat[dt]!;
         },
       );
-      expect(result.doctypes.where((d) => d == 'Customer').length, 1,
-          reason: 'Customer must appear exactly once in the closure');
-      expect(fetchCount['Customer'], 1,
-          reason: 'meta for shared target fetched exactly once');
-      expect(result.doctypes.toSet(),
-          {'Order', 'Quote', 'Invoice', 'Customer'});
+      expect(
+        result.doctypes.where((d) => d == 'Customer').length,
+        1,
+        reason: 'Customer must appear exactly once in the closure',
+      );
+      expect(
+        fetchCount['Customer'],
+        1,
+        reason: 'meta for shared target fetched exactly once',
+      );
+      expect(result.doctypes.toSet(), {
+        'Order',
+        'Quote',
+        'Invoice',
+        'Customer',
+      });
     });
 
     test('is_child_table reflects meta.istable', () async {

@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_form_builder/flutter_form_builder.dart';
+import '../../../utils/translate.dart';
 import 'base_field.dart';
+import 'field_helpers.dart';
 
 /// Widget for Select field type. Supports single and multi-select (when field.allowMultiple).
 class SelectField extends BaseField {
@@ -13,11 +15,21 @@ class SelectField extends BaseField {
     super.style,
   });
 
+  /// Raw (untranslated) option keys — used as stored document values.
+  List<String> _getRawOptions() {
+    if (field.options == null || field.options!.isEmpty) return [];
+    return field.options!
+        .split('\n')
+        .map((e) => e.trim())
+        .where((e) => e.isNotEmpty)
+        .toList();
+  }
+
+  /// Translated display labels — used only for rendering.
   List<String> _getOptions() {
-    if (field.options == null || field.options!.isEmpty) {
-      return [];
-    }
-    return field.options!.split('\n').where((e) => e.isNotEmpty).toList();
+    final raw = _getRawOptions();
+    final t = style?.translate;
+    return t == null ? raw : raw.map(t).toList();
   }
 
   /// Parse stored value to list for multi-select (comma-separated)
@@ -38,10 +50,14 @@ class SelectField extends BaseField {
 
   @override
   Widget buildField(BuildContext context) {
-    final options = _getOptions();
+    // rawOptions: English keys used for stored values and equality checks.
+    // displayOptions: translated labels used only for display (Text children).
+    final rawOptions = _getRawOptions();
+    final displayOptions = _getOptions();
 
-    if (options.isEmpty) {
+    if (rawOptions.isEmpty) {
       return FormBuilderTextField(
+        autovalidateMode: AutovalidateMode.onUserInteraction,
         key: ValueKey('${field.fieldname}_no_options'),
         name: field.fieldname ?? '',
         initialValue: value?.toString() ?? field.defaultValue ?? '',
@@ -49,7 +65,7 @@ class SelectField extends BaseField {
         decoration:
             style?.decoration ??
             InputDecoration(
-              hintText: 'No options available',
+              hintText: sdkTr('No options available'),
               border: const OutlineInputBorder(),
               filled: true,
               fillColor: Colors.grey[200],
@@ -59,43 +75,46 @@ class SelectField extends BaseField {
 
     if (field.allowMultiple) {
       final initialList = _valueToList(value?.toString() ?? field.defaultValue);
+      // Match against raw English keys, not translated labels.
       final validInitialList = initialList
-          .where((v) => options.contains(v))
+          .where((v) => rawOptions.contains(v))
           .toList();
 
-      // Auto-select when exactly one option and no valid selection
-      final displayList = options.length == 1 && validInitialList.isEmpty
-          ? [options.first]
+      // Auto-select when exactly one option and no valid selection.
+      // Use raw English key for the stored value.
+      final displayList = rawOptions.length == 1 && validInitialList.isEmpty
+          ? [rawOptions.first]
           : validInitialList;
-      if (options.length == 1 && validInitialList.isEmpty) {
+      if (rawOptions.length == 1 && validInitialList.isEmpty) {
         WidgetsBinding.instance.addPostFrameCallback((_) {
-          onChanged?.call(_listToValue([options.first]));
+          onChanged?.call(_listToValue([rawOptions.first]));
         });
       }
 
       return FormBuilderCheckboxGroup<String>(
-        key: ValueKey('${field.fieldname}_multi_${options.length}'),
+        autovalidateMode: AutovalidateMode.onUserInteraction,
+        key: ValueKey('${field.fieldname}_multi_${rawOptions.length}'),
         name: field.fieldname ?? '',
         initialValue: displayList,
         enabled: enabled && !field.readOnly,
         decoration:
             style?.decoration ??
             InputDecoration(
-              labelText: field.placeholder ?? 'Select ${field.displayLabel}',
+              labelText:
+                  field.placeholder ?? sdkTr('Select {0}', [field.displayLabel]),
               border: const OutlineInputBorder(),
               filled: field.readOnly,
               fillColor: field.readOnly ? Colors.grey[200] : null,
             ),
-        options: options
-            .map((opt) => FormBuilderFieldOption(value: opt, child: Text(opt)))
-            .toList(),
+        // value: raw English key (stored value); child: translated display label.
+        options: rawOptions.asMap().entries.map((entry) {
+          return FormBuilderFieldOption(
+            value: entry.value,
+            child: Text(displayOptions[entry.key]),
+          );
+        }).toList(),
         validator: field.reqd
-            ? (value) {
-                if (value == null || value.isEmpty) {
-                  return '${field.displayLabel} is required';
-                }
-                return null;
-              }
+            ? (value) => requiredValidator(value, field.displayLabel)
             : null,
         onChanged: (val) => onChanged?.call(_listToValue(val)),
       );
@@ -104,45 +123,48 @@ class SelectField extends BaseField {
     final initialValueStr = value?.toString() ?? field.defaultValue;
     String? validInitialValue;
     if (initialValueStr != null && initialValueStr.isNotEmpty) {
-      if (options.contains(initialValueStr)) {
+      // Match against raw English keys, not translated labels.
+      if (rawOptions.contains(initialValueStr)) {
         validInitialValue = initialValueStr;
       } else {
         validInitialValue = null;
       }
     }
 
-    // Auto-select when exactly one option and no valid selection
-    if (options.length == 1 &&
+    // Auto-select when exactly one option and no valid selection.
+    // Emit raw English key — never a translated label.
+    if (rawOptions.length == 1 &&
         (validInitialValue == null || validInitialValue.isEmpty)) {
-      validInitialValue = options.first;
+      validInitialValue = rawOptions.first;
       WidgetsBinding.instance.addPostFrameCallback((_) {
-        onChanged?.call(options.first);
+        onChanged?.call(rawOptions.first);
       });
     }
 
     return FormBuilderDropdown<String>(
-      key: ValueKey('select_${field.fieldname}_${options.length}'),
+      autovalidateMode: AutovalidateMode.onUserInteraction,
+      key: ValueKey('select_${field.fieldname}_${rawOptions.length}'),
       name: field.fieldname ?? '',
       initialValue: validInitialValue,
       enabled: enabled && !field.readOnly,
       decoration:
           style?.decoration ??
           InputDecoration(
-            hintText: field.placeholder ?? 'Select ${field.displayLabel}',
+            hintText:
+                field.placeholder ?? sdkTr('Select {0}', [field.displayLabel]),
             border: const OutlineInputBorder(),
             filled: field.readOnly,
             fillColor: field.readOnly ? Colors.grey[200] : null,
           ),
-      items: options.map((option) {
-        return DropdownMenuItem<String>(value: option, child: Text(option));
+      // value: raw English key (stored value); child: translated display label.
+      items: rawOptions.asMap().entries.map((entry) {
+        return DropdownMenuItem<String>(
+          value: entry.value,
+          child: Text(displayOptions[entry.key]),
+        );
       }).toList(),
       validator: field.reqd
-          ? (value) {
-              if (value == null || value.toString().isEmpty) {
-                return '${field.displayLabel} is required';
-              }
-              return null;
-            }
+          ? (value) => requiredValidator(value, field.displayLabel)
           : null,
       onChanged: (val) => onChanged?.call(val),
     );

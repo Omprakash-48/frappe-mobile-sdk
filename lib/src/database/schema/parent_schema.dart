@@ -1,5 +1,6 @@
 import '../../models/doc_type_meta.dart';
 import '../field_type_mapping.dart';
+import '../table_name.dart';
 import 'index_policy.dart';
 import 'system_columns.dart';
 
@@ -51,7 +52,7 @@ List<String> buildParentSchemaDDL(
     cols.add('"$name" $sqlType');
 
     if (isLinkFieldType(type)) {
-      cols.add('"${name}__is_local" INTEGER');
+      cols.add(linkCompanionColumnDDL(name));
     }
 
     if (normFields.contains(name) && sqlType == 'TEXT') {
@@ -70,7 +71,7 @@ List<String> buildParentSchemaDDL(
     'CREATE TABLE IF NOT EXISTS $tableName (\n  ${cols.join(',\n  ')}\n)',
   ];
 
-  final suffix = _indexSuffix(tableName);
+  final suffix = stripDocsPrefix(tableName);
   ddl.add(
     'CREATE UNIQUE INDEX IF NOT EXISTS ix_${suffix}_server_name '
     'ON $tableName(server_name) WHERE server_name IS NOT NULL',
@@ -96,7 +97,5 @@ List<String> buildParentSchemaDDL(
 
   return ddl;
 }
-
-String _indexSuffix(String tableName) => tableName.replaceFirst('docs__', '');
 
 String _sanitizeColName(String col) => col.replaceAll('__', '_');

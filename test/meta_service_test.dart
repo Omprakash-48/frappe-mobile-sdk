@@ -436,18 +436,25 @@ void main() {
   });
 
   group('MetaService — P2 extensions', () {
-    DocField f(String name, String type, {String? options}) =>
-        DocField(fieldname: name, fieldtype: type, label: name, options: options);
+    DocField f(String name, String type, {String? options}) => DocField(
+      fieldname: name,
+      fieldtype: type,
+      label: name,
+      options: options,
+    );
 
     test('closure walks Link + Table edges via injected metaFetcher', () async {
       final db = await AppDatabase.inMemoryDatabase();
       final svc = MetaService(FrappeClient('https://fake.test'), db);
 
       final cat = <String, DocTypeMeta>{
-        'Sales Order': DocTypeMeta(name: 'Sales Order', fields: [
-          f('customer', 'Link', options: 'Customer'),
-          f('items', 'Table', options: 'Sales Order Item'),
-        ]),
+        'Sales Order': DocTypeMeta(
+          name: 'Sales Order',
+          fields: [
+            f('customer', 'Link', options: 'Customer'),
+            f('items', 'Table', options: 'Sales Order Item'),
+          ],
+        ),
         'Customer': DocTypeMeta(name: 'Customer', fields: const []),
         'Sales Order Item': DocTypeMeta(
           name: 'Sales Order Item',
@@ -456,24 +463,24 @@ void main() {
         ),
       };
 
-      final closure = await svc.closure(
-        const ['Sales Order'],
-        metaFetcher: (dt) async => cat[dt]!,
-      );
-      expect(
-        closure.doctypes.toSet(),
-        {'Sales Order', 'Customer', 'Sales Order Item'},
-      );
+      final closure = await svc.closure(const [
+        'Sales Order',
+      ], metaFetcher: (dt) async => cat[dt]!);
+      expect(closure.doctypes.toSet(), {
+        'Sales Order',
+        'Customer',
+        'Sales Order Item',
+      });
       expect(closure.childDoctypes, {'Sales Order Item'});
     });
 
     test('refreshWatermarks falls back to per-doctype fetcher', () async {
       final db = await AppDatabase.inMemoryDatabase();
       final svc = MetaService(FrappeClient('https://fake.test'), db);
-      final marks = await svc.refreshWatermarks(
-        const ['Customer', 'Sales Order'],
-        watermarkFetcher: (dt) async => '$dt-mark',
-      );
+      final marks = await svc.refreshWatermarks(const [
+        'Customer',
+        'Sales Order',
+      ], watermarkFetcher: (dt) async => '$dt-mark');
       expect(marks['Customer'], 'Customer-mark');
       expect(marks['Sales Order'], 'Sales Order-mark');
     });
@@ -486,15 +493,14 @@ void main() {
         requester: (method, doctypes) async => BulkProbeResult(
           headerVersion: '1',
           rows: [
-            for (final dt in doctypes)
-              {'doctype': dt, 'modified': 'bulk-$dt'},
+            for (final dt in doctypes) {'doctype': dt, 'modified': 'bulk-$dt'},
           ],
         ),
       );
-      final marks = await svc.refreshWatermarks(
-        const ['Customer', 'Sales Order'],
-        probe: probe,
-      );
+      final marks = await svc.refreshWatermarks(const [
+        'Customer',
+        'Sales Order',
+      ], probe: probe);
       expect(marks['Customer'], 'bulk-Customer');
       expect(marks['Sales Order'], 'bulk-Sales Order');
     });
@@ -528,53 +534,56 @@ void main() {
             return DocTypeMeta(name: dt, fields: const []);
           },
         );
-        expect(fetchCalls, 0,
-            reason: 'identical watermark must not refetch meta');
+        expect(
+          fetchCalls,
+          0,
+          reason: 'identical watermark must not refetch meta',
+        );
         expect(result.unchanged, ['Customer']);
         expect(result.updated, isEmpty);
         expect(result.failed, isEmpty);
       },
     );
 
-    test(
-      'ensureUpToDate isolates per-doctype failures (one bad doctype does '
-      'NOT block the others)',
-      () async {
-        final db = await AppDatabase.inMemoryDatabase();
-        final svc = MetaService(FrappeClient('https://fake.test'), db);
-        final dao = db.doctypeMetaDao;
+    test('ensureUpToDate isolates per-doctype failures (one bad doctype does '
+        'NOT block the others)', () async {
+      final db = await AppDatabase.inMemoryDatabase();
+      final svc = MetaService(FrappeClient('https://fake.test'), db);
+      final dao = db.doctypeMetaDao;
 
-        for (final dt in ['Good', 'Boom', 'AlsoGood']) {
-          await dao.insertDoctypeMeta(
-            DoctypeMetaEntity(
-              doctype: dt,
-              modified: null,
-              serverModifiedAt: null,
-              isMobileForm: false,
-              metaJson: '{}',
-            ),
-          );
-        }
-
-        final result = await svc.ensureUpToDate(
-          const ['Good', 'Boom', 'AlsoGood'],
-          watermarkFetcher: (dt) async => 'mark',
-          metaFetcher: (dt) async {
-            if (dt == 'Boom') throw StateError('upstream meta server is down');
-            return DocTypeMeta(name: dt, fields: const []);
-          },
+      for (final dt in ['Good', 'Boom', 'AlsoGood']) {
+        await dao.insertDoctypeMeta(
+          DoctypeMetaEntity(
+            doctype: dt,
+            modified: null,
+            serverModifiedAt: null,
+            isMobileForm: false,
+            metaJson: '{}',
+          ),
         );
+      }
 
-        expect(result.updated.toSet(), {'Good', 'AlsoGood'});
-        expect(result.failed.keys, ['Boom']);
-        expect(result.failed['Boom'], contains('upstream meta server'));
-        expect(result.allSucceeded, isFalse);
-        expect(await dao.getMetaWatermark('Good'), 'mark');
-        expect(await dao.getMetaWatermark('AlsoGood'), 'mark');
-        expect(await dao.getMetaWatermark('Boom'), isNull,
-            reason: 'failed doctype must not advance its watermark');
-      },
-    );
+      final result = await svc.ensureUpToDate(
+        const ['Good', 'Boom', 'AlsoGood'],
+        watermarkFetcher: (dt) async => 'mark',
+        metaFetcher: (dt) async {
+          if (dt == 'Boom') throw StateError('upstream meta server is down');
+          return DocTypeMeta(name: dt, fields: const []);
+        },
+      );
+
+      expect(result.updated.toSet(), {'Good', 'AlsoGood'});
+      expect(result.failed.keys, ['Boom']);
+      expect(result.failed['Boom'], contains('upstream meta server'));
+      expect(result.allSucceeded, isFalse);
+      expect(await dao.getMetaWatermark('Good'), 'mark');
+      expect(await dao.getMetaWatermark('AlsoGood'), 'mark');
+      expect(
+        await dao.getMetaWatermark('Boom'),
+        isNull,
+        reason: 'failed doctype must not advance its watermark',
+      );
+    });
 
     test(
       'ensureUpToDate refetches meta and persists graph + watermark on mismatch',
@@ -638,10 +647,13 @@ void main() {
       }
 
       final cat = <String, DocTypeMeta>{
-        'Sales Order': DocTypeMeta(name: 'Sales Order', fields: [
-          f('customer', 'Link', options: 'Customer'),
-          f('items', 'Table', options: 'Sales Order Item'),
-        ]),
+        'Sales Order': DocTypeMeta(
+          name: 'Sales Order',
+          fields: [
+            f('customer', 'Link', options: 'Customer'),
+            f('items', 'Table', options: 'Sales Order Item'),
+          ],
+        ),
         'Customer': DocTypeMeta(name: 'Customer', fields: const []),
         'Sales Order Item': DocTypeMeta(
           name: 'Sales Order Item',
@@ -649,10 +661,9 @@ void main() {
           fields: const [],
         ),
       };
-      final closure = await svc.closure(
-        const ['Sales Order'],
-        metaFetcher: (dt) async => cat[dt]!,
-      );
+      final closure = await svc.closure(const [
+        'Sales Order',
+      ], metaFetcher: (dt) async => cat[dt]!);
       await svc.primeDepGraphs(closure);
 
       for (final dt in closure.doctypes) {

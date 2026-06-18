@@ -34,6 +34,10 @@ class ChildDao {
   }
 
   Future<int> deleteAllByParent(String parentUuid) async {
-    return _db.delete(_table, where: 'parent_uuid = ?', whereArgs: [parentUuid]);
+    return _db.delete(
+      _table,
+      where: 'parent_uuid = ?',
+      whereArgs: [parentUuid],
+    );
   }
 }

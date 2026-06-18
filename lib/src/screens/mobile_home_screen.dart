@@ -6,6 +6,7 @@ import '../models/link_filter_result.dart';
 import '../sdk/frappe_sdk.dart';
 import '../ui/document_list_screen.dart';
 import '../ui/widgets/form_builder.dart' show FieldChangeHandler, FormValidator;
+import '../ui/widgets/screen_helpers.dart';
 import '../utils/sdk_log.dart';
 
 /// Generic home screen that renders doctype groups from the SDK's Mobile Configuration.
@@ -509,52 +510,32 @@ class _MobileHomeScreenState extends State<MobileHomeScreen>
   }
 
   Future<void> _handleLogout() async {
-    final confirmed = await showDialog<bool>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('Logout'),
-        content: const Text('Are you sure you want to logout?'),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx, false),
-            child: const Text('Cancel'),
-          ),
-          TextButton(
-            onPressed: () => Navigator.pop(ctx, true),
-            child: const Text(
-              'Logout',
-              style: TextStyle(color: Color(0xFFD32F2F)),
-            ),
-          ),
-        ],
-      ),
+    final confirmed = await showConfirmDialog(
+      context,
+      title: 'Logout',
+      content: 'Are you sure you want to logout?',
+      confirmLabel: 'Logout',
+      confirmColor: const Color(0xFFD32F2F),
     );
 
     if (confirmed != true || !mounted) return;
 
-    showDialog(
-      context: context,
-      barrierDismissible: false,
-      builder: (_) => const Center(child: CircularProgressIndicator()),
-    );
+    final dismissLoading = showLoadingDialog(context);
 
     try {
       await widget.sdk.logout();
     } catch (e, st) {
       sdkLog('MobileHomeScreen: logout failed — $e\n$st');
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text(
-              'Logout warning: ${e.toString().split(':').last.trim()}',
-            ),
-            backgroundColor: const Color(0xFFE65100),
-          ),
+        showStatusSnackBar(
+          context,
+          'Logout warning: ${e.toString().split(':').last.trim()}',
+          backgroundColor: const Color(0xFFE65100),
         );
       }
     } finally {
       if (mounted) {
-        Navigator.of(context).pop(); // dismiss loading
+        dismissLoading();
       }
       if (widget.onLogout != null) {
         await widget.onLogout!();
@@ -563,53 +544,34 @@ class _MobileHomeScreenState extends State<MobileHomeScreen>
   }
 
   Future<void> _handleForcePullAll() async {
-    final confirmed = await showDialog<bool>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('Force Re-Sync All?'),
-        content: const Text(
+    final confirmed = await showConfirmDialog(
+      context,
+      title: 'Force Re-Sync All?',
+      content:
           'This re-downloads all reference and master data from scratch. '
           'Your unsynced form entries are not affected.',
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx, false),
-            child: const Text('Cancel'),
-          ),
-          TextButton(
-            onPressed: () => Navigator.pop(ctx, true),
-            child: const Text('Re-Sync'),
-          ),
-        ],
-      ),
+      confirmLabel: 'Re-Sync',
     );
 
     if (confirmed != true || !mounted) return;
 
     setState(() => _isForceSyncing = true);
-    showDialog(
-      context: context,
-      barrierDismissible: false,
-      builder: (_) => const Center(child: CircularProgressIndicator()),
-    );
+    final dismissLoading = showLoadingDialog(context);
 
     try {
       await widget.sdk.forcePullAll();
     } catch (e, st) {
       sdkLog('MobileHomeScreen: forcePullAll failed — $e\n$st');
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text(
-              'Re-sync failed: ${e.toString().split(':').last.trim()}',
-            ),
-            backgroundColor: const Color(0xFFE65100),
-          ),
+        showStatusSnackBar(
+          context,
+          'Re-sync failed: ${e.toString().split(':').last.trim()}',
+          backgroundColor: const Color(0xFFE65100),
         );
       }
     } finally {
       if (mounted) {
-        Navigator.of(context).pop(); // dismiss loading
+        dismissLoading();
         setState(() => _isForceSyncing = false);
       }
     }
@@ -663,11 +625,10 @@ class _MobileHomeScreenState extends State<MobileHomeScreen>
       sdkLog('MobileHomeScreen: _navigateToDoctype failed — $e\n$st');
       if (mounted) {
         ScaffoldMessenger.of(context).hideCurrentSnackBar();
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('Error: ${e.toString().split(':').last.trim()}'),
-            backgroundColor: Colors.red,
-          ),
+        showStatusSnackBar(
+          context,
+          'Error: ${e.toString().split(':').last.trim()}',
+          severity: SnackBarSeverity.error,
         );
       }
     }

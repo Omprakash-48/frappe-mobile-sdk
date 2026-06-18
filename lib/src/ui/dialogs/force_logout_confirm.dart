@@ -36,8 +36,7 @@ class _ForceLogoutDialogState extends State<_ForceLogoutDialog> {
 
   @override
   Widget build(BuildContext ctx) {
-    final total =
-        widget.perDoctypeCounts.values.fold<int>(0, (a, b) => a + b);
+    final total = widget.perDoctypeCounts.values.fold<int>(0, (a, b) => a + b);
     return AlertDialog(
       title: Text('Lose $total unsynced records?'),
       content: Column(
@@ -45,18 +44,19 @@ class _ForceLogoutDialogState extends State<_ForceLogoutDialog> {
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           const Text(
-              'This permanently deletes records that were never synced:'),
+            'This permanently deletes records that were never synced:',
+          ),
           const SizedBox(height: 8),
-          ...widget.perDoctypeCounts.entries
-              .map((e) => Text('  • ${e.key}: ${e.value}')),
+          ...widget.perDoctypeCounts.entries.map(
+            (e) => Text('  • ${e.key}: ${e.value}'),
+          ),
           const SizedBox(height: 12),
           const Text('Type LOGOUT to confirm.'),
           const SizedBox(height: 4),
           TextField(
             controller: _ctl,
             onChanged: (_) => setState(() {}),
-            decoration:
-                const InputDecoration(border: OutlineInputBorder()),
+            decoration: const InputDecoration(border: OutlineInputBorder()),
           ),
         ],
       ),

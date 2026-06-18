@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 
 import '../api/client.dart';
 import '../api/utils.dart';
+import '../utils/translate.dart';
 import '../models/doc_type_meta.dart';
 import '../models/document.dart';
 import '../models/link_filter_result.dart';
@@ -23,6 +24,7 @@ import 'widgets/form_builder.dart'
         OnButtonPressedCallback,
         FieldChangeHandler,
         FormValidator;
+import 'widgets/screen_helpers.dart';
 import 'widgets/sync_error_banner.dart' show humanizeOutboxError;
 import '../utils/sdk_log.dart';
 
@@ -353,7 +355,7 @@ class _DocumentListScreenState extends State<DocumentListScreen> {
         actions: [
           PopupMenuButton<String>(
             icon: const Icon(Icons.sort),
-            tooltip: 'Sort',
+            tooltip: sdkTr('Sort'),
             onSelected: (value) {
               setState(() {
                 if (value == _sortField) {
@@ -402,21 +404,7 @@ class _DocumentListScreenState extends State<DocumentListScreen> {
               ];
             },
           ),
-          if (_isSyncing)
-            const Padding(
-              padding: EdgeInsets.all(16.0),
-              child: SizedBox(
-                width: 20,
-                height: 20,
-                child: CircularProgressIndicator(strokeWidth: 2),
-              ),
-            )
-          else
-            IconButton(
-              icon: const Icon(Icons.refresh),
-              onPressed: _pullDocuments,
-              tooltip: 'Refresh',
-            ),
+          refreshOrSpinnerAction(isBusy: _isSyncing, onRefresh: _pullDocuments),
         ],
       ),
       body: _isLoading
@@ -435,7 +423,7 @@ class _DocumentListScreenState extends State<DocumentListScreen> {
                     child: TextField(
                       controller: _searchController,
                       decoration: InputDecoration(
-                        hintText: 'Search...',
+                        hintText: sdkTr('Search...'),
                         prefixIcon: const Icon(Icons.search),
                         border: OutlineInputBorder(
                           borderRadius: BorderRadius.circular(8),
@@ -461,16 +449,20 @@ class _DocumentListScreenState extends State<DocumentListScreen> {
 
   Widget _buildEmptyState() {
     final listStyle = widget.style ?? const DocumentListStyle();
+    // Original structure: `Center(Column(...))` with no surrounding
+    // Padding and a `bodySmall` subtitle — different enough from the
+    // canonical EmptyStateWidget (which adds Padding(24) and uses
+    // `bodyMedium`) that switching would visibly shift spacing.
     return Center(
       child: Column(
         mainAxisAlignment: MainAxisAlignment.center,
         children: [
           const Icon(Icons.inbox, size: 64, color: Colors.grey),
           const SizedBox(height: 16),
-          const Text('No documents found'),
+          Text(sdkTr('No documents found')),
           const SizedBox(height: 8),
           Text(
-            'Pull down to refresh or create a new document',
+            sdkTr('Pull down to refresh or create a new document'),
             style: Theme.of(context).textTheme.bodySmall,
             textAlign: TextAlign.center,
           ),
@@ -479,7 +471,7 @@ class _DocumentListScreenState extends State<DocumentListScreen> {
             onPressed: _pullDocuments,
             style: listStyle.primaryButtonStyle,
             icon: const Icon(Icons.refresh),
-            label: const Text('Refresh from Server'),
+            label: Text(sdkTr('Refresh from Server')),
           ),
           if (_canCreate) ...[
             const SizedBox(height: 16),
@@ -487,7 +479,7 @@ class _DocumentListScreenState extends State<DocumentListScreen> {
               onPressed: () => _openForm(null),
               style: listStyle.primaryButtonStyle,
               icon: const Icon(Icons.add),
-              label: const Text('Create New'),
+              label: Text(sdkTr('Create New')),
             ),
           ],
         ],
@@ -513,11 +505,11 @@ class _DocumentListScreenState extends State<DocumentListScreen> {
             itemBuilder: (context, index) {
               final doc = pageList[index];
               final titleText = _docTitle(doc).isEmpty
-                  ? 'Untitled'
+                  ? sdkTr('Untitled')
                   : _docTitle(doc);
               final idText = doc.serverId != null
-                  ? 'ID: ${doc.serverId}'
-                  : 'Local (not synced)';
+                  ? sdkTr('ID: {0}', [doc.serverId!])
+                  : sdkTr('Local (not synced)');
               final hasStatusField = widget.meta.getField('status') != null;
               final statusValue = hasStatusField
                   ? doc.data['status']?.toString()
@@ -595,7 +587,7 @@ class _DocumentListScreenState extends State<DocumentListScreen> {
                   onPressed: _page > 0 ? () => setState(() => _page--) : null,
                 ),
                 Text(
-                  'Page ${_page + 1} of $totalPages',
+                  sdkTr('Page {0} of {1}', [_page + 1, totalPages]),
                   style: Theme.of(context).textTheme.bodySmall,
                 ),
                 IconButton(
@@ -632,7 +624,7 @@ class _DocumentListScreenState extends State<DocumentListScreen> {
           widget.meta,
         );
       } catch (e, st) {
-        debugPrint(
+        sdkLog(
           'DocumentListScreen: attachChildRows(${widget.doctype}) failed — $e\n$st',
         );
         resolvedDoc = doc;
@@ -671,7 +663,7 @@ class _DocumentListScreenState extends State<DocumentListScreen> {
         );
       } catch (e, st) {
         // Network error — fall back to local cached data.
-        debugPrint(
+        sdkLog(
           'DocumentListScreen: getByName(${widget.doctype}/${doc.serverId}) failed — $e\n$st',
         );
         resolvedDoc = doc;
@@ -746,6 +738,11 @@ class _RowSyncErrorBadge extends StatelessWidget {
       case OutboxState.failed:
         icon = Icons.error_outline;
         color = const Color(0xFFC62828);
+        break;
+      case OutboxState.paused:
+        // Parked pending a user correction (terminal server rejection).
+        icon = Icons.pause_circle_outline;
+        color = const Color(0xFFB35900);
         break;
       case OutboxState.pending:
       case OutboxState.inFlight:

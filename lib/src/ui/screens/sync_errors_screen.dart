@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../../api/utils.dart';
 import '../../models/outbox_row.dart';
+import '../widgets/screen_helpers.dart';
 
 /// List of currently-erroring outbox rows, grouped by doctype with
 /// per-row Retry / View error / Open actions and a header `Retry all`
@@ -12,9 +13,18 @@ import '../../models/outbox_row.dart';
 /// `retryAllRunning` disables per-row Retry buttons (as the engine
 /// drains the queue in priority order) and swaps the header button
 /// from `Retry all` → `Stop`.
+///
+/// For a [OutboxState.paused] row, the per-row Retry uses [onRetryPaused] when
+/// supplied (wire it to `SyncController.retryPaused`) so the paused-row
+/// recovery path is taken explicitly rather than routing through the generic
+/// [onRetry]. When [onRetryPaused] is null, paused rows fall back to [onRetry].
 class SyncErrorsScreen extends StatelessWidget {
   final List<OutboxRow> rows;
   final Future<void> Function(int outboxId) onRetry;
+
+  /// Recovery action for [OutboxState.paused] rows. Optional for backward
+  /// compatibility; falls back to [onRetry] when not provided.
+  final Future<void> Function(int outboxId)? onRetryPaused;
   final Future<void> Function() onRetryAll;
   final Future<void> Function() onStop;
   final void Function(OutboxRow) onOpen;
@@ -25,12 +35,21 @@ class SyncErrorsScreen extends StatelessWidget {
     super.key,
     required this.rows,
     required this.onRetry,
+    this.onRetryPaused,
     required this.onRetryAll,
     required this.onStop,
     required this.onOpen,
     required this.onViewError,
     required this.retryAllRunning,
   });
+
+  /// Routes a row's per-row Retry to the state-appropriate action.
+  Future<void> _retryRow(OutboxRow r) {
+    if (r.state == OutboxState.paused && onRetryPaused != null) {
+      return onRetryPaused!(r.id);
+    }
+    return onRetry(r.id);
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -77,7 +96,7 @@ class SyncErrorsScreen extends StatelessWidget {
                                 ? null
                                 : () => _runAndSurface(
                                     context,
-                                    () => onRetry(r.id),
+                                    () => _retryRow(r),
                                     'Retry',
                                   ),
                             child: const Text('Retry'),
@@ -129,29 +148,15 @@ class SyncErrorsScreen extends StatelessWidget {
 
   Widget _buildEmptyState(BuildContext context) {
     final theme = Theme.of(context);
-    return Center(
-      child: Padding(
-        padding: const EdgeInsets.all(24),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(
-              Icons.check_circle_outline,
-              size: 64,
-              color: theme.colorScheme.primary,
-            ),
-            const SizedBox(height: 16),
-            Text('No sync errors', style: theme.textTheme.titleMedium),
-            const SizedBox(height: 8),
-            Text(
-              'All queued changes have synced successfully.',
-              textAlign: TextAlign.center,
-              style: theme.textTheme.bodyMedium?.copyWith(
-                color: theme.colorScheme.onSurfaceVariant,
-              ),
-            ),
-          ],
-        ),
+    return EmptyStateWidget(
+      icon: Icons.check_circle_outline,
+      iconColor: theme.colorScheme.primary,
+      title: 'No sync errors',
+      subtitle: 'All queued changes have synced successfully.',
+      // Original used onSurfaceVariant (theme-adaptive in dark mode);
+      // preserve exactly instead of the helper's grey-600 default.
+      subtitleStyle: theme.textTheme.bodyMedium?.copyWith(
+        color: theme.colorScheme.onSurfaceVariant,
       ),
     );
   }

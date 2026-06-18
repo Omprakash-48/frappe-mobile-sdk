@@ -17,6 +17,13 @@ class SyncStateNotifier {
   /// trees subscribed via `StreamBuilder` — do not rebuild when a tick of
   /// engine bookkeeping produces an identical snapshot.
   set value(SyncState next) {
+    // Drop writes that race teardown. FrappeSDK.dispose() closes this notifier,
+    // but an in-flight engine (PushEngine/PullEngine/SyncController all share
+    // this instance via SyncEngineBuilder) may be suspended at an await and
+    // resume to write a final state tick afterwards. Without this guard that
+    // write hits `_controller.add` on a closed broadcast controller and throws
+    // StateError, crashing the unawaited sync future during logout/shutdown.
+    if (_controller.isClosed) return;
     if (_value == next) return;
     _value = next;
     _controller.add(next);

@@ -8,6 +8,7 @@ import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 
 import '../api/client.dart';
+import '../utils/sdk_log.dart';
 import '../api/exceptions.dart';
 import '../concurrency/concurrency_pool.dart';
 import '../concurrency/connectivity_watcher.dart';
@@ -15,6 +16,8 @@ import '../database/app_database.dart';
 import '../database/daos/doctype_meta_dao.dart';
 import '../database/daos/outbox_dao.dart';
 import '../database/daos/sdk_meta_dao.dart';
+import '../database/daos/translation_dao.dart';
+import '../models/closure_result.dart';
 import '../models/doc_type_meta.dart';
 import '../models/offline_mode.dart';
 import '../models/offline_mode_notifier.dart';
@@ -32,6 +35,8 @@ import '../services/offline_repository.dart';
 import '../services/offline_transition_service.dart';
 import '../services/link_option_service.dart';
 import '../services/translation_service.dart';
+import '../security/security_check.dart';
+import '../security/frappe_security_service.dart';
 import '../sync/cursor.dart';
 import '../sync/pull_engine.dart';
 import '../sync/push_engine.dart';
@@ -43,6 +48,37 @@ import '../sync/sync_state_notifier.dart';
 class FrappeSDK {
   final String baseUrl;
   final String? databaseAppName;
+
+  /// Optional payload transformer; passed to the push pipeline. See
+  /// [PayloadTransformerFn] in `push_engine.dart`. Apps use this to
+  /// override push payloads (e.g. SNF auto-submits submittable doctypes
+  /// to `docstatus=1` on sync).
+  final PayloadTransformerFn? payloadTransformer;
+
+  /// Called when SQLite FFI initialization fails before the MethodChannel
+  /// fallback activates. Use to record a non-fatal Crashlytics event.
+  /// The SDK continues normally on the MethodChannel path regardless.
+  final void Function(Object, StackTrace)? onFfiInitFailure;
+
+  /// Rows per page for `PullEngine`. Default 500. Increase for servers with
+  /// fast response times and large doctypes; decrease if requests time out.
+  final int pullPageSize;
+
+  /// Rows per page for `SyncService` batch apply. Default 1000.
+  final int syncServicePageSize;
+
+  /// Rows per page when listing child-table documents. Default 1000.
+  final int listChildDocsPageSize;
+
+  /// Rows per page when fetching full document payloads (with children). Default 1000.
+  final int listFullDocsPageSize;
+
+  /// Rows per page for general list queries. Default 20.
+  final int listDefaultPageSize;
+
+  final bool tamperProtectionEnabled;
+  final Set<SecurityCheck> tamperProtectionChecks;
+  final int tamperProtectionRestartGapMs;
 
   FrappeClient? _client;
   AppDatabase? _database;
@@ -56,6 +92,7 @@ class FrappeSDK {
   LinkOptionService? _linkOptionService;
   UnifiedResolver? _resolver;
   SessionUserService? _sessionUserService;
+  FrappeSecurityService? _securityService;
 
   // Push/pull engines + controller wired by [SyncEngineBuilder]. They
   // share `_syncStateNotifier` so the single observable surface for sync
@@ -78,7 +115,20 @@ class FrappeSDK {
   /// Wire into [SyncStatusBar] to surface pull/push activity in the UI.
   SyncStateNotifier? get syncStateNotifier => _syncStateNotifier;
 
+  /// The tamper-detection service. Non-null after [initialize] completes.
+  FrappeSecurityService get security {
+    _assertInitialized();
+    return _securityService!;
+  }
+
   bool _initialized = false;
+
+  /// Set once [dispose] begins. The fire-and-forget initial sync started by
+  /// login()/verifyLoginOtp()/initialize() (`unawaited(_initialMetaAndDataSync())`)
+  /// can still be mid-flight when the consumer disposes the SDK; this flag lets
+  /// those background steps bail instead of dereferencing services [dispose]
+  /// has nulled. See [_runInitialMetaAndDataSync].
+  bool _disposed = false;
 
   /// One-shot lock for [initialize]. Set to a non-null Completer for the
   /// duration of an in-flight `initialize()` call so concurrent callers
@@ -151,7 +201,20 @@ class FrappeSDK {
     _modeNotifier?.value = next;
   }
 
-  FrappeSDK({required this.baseUrl, this.databaseAppName});
+  FrappeSDK({
+    required this.baseUrl,
+    this.databaseAppName,
+    this.payloadTransformer,
+    this.onFfiInitFailure,
+    this.pullPageSize = 500,
+    this.syncServicePageSize = 1000,
+    this.listChildDocsPageSize = 1000,
+    this.listFullDocsPageSize = 1000,
+    this.listDefaultPageSize = 20,
+    this.tamperProtectionEnabled = false,
+    this.tamperProtectionChecks = const {},
+    this.tamperProtectionRestartGapMs = 600000,
+  });
 
   /// Test-only constructor: accepts a pre-built [AppDatabase] (e.g. in-memory).
   /// Wires all services directly without calling [initialize()].
@@ -170,7 +233,17 @@ class FrappeSDK {
       isPersisted: true,
     ),
     http.Client? httpClient,
-  }) : databaseAppName = null {
+    this.pullPageSize = 500,
+    this.syncServicePageSize = 1000,
+    this.listChildDocsPageSize = 1000,
+    this.listFullDocsPageSize = 1000,
+    this.listDefaultPageSize = 20,
+    this.tamperProtectionEnabled = false,
+    this.tamperProtectionChecks = const {},
+    this.tamperProtectionRestartGapMs = 600000,
+  }) : databaseAppName = null,
+       payloadTransformer = null,
+       onFfiInitFailure = null {
     _database = database;
     _modeNotifier = OfflineModeNotifier(offlineMode);
     _syncCompleteController = StreamController<void>.broadcast();
@@ -178,7 +251,13 @@ class FrappeSDK {
     // writes to FlutterSecureStorage and is unavailable in widget tests.
     // [httpClient] lets tests stub the transport (e.g. the /sync_details
     // pre-flight) without a real network.
-    _client = FrappeClient(baseUrl, httpClient: httpClient);
+    _client = FrappeClient(
+      baseUrl,
+      httpClient: httpClient,
+      listChildDocsPageSize: listChildDocsPageSize,
+      listFullDocsPageSize: listFullDocsPageSize,
+      listDefaultPageSize: listDefaultPageSize,
+    );
     // Use AuthService.forTesting so the client and database are wired up
     // without touching FlutterSecureStorage. This means sdk.auth methods
     // (e.g. getOrCreateMobileUuid, restoreSession) won't throw "not
@@ -196,13 +275,16 @@ class FrappeSDK {
       metaFetcher: testMetaFn,
     );
     _permissionService = PermissionService(_client!, _database!);
-    _translationService = TranslationService(_client!);
+    final translationDao = TranslationDao(database.rawDatabase);
+    _translationService = TranslationService(_client!)
+      ..injectDao(translationDao);
     _syncService = SyncService(
       _client!,
       _repository!,
       _database!,
       getMobileUuid: () async => 'test-uuid',
       offlineModeNotifier: _modeNotifier!,
+      pageSize: syncServicePageSize,
     );
     final testResolver = UnifiedResolver(
       db: database.rawDatabase,
@@ -227,10 +309,17 @@ class FrappeSDK {
         _database!,
         getMobileUuid: () async => 'test-uuid',
         offlineMode: const OfflineMode(enabled: true, isPersisted: true),
+        pageSize: syncServicePageSize,
       ),
       residueCounter: _residueCount,
     );
     _sessionUserService = SessionUserService(_database!.rawDatabase);
+    _securityService = FrappeSecurityService(
+      database: database,
+      enabled: tamperProtectionEnabled,
+      checks: tamperProtectionChecks,
+      restartGapMs: tamperProtectionRestartGapMs,
+    );
     _initialized = true;
   }
 
@@ -267,7 +356,16 @@ class FrappeSDK {
   }
 
   Future<void> _doInitialize(bool autoRestoreAndSync) async {
-    _database = await AppDatabase.getInstance(appName: databaseAppName);
+    _database = await AppDatabase.getInstance(
+      appName: databaseAppName,
+      onFfiInitFailure: onFfiInitFailure,
+    );
+    _securityService = FrappeSecurityService(
+      database: _database!,
+      enabled: tamperProtectionEnabled,
+      checks: tamperProtectionChecks,
+      restartGapMs: tamperProtectionRestartGapMs,
+    );
     _authService = AuthService();
     _authService!.initialize(baseUrl, database: _database);
 
@@ -302,7 +400,9 @@ class FrappeSDK {
       metaFetcher: metaFn,
     );
     _permissionService = PermissionService(_client!, _database!);
-    _translationService = TranslationService(_client!);
+    final translationDao = TranslationDao(rawDb);
+    _translationService = TranslationService(_client!)
+      ..injectDao(translationDao);
     // Build the sync engine pack (PushEngine + PullEngine + SyncController +
     // shared SyncStateNotifier + two ConcurrencyPools). PushEngine becomes
     // the production push driver. SyncService below holds a closure that
@@ -331,6 +431,8 @@ class FrappeSDK {
       // on-disk schema against the meta it's about to apply, just before
       // each doctype's pull loop runs.
       schemaReconciler: _repository!.reconcileParentTableForMeta,
+      payloadTransformer: payloadTransformer,
+      pullPageSize: pullPageSize,
     );
     _syncStateNotifier = pack.notifier;
     _pushPool = pack.pushPool;
@@ -361,6 +463,7 @@ class FrappeSDK {
       // push is active for it, so a pull can't insert a duplicate over an
       // in-flight push INSERT (#43). OutboxDao is a thin wrapper over rawDb.
       hasActivePush: (doctype) => OutboxDao(rawDb).hasActivePushFor(doctype),
+      pageSize: syncServicePageSize,
     );
     // Build UnifiedResolver — single read path for all offline queries.
     // Probe connectivity once here AND subscribe to the platform
@@ -388,7 +491,7 @@ class FrappeSDK {
         try {
           await syncSvc.pullSyncWaiting(doctype: doctype);
         } catch (e, st) {
-          debugPrint(
+          sdkLog(
             'FrappeSDK: background pullSync($doctype) failed — $e\n$st',
           );
         }
@@ -421,6 +524,7 @@ class FrappeSDK {
         // the SDK owns; the drain runs PushEngine.runOnce() to drain the
         // outbox before the local-state wipe.
         pushRunner: () => _pushEngine!.runOnce(),
+        pageSize: syncServicePageSize,
       ),
       residueCounter: _residueCount,
     );
@@ -429,6 +533,16 @@ class FrappeSDK {
     // Best-effort: re-hydrate any persisted SessionUser from the previous
     // app run. Idempotent — no-op when sdk_meta.session_user_json is null.
     await _sessionUserService!.restoreFromDb();
+
+    // If a persisted SessionUser carries a language preference, warm the
+    // translation cache from SQLite before the UI renders. This is a fast
+    // read (<5 ms) — no network. Currently inert because
+    // _setSessionUserFromLoginResponse does not yet persist language; it
+    // becomes effective once app-level locale persistence lands (Task 5).
+    final restoredLang = _sessionUserService?.current?.language;
+    if (restoredLang != null && restoredLang.isNotEmpty) {
+      await _translationService?.setLocale(restoredLang);
+    }
 
     _initialized = true;
 
@@ -575,10 +689,9 @@ class FrappeSDK {
     }
     _setSessionUserFromLoginResponse(response);
     await _persistOfflineFlagFromLogin(response);
-    // Always run meta + config sync after login, regardless of
-    // offline_enabled. Online mode still needs accurate doctype meta for
-    // form rendering, list view fields, and Link pickers. The closure pull
-    // inside _initialMetaAndDataSync short-circuits when offline is false.
+    // _initialMetaAndDataSync awaits refreshAll() internally — translations
+    // for all enabled languages are persisted to SQLite before the Syncing
+    // indicator clears. No separate refreshAllAsync needed here.
     unawaited(_initialMetaAndDataSync());
     return response;
   }
@@ -685,6 +798,9 @@ class FrappeSDK {
       await _authService!.logout(clearDatabase: clearDatabase);
     });
     if (clearDatabase) {
+      // Wipe the translation SQLite cache and in-memory map so a different
+      // user logging in on the same device doesn't see stale translations.
+      await _translationService?.clearAll();
       // In-memory mirrors of the now-dropped DB state. Without these, the
       // next session would short-circuit table-existence checks against a
       // cache that still remembers tables that no longer exist.
@@ -701,6 +817,15 @@ class FrappeSDK {
     _syncStateNotifier?.clearLastError();
   }
 
+  /// Throws if [initialize] hasn't run. Called as the first line of every
+  /// public service getter so the (12+) "if (!_initialized) throw ..."
+  /// blocks all share one canonical message and exception type.
+  void _assertInitialized() {
+    if (!_initialized) {
+      throw Exception('SDK not initialized. Call initialize() first.');
+    }
+  }
+
   /// Get Frappe API client (for direct API calls)
   ///
   /// Example:
@@ -709,50 +834,38 @@ class FrappeSDK {
   /// await client.document.createDocument('Customer', {'name': 'Test'});
   /// ```
   FrappeClient get api {
-    if (!_initialized) {
-      throw Exception('SDK not initialized. Call initialize() first.');
-    }
+    _assertInitialized();
     return _client!;
   }
 
   /// Get Auth Service
   AuthService get auth {
-    if (!_initialized) {
-      throw Exception('SDK not initialized. Call initialize() first.');
-    }
+    _assertInitialized();
     return _authService!;
   }
 
   /// Get Meta Service
   MetaService get meta {
-    if (!_initialized) {
-      throw Exception('SDK not initialized. Call initialize() first.');
-    }
+    _assertInitialized();
     return _metaService!;
   }
 
   /// Get Permission Service (doctype read/write/create/delete from login or mobile_auth.permissions)
   PermissionService get permissions {
-    if (!_initialized) {
-      throw Exception('SDK not initialized. Call initialize() first.');
-    }
+    _assertInitialized();
     return _permissionService!;
   }
 
   /// Get Translation Service (Frappe translations via mobile_auth.get_translations).
   /// Use [TranslationService.loadTranslations] then [TranslationService.translate] or [TranslationService.call].
   TranslationService get translations {
-    if (!_initialized) {
-      throw Exception('SDK not initialized. Call initialize() first.');
-    }
+    _assertInitialized();
     return _translationService!;
   }
 
   /// Get Sync Service
   SyncService get sync {
-    if (!_initialized) {
-      throw Exception('SDK not initialized. Call initialize() first.');
-    }
+    _assertInitialized();
     return _syncService!;
   }
 
@@ -763,9 +876,7 @@ class FrappeSDK {
   /// after a successful auth call. Logout flows call `.clear()` before
   /// running [AtomicWipe.wipe] to drop the persisted JSON.
   SessionUserService get sessionUserService {
-    if (!_initialized) {
-      throw Exception('SDK not initialized. Call initialize() first.');
-    }
+    _assertInitialized();
     return _sessionUserService!;
   }
 
@@ -780,9 +891,7 @@ class FrappeSDK {
 
   /// Get Repository (for offline operations)
   OfflineRepository get repository {
-    if (!_initialized) {
-      throw Exception('SDK not initialized. Call initialize() first.');
-    }
+    _assertInitialized();
     return _repository!;
   }
 
@@ -791,9 +900,7 @@ class FrappeSDK {
   /// - offline → per-doctype `docs__<doctype>` tables via FilterParser
   /// - online → `frappe.client.get_list` / `frappe.client.get_count`
   UnifiedResolver get resolver {
-    if (!_initialized) {
-      throw Exception('SDK not initialized. Call initialize() first.');
-    }
+    _assertInitialized();
     return _resolver!;
   }
 
@@ -804,30 +911,24 @@ class FrappeSDK {
   /// apps mount [OfflineTransitionScreen] above their router driven by
   /// this stream. Spec §7.
   OfflineTransitionService get offlineTransition {
-    if (!_initialized) {
-      throw Exception('SDK not initialized. Call initialize() first.');
-    }
+    _assertInitialized();
     return _offlineTransitionService!;
   }
 
   /// Get Link Option Service
   LinkOptionService get linkOptions {
-    if (!_initialized) {
-      throw Exception('SDK not initialized. Call initialize() first.');
-    }
+    _assertInitialized();
     return _linkOptionService!;
   }
 
   /// Get Database instance
   AppDatabase get database {
-    if (!_initialized) {
-      throw Exception('SDK not initialized. Call initialize() first.');
-    }
+    _assertInitialized();
     return _database!;
   }
 
   /// Imperative sync surface backing the sync error UI: `pendingErrors`,
-  /// `retry(outboxId)`, `retryAll`, `resolveConflict`. Returns `null`
+  /// `retry(outboxId)`, `retryAll`, `retryPaused(outboxId)`, `resolveConflict`. Returns `null`
   /// when the SDK was bootstrapped without an outbox-backed sync engine
   /// (e.g. some test seams) so call sites can render a static banner
   /// without retry affordances.
@@ -980,7 +1081,7 @@ class FrappeSDK {
         setAtMs: DateTime.now().millisecondsSinceEpoch,
       );
     } catch (e, st) {
-      debugPrint('FrappeSDK: failed to persist offline_enabled — $e\n$st');
+      sdkLog('FrappeSDK: failed to persist offline_enabled — $e\n$st');
       return;
     }
 
@@ -1073,7 +1174,12 @@ class FrappeSDK {
   }
 
   Future<void> _runInitialMetaAndDataSync() async {
-    if (_metaService == null || _syncService == null) return;
+    if (_disposed || _metaService == null || _syncService == null) return;
+    // Capture the service so a concurrent [dispose] nulling the field mid-flight
+    // cannot turn a later `!` deref into an NPE. dispose() does not close the
+    // AppDatabase singleton, so the captured service stays operable; the
+    // [_disposed] checkpoints below stop us doing pointless post-teardown work.
+    final meta = _metaService!;
 
     // Offline launch: every call below is pure-network and would block
     // on the HTTP timeout (~30s each, ~4 minutes total) before failing.
@@ -1109,7 +1215,7 @@ class FrappeSDK {
           at: DateTime.now(),
         ),
       );
-      debugPrint('FrappeSDK: boot sync — server unreachable: $e\n$st');
+      sdkLog('FrappeSDK: boot sync — server unreachable: $e\n$st');
       _setInitialSyncFlag(initialSyncNotifier, false);
       return;
     } catch (e, st) {
@@ -1120,27 +1226,37 @@ class FrappeSDK {
           at: DateTime.now(),
         ),
       );
-      debugPrint('FrappeSDK: permissions.syncFromApi failed — $e\n$st');
+      sdkLog('FrappeSDK: permissions.syncFromApi failed — $e\n$st');
       // Non-network failure: continue with other steps so a partial
       // outage (e.g. one method 500) doesn't block the rest of boot.
     }
 
+    // Await translations for ALL enabled languages so the SQLite cache is
+    // fully populated before the "Syncing…" indicator clears.  Errors per
+    // language are swallowed inside refreshAll() — a failing language never
+    // aborts meta sync.
     try {
-      await _translationService?.loadTranslations('en');
+      await _translationService?.refreshAll();
     } catch (e, st) {
-      debugPrint('FrappeSDK: translations.loadTranslations failed — $e\n$st');
+      sdkLog('FrappeSDK: translation refresh failed — $e\n$st');
     }
 
-    try {
-      await _metaService!.checkAndSyncDoctypes();
-    } catch (e, st) {
-      debugPrint('FrappeSDK: meta.checkAndSyncDoctypes failed — $e\n$st');
-    }
+    // The SDK may have been disposed during the network awaits above; bail
+    // before doing further work. (Do not touch the now-closed sync notifier.)
+    if (_disposed) return;
 
     try {
-      await _metaService!.resyncMobileConfiguration();
+      await meta.checkAndSyncDoctypes();
     } catch (e, st) {
-      debugPrint('FrappeSDK: meta.resyncMobileConfiguration failed — $e\n$st');
+      sdkLog('FrappeSDK: meta.checkAndSyncDoctypes failed — $e\n$st');
+    }
+
+    if (_disposed) return;
+
+    try {
+      await meta.resyncMobileConfiguration();
+    } catch (e, st) {
+      sdkLog('FrappeSDK: meta.resyncMobileConfiguration failed — $e\n$st');
     }
 
     // Online mode stops here — closure pull is offline-only.
@@ -1177,9 +1293,23 @@ class FrappeSDK {
   /// pull). Callers that care (SyncController) re-pull those doctypes after
   /// push completes.
   Future<Set<String>> _runUpgradeClosurePull() async {
-    if (_metaService == null || _syncService == null || _pullEngine == null) {
+    // Capture every field this pull touches so a concurrent [dispose] nulling
+    // them mid-pull cannot NPE the derefs below. The AppDatabase singleton is
+    // not closed by dispose, so the captured services remain usable.
+    final meta = _metaService;
+    final sync = _syncService;
+    final db = _database;
+    final pullEngine = _pullEngine;
+    final client = _client;
+    if (_disposed ||
+        meta == null ||
+        sync == null ||
+        db == null ||
+        pullEngine == null ||
+        client == null) {
       return const <String>{};
     }
+    final repository = _repository;
     // Block on any pending offline→online drain — its wipe phase drops
     // every `docs__*` table, which would clobber rows this pull is
     // about to insert. In the normal trigger path the offline-mode
@@ -1193,14 +1323,14 @@ class FrappeSDK {
         // Drain failure is surfaced via the transition stream; we just
         // need to know it has settled before writing to per-doctype tables.
         // Log so the failure mode is visible at the boot path too.
-        debugPrint('FrappeSDK: pending drain awaited with error — $e\n$st');
+        sdkLog('FrappeSDK: pending drain awaited with error — $e\n$st');
       }
     }
     try {
-      final onlineCheck = _isOnlineOverrideForTesting ?? _syncService!.isOnline;
+      final onlineCheck = _isOnlineOverrideForTesting ?? sync.isOnline;
       if (!await onlineCheck()) return const <String>{};
-      final entryPoints = await _metaService!.getMobileFormDoctypeNames();
-      final closure = await _metaService!.closure(entryPoints);
+      final entryPoints = await meta.getMobileFormDoctypeNames();
+      final closure = await meta.closure(entryPoints);
 
       // Create per-doctype mirror tables BEFORE the pull writes into them.
       // Without this, PullEngine.applyPageInTxn crashes with
@@ -1210,38 +1340,33 @@ class FrappeSDK {
       // ran during the SDK's auto-fired initial sync before this fix).
       // SNF's own runSnfPostSdkSync also calls ensureSchemaForClosure as
       // belt-and-suspenders; this call is idempotent.
-      if (_repository != null) {
+      if (repository != null) {
         final metasByDoctype = <String, DocTypeMeta>{};
         for (final dt in closure.doctypes) {
           try {
-            metasByDoctype[dt] = await _metaService!.getMeta(dt);
+            metasByDoctype[dt] = await meta.getMeta(dt);
           } catch (e, st) {
-            debugPrint(
+            sdkLog(
               'FrappeSDK: closure pull — getMeta($dt) failed — $e\n$st',
             );
           }
         }
         try {
-          await _repository!.ensureSchemaForClosure(
+          await repository.ensureSchemaForClosure(
             metas: metasByDoctype,
             childDoctypes: closure.childDoctypes,
           );
         } catch (e, st) {
-          debugPrint(
+          sdkLog(
             'FrappeSDK: closure pull — ensureSchemaForClosure failed — $e\n$st',
           );
         }
       }
 
-      final pullable = <String>{};
-      for (final doctype in closure.doctypes) {
-        if (closure.childDoctypes.contains(doctype)) continue;
-        if (_permissionService != null &&
-            !await _permissionService!.canRead(doctype)) {
-          continue;
-        }
-        pullable.add(doctype);
-      }
+      final pullable = await _buildPullableDoctypes(
+        entryPoints: entryPoints,
+        closure: closure,
+      );
       if (pullable.isEmpty) return const <String>{};
 
       // #49 pre-flight: ask the server which INCREMENTAL doctypes actually
@@ -1249,11 +1374,11 @@ class FrappeSDK {
       // (delta-ready) cursor are eligible — INITIAL/RESUME doctypes have no
       // trustworthy watermark and are always pulled. Any failure (missing
       // endpoint, network) leaves `allowed == pullable` → full pull.
-      var allowed = pullable;
+      var allowed = pullable.toSet();
       final eligible = <String, String>{}; // doctype -> since (cursor.modified)
       for (final dt in pullable) {
         try {
-          final raw = await _database!.doctypeMetaDao.getLastOkCursor(dt);
+          final raw = await db.doctypeMetaDao.getLastOkCursor(dt);
           if (raw == null || raw.isEmpty) continue;
           final cursor = Cursor.fromJson(
             jsonDecode(raw) as Map<String, dynamic>,
@@ -1261,22 +1386,29 @@ class FrappeSDK {
           if (cursor.complete && cursor.modified != null) {
             eligible[dt] = cursor.modified!;
           }
+          // TODO(#13): zero-row completed doctypes skip the cursor.modified
+          // filter and are re-pulled each cycle — needs a separate zero-row
+          // sentinel. A doctype whose last sync completed successfully but
+          // returned 0 rows has cursor.complete==true and cursor.modified==null,
+          // so it falls through the guard above and is re-included in every
+          // incremental cycle. Adding the sentinel requires a new cursor field
+          // (e.g. `zeroRowAt`) and a read in the eligibility filter here.
         } catch (e, st) {
-          debugPrint(
+          sdkLog(
             'FrappeSDK: sync_details cursor read($dt) failed — $e\n$st',
           );
         }
       }
       if (eligible.isNotEmpty) {
-        final manifest = await _client!.doctype.getSyncDetails([
+        final manifest = await client.doctype.getSyncDetails([
           for (final entry in eligible.entries)
             {'doctype': entry.key, 'since': entry.value},
         ]);
         if (manifest != null) {
           final skip = doctypesToSkip(eligible.keys.toSet(), manifest);
           if (skip.isNotEmpty) {
-            allowed = pullable.difference(skip);
-            debugPrint(
+            allowed = allowed.difference(skip);
+            sdkLog(
               'FrappeSDK: sync_details skipped ${skip.length}/'
               '${eligible.length} unchanged doctypes',
             );
@@ -1287,15 +1419,46 @@ class FrappeSDK {
       // Hold the SyncMutex for the entire closure pull so concurrent
       // single-doctype callers (pullSync, pullSyncWaiting) serialise
       // behind it — same contract as the former pullSyncMany call path.
-      return await _syncService!.protect(
-        () => _pullEngine!.run(closure, allowedDoctypes: allowed),
+      return await sync.protect(
+        () => pullEngine.run(closure, allowedDoctypes: allowed),
       );
     } catch (e, st) {
-      debugPrint('FrappeSDK: closure pull failed — $e\n$st');
+      sdkLog('FrappeSDK: closure pull failed — $e\n$st');
       return const <String>{};
     } finally {
       _syncCompleteController?.add(null);
     }
+  }
+
+  /// Builds the set of doctypes eligible for a closure pull, given the
+  /// already-resolved [closure] from `MetaService.closure(entryPoints)`.
+  /// Always excludes child-table doctypes (those ride inside parents)
+  /// and any doctype the user lacks read permission for. When
+  /// [excludeEntryPoints] is true, entry-point mobile-form doctypes are
+  /// also excluded — `forcePullAll` opts in because entry points are
+  /// managed by the normal sync cycle there; `_runUpgradeClosurePull`
+  /// opts out because the upgrade pull is its only sync trigger.
+  ///
+  /// Returns a `List<String>` rather than a `Set` because callers want
+  /// the cursor-clear pre-pass (`forcePullAll`) to iterate deterministically
+  /// and the closure pull (`_runUpgradeClosurePull`) accepts any iterable.
+  Future<List<String>> _buildPullableDoctypes({
+    required Iterable<String> entryPoints,
+    required ClosureResult closure,
+    bool excludeEntryPoints = false,
+  }) async {
+    final entryPointSet = excludeEntryPoints ? entryPoints.toSet() : null;
+    final pullable = <String>[];
+    for (final doctype in closure.doctypes) {
+      if (entryPointSet != null && entryPointSet.contains(doctype)) continue;
+      if (closure.childDoctypes.contains(doctype)) continue;
+      if (_permissionService != null &&
+          !await _permissionService!.canRead(doctype)) {
+        continue;
+      }
+      pullable.add(doctype);
+    }
+    return pullable;
   }
 
   /// Adapter for `SyncController.runPull`. Propagates the SIG-2 deferred set
@@ -1339,18 +1502,12 @@ class FrappeSDK {
     }
     try {
       final entryPoints = await _metaService!.getMobileFormDoctypeNames();
-      final entryPointSet = entryPoints.toSet();
       final closure = await _metaService!.closure(entryPoints);
-      final pullable = <String>[];
-      for (final doctype in closure.doctypes) {
-        if (entryPointSet.contains(doctype)) continue;
-        if (closure.childDoctypes.contains(doctype)) continue;
-        if (_permissionService != null &&
-            !await _permissionService!.canRead(doctype)) {
-          continue;
-        }
-        pullable.add(doctype);
-      }
+      final pullable = await _buildPullableDoctypes(
+        entryPoints: entryPoints,
+        closure: closure,
+        excludeEntryPoints: true,
+      );
       if (pullable.isEmpty) {
         _syncCompleteController?.add(null);
         return;
@@ -1363,7 +1520,7 @@ class FrappeSDK {
         try {
           await dao.clearLastOkCursor(doctype);
         } catch (e, st) {
-          debugPrint(
+          sdkLog(
             'FrappeSDK: forcePullAll cursor-clear($doctype) failed — $e\n$st',
           );
         }
@@ -1372,11 +1529,11 @@ class FrappeSDK {
       for (final entry in results.entries) {
         final err = entry.value.error;
         if (err != null && err.isNotEmpty) {
-          debugPrint('FrappeSDK: forcePullAll(${entry.key}) failed — $err');
+          sdkLog('FrappeSDK: forcePullAll(${entry.key}) failed — $err');
         }
       }
     } catch (e, st) {
-      debugPrint('FrappeSDK: forcePullAll failed — $e\n$st');
+      sdkLog('FrappeSDK: forcePullAll failed — $e\n$st');
     }
     _syncCompleteController?.add(null);
   }
@@ -1399,12 +1556,18 @@ class FrappeSDK {
   ///   `close()` on it because the next [initialize] would re-use the
   ///   same underlying database handle.
   Future<void> dispose() async {
+    // Signal first (before any await) so a fire-and-forget initial sync still
+    // in flight bails at its next checkpoint instead of touching the services
+    // and notifiers torn down below.
+    _disposed = true;
+
     // Tear down owned services that hold StreamControllers / subscriptions
     // first, so their listeners stop firing into nulled refs below.
     await _connectivitySub?.cancel();
     await _connectivityWatcher?.dispose();
     await _sessionUserService?.dispose();
     await _offlineTransitionService?.dispose();
+    await _translationService?.dispose();
 
     // ① Drain in-flight pull BEFORE closing the notifier it writes to.
     // _pendingDrain may hold a PullEngine.run() still calling
@@ -1415,7 +1578,7 @@ class FrappeSDK {
       try {
         await pending;
       } catch (e, st) {
-        debugPrint(
+        sdkLog(
           'FrappeSDK.dispose: pendingDrain still failing at teardown — '
           '$e\n$st',
         );
@@ -1447,6 +1610,7 @@ class FrappeSDK {
     _pullPool = null;
     _syncStateNotifier = null;
     _sessionUserService = null;
+    _securityService = null;
     _offlineTransitionService = null;
     _modeNotifier = null;
     _syncCompleteController = null;

@@ -5,24 +5,26 @@ import 'package:frappe_mobile_sdk/src/ui/widgets/delete_cascade_prompt.dart';
 void main() {
   testWidgets('shows per-doctype counts', (tester) async {
     DeleteCascadeAction? chose;
-    await tester.pumpWidget(MaterialApp(
-      home: Scaffold(
-        body: Builder(
-          builder: (ctx) => ElevatedButton(
-            onPressed: () async {
-              chose = await showDeleteCascadePrompt(
-                ctx,
-                rootName: 'ABC-001',
-                blockedBy: const {
-                  'Sales Invoice': ['INV-1', 'INV-2', 'INV-3'],
-                },
-              );
-            },
-            child: const Text('x'),
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: Builder(
+            builder: (ctx) => ElevatedButton(
+              onPressed: () async {
+                chose = await showDeleteCascadePrompt(
+                  ctx,
+                  rootName: 'ABC-001',
+                  blockedBy: const {
+                    'Sales Invoice': ['INV-1', 'INV-2', 'INV-3'],
+                  },
+                );
+              },
+              child: const Text('x'),
+            ),
           ),
         ),
       ),
-    ));
+    );
     await tester.tap(find.text('x'));
     await tester.pumpAndSettle();
     expect(find.textContaining('ABC-001'), findsOneWidget);
@@ -35,24 +37,26 @@ void main() {
 
   testWidgets('Fix manually returns fixManually', (tester) async {
     DeleteCascadeAction? chose;
-    await tester.pumpWidget(MaterialApp(
-      home: Scaffold(
-        body: Builder(
-          builder: (ctx) => ElevatedButton(
-            onPressed: () async {
-              chose = await showDeleteCascadePrompt(
-                ctx,
-                rootName: 'X',
-                blockedBy: const {
-                  'A': ['1'],
-                },
-              );
-            },
-            child: const Text('x'),
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: Builder(
+            builder: (ctx) => ElevatedButton(
+              onPressed: () async {
+                chose = await showDeleteCascadePrompt(
+                  ctx,
+                  rootName: 'X',
+                  blockedBy: const {
+                    'A': ['1'],
+                  },
+                );
+              },
+              child: const Text('x'),
+            ),
           ),
         ),
       ),
-    ));
+    );
     await tester.tap(find.text('x'));
     await tester.pumpAndSettle();
     await tester.tap(find.text('Fix manually'));
@@ -62,24 +66,26 @@ void main() {
 
   testWidgets('Cancel returns cancel', (tester) async {
     DeleteCascadeAction? chose;
-    await tester.pumpWidget(MaterialApp(
-      home: Scaffold(
-        body: Builder(
-          builder: (ctx) => ElevatedButton(
-            onPressed: () async {
-              chose = await showDeleteCascadePrompt(
-                ctx,
-                rootName: 'X',
-                blockedBy: const {
-                  'A': ['1'],
-                },
-              );
-            },
-            child: const Text('x'),
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: Builder(
+            builder: (ctx) => ElevatedButton(
+              onPressed: () async {
+                chose = await showDeleteCascadePrompt(
+                  ctx,
+                  rootName: 'X',
+                  blockedBy: const {
+                    'A': ['1'],
+                  },
+                );
+              },
+              child: const Text('x'),
+            ),
           ),
         ),
       ),
-    ));
+    );
     await tester.tap(find.text('x'));
     await tester.pumpAndSettle();
     await tester.tap(find.text('Cancel'));

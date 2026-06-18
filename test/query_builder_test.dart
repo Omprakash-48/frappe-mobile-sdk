@@ -25,7 +25,7 @@ class _FakeDoctypeService extends DoctypeService {
     List<List<dynamic>>? filters,
     List<List<dynamic>>? orFilters,
     int limitStart = 0,
-    int limitPageLength = 20,
+    int? limitPageLength,
     String? orderBy,
   }) async {
     lastFields = fields;

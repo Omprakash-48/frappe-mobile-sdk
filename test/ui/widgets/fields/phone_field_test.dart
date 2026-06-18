@@ -41,13 +41,13 @@ void main() {
   });
 
   group('toStored', () {
-    test('prepends +91 to a 10-digit number', () {
+    test('stores back as +91-prefixed value', () {
       expect(PhoneField.toStored('9876543210'), '+919876543210');
     });
-    test('strips non-digits before prepending +91', () {
+    test('strips non-digits then prepends +91', () {
       expect(PhoneField.toStored('98-76 54 32 10'), '+919876543210');
     });
-    test('empty input returns empty (not "+91")', () {
+    test('empty input returns empty', () {
       expect(PhoneField.toStored(''), '');
     });
   });
@@ -85,6 +85,35 @@ void main() {
       );
       await tester.enterText(find.byType(TextField), '');
       expect(emitted, isNull);
+    });
+
+    testWidgets('typing shorter input does not cause prefix duplication', (
+      tester,
+    ) async {
+      String? emitted;
+      await _pumpPhone(
+        tester,
+        field: DocField(fieldname: 'phone', fieldtype: 'Phone', label: 'Phone'),
+        onChanged: (v) => emitted = v as String?,
+      );
+
+      // Simulate typing '9'
+      await tester.enterText(find.byType(TextField), '9');
+      await tester.pump();
+      expect(find.text('9'), findsOneWidget);
+      expect(emitted, '+919');
+
+      // Simulate typing '98'
+      await tester.enterText(find.byType(TextField), '98');
+      await tester.pump();
+      expect(find.text('98'), findsOneWidget);
+      expect(emitted, '+9198');
+
+      // Simulate typing '987'
+      await tester.enterText(find.byType(TextField), '987');
+      await tester.pump();
+      expect(find.text('987'), findsOneWidget);
+      expect(emitted, '+91987');
     });
 
     testWidgets('required validator fails on empty submit', (tester) async {

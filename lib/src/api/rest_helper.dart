@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:math';
 
 import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
@@ -8,6 +9,43 @@ import 'package:path/path.dart';
 import 'exceptions.dart';
 import 'utils.dart';
 import '../utils/api_tracer.dart';
+
+/// Shared RNG for retry jitter. Not security-sensitive; a single instance
+/// avoids re-seeding cost and gives independent draws across retries.
+final Random _backoffRandom = Random();
+
+/// Equal-jitter exponential backoff for HTTP GET retries (#42 / A3).
+///
+/// Returns a delay in `[base/2, base]` where `base = 500ms * 2^attempt`.
+/// Keeping half the deterministic backoff guarantees a minimum spacing while
+/// randomising the rest de-synchronises simultaneous client reconnects,
+/// avoiding a thundering-herd against the Frappe backend after a shared outage.
+///
+/// [attempt] is clamped to `[0, 16]` so a runaway counter can never overflow
+/// `1 << attempt` into a tiny or negative `Duration`. Pass a seeded [random]
+/// in tests for determinism.
+///
+/// Note the ceiling: at `attempt == 16` the deterministic base is
+/// `500 * 2^16 ≈ 32.8s * 1000 = ~9.1 hours`. In practice `RestHelper` calls
+/// this with `attempt ∈ {0, 1}` (default budget of 2 retries), so the real
+/// delay never exceeds ~1s. Callers that may pass larger attempts — or that
+/// want a hard ceiling regardless — should pass [maxDelayMs] (e.g. `30000`),
+/// which caps the deterministic base before jitter so the returned delay
+/// stays in `[maxDelayMs/2, maxDelayMs]`. Left null (the default), behaviour
+/// is unchanged.
+Duration retryBackoffDelay(int attempt, {Random? random, int? maxDelayMs}) {
+  assert(attempt >= 0, 'retry attempt must be non-negative');
+  assert(
+    maxDelayMs == null || maxDelayMs > 0,
+    'maxDelayMs must be positive when provided',
+  );
+  final n = attempt.clamp(0, 16);
+  var base = 500 * (1 << n);
+  if (maxDelayMs != null && base > maxDelayMs) base = maxDelayMs;
+  final half = base ~/ 2;
+  final rnd = random ?? _backoffRandom;
+  return Duration(milliseconds: half + rnd.nextInt(half + 1));
+}
 
 /// HTTP client for Frappe REST API.
 ///
@@ -228,7 +266,7 @@ class RestHelper {
           error: null,
         );
 
-        return _handleResponse(response);
+        return await _handleResponse(response);
       } on AuthException catch (e) {
         if (e.statusCode == 401 &&
             _bearerToken != null &&
@@ -243,7 +281,7 @@ class RestHelper {
       } on SocketException catch (e) {
         if (method == 'GET' && attempts < effectiveMaxAttempts - 1) {
           attempts++;
-          await Future.delayed(Duration(milliseconds: 500 * (1 << attempts)));
+          await Future.delayed(retryBackoffDelay(attempts));
           continue;
         }
         final msg = e.message.toLowerCase();
@@ -256,7 +294,7 @@ class RestHelper {
       } on TimeoutException {
         if (method == 'GET' && attempts < effectiveMaxAttempts - 1) {
           attempts++;
-          await Future.delayed(Duration(milliseconds: 500 * (1 << attempts)));
+          await Future.delayed(retryBackoffDelay(attempts));
           continue;
         }
         throw NetworkException(
@@ -269,10 +307,10 @@ class RestHelper {
     }
   }
 
-  dynamic _handleResponse(http.Response response) {
+  Future<dynamic> _handleResponse(http.Response response) async {
     dynamic body;
     try {
-      body = jsonDecode(response.body);
+      body = await compute(jsonDecode, response.body);
     } catch (e, st) {
       // Non-JSON body. On 2xx we return raw text; on error status we
       // synthesize an ApiException below using the same raw body. Logged
@@ -381,7 +419,7 @@ class RestHelper {
       var response = await http.Response.fromStream(
         streamedResponse,
       ).timeout(uploadTimeout);
-      return _handleResponse(response);
+      return await _handleResponse(response);
     } on TimeoutException {
       throw NetworkException(
         'Upload timed out. Check your connection and try again.',

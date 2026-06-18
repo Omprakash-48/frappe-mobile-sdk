@@ -22,13 +22,21 @@ class FrappeClient {
     http.Client? httpClient,
     SessionStorage? sessionStorage,
     Future<bool> Function()? onTokenExpired,
+    int listChildDocsPageSize = 1000,
+    int listFullDocsPageSize = 1000,
+    int listDefaultPageSize = 20,
   }) : _restHelper = RestHelper(
          baseUrl,
          client: httpClient,
          onTokenExpired: onTokenExpired,
        ) {
     auth = AuthService(_restHelper, sessionStorage: sessionStorage);
-    doctype = DoctypeService(_restHelper);
+    doctype = DoctypeService(
+      _restHelper,
+      listChildDocsPageSize: listChildDocsPageSize,
+      listFullDocsPageSize: listFullDocsPageSize,
+      listDefaultPageSize: listDefaultPageSize,
+    );
     document = DocumentService(_restHelper);
     attachment = AttachmentService(_restHelper);
   }

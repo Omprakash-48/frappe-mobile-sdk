@@ -8,17 +8,16 @@ OutboxRow row(
   String uuid,
   OutboxOperation op, {
   String? payload,
-}) =>
-    OutboxRow(
-      id: id,
-      doctype: doctype,
-      mobileUuid: uuid,
-      operation: op,
-      payload: payload,
-      state: OutboxState.pending,
-      retryCount: 0,
-      createdAt: DateTime.utc(2026, 1, id),
-    );
+}) => OutboxRow(
+  id: id,
+  doctype: doctype,
+  mobileUuid: uuid,
+  operation: op,
+  payload: payload,
+  state: OutboxState.pending,
+  retryCount: 0,
+  createdAt: DateTime.utc(2026, 1, id),
+);
 
 void main() {
   test('no cross-row deps → everything in tier 0', () {
@@ -59,9 +58,12 @@ void main() {
       dependenciesForRow: (r) => r.id == 1 ? const ['u2'] : const ['u1'],
     );
     final all = tiers.expand((t) => t).toList();
-    expect(all.length, 2,
-        reason:
-            'cycle survivors must be emitted, not lost — engine then handles them');
+    expect(
+      all.length,
+      2,
+      reason:
+          'cycle survivors must be emitted, not lost — engine then handles them',
+    );
   });
 
   test('dependency on a mobile_uuid NOT in pending set → tier 0', () {

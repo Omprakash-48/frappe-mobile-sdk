@@ -147,19 +147,33 @@ class _GeolocationFieldWidgetState extends State<_GeolocationFieldWidget> {
         return;
       }
 
-      // Get current position
-      final position = await Geolocator.getCurrentPosition(
-        locationSettings: const LocationSettings(
-          accuracy: LocationAccuracy.high,
-          timeLimit: Duration(seconds: 15),
-        ),
-      );
+      // Get current position with fallback to last known position
+      Position? position;
+      try {
+        position = await Geolocator.getCurrentPosition(
+          locationSettings: const LocationSettings(
+            accuracy: LocationAccuracy.high,
+            timeLimit: Duration(seconds: 15),
+          ),
+        );
+      } catch (e) {
+        debugPrint(
+          'GeolocationField._fetchLocation getCurrentPosition failed: $e. Falling back to last known position.',
+        );
+        position = await Geolocator.getLastKnownPosition();
+        if (position == null) {
+          throw Exception(
+            'Timeout fetching live location and no last known position available.',
+          );
+        }
+      }
 
-      final geoJson = _toGeoJson(position.latitude, position.longitude);
+      final pos = position;
+      final geoJson = _toGeoJson(pos.latitude, pos.longitude);
 
       setState(() {
-        _latitude = position.latitude;
-        _longitude = position.longitude;
+        _latitude = pos.latitude;
+        _longitude = pos.longitude;
         _loading = false;
       });
 

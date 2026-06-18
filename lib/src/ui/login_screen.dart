@@ -9,6 +9,8 @@ import '../database/app_database.dart';
 import '../models/app_config.dart';
 import '../services/auth_service.dart';
 import 'login_screen_style.dart';
+import '../utils/sdk_log.dart';
+import '../utils/translate.dart';
 
 /// Login screen for Frappe (credentials, OAuth, or mobile OTP).
 ///
@@ -162,7 +164,7 @@ class _LoginScreenState extends State<LoginScreen> {
       setState(() => _socialProviders = parsed);
     } catch (e, st) {
       // Keep configured providers as fallback.
-      debugPrint(
+      sdkLog(
         'LoginScreen: fetchSocialLoginProviders failed, keeping configured fallback — $e\n$st',
       );
     }
@@ -173,7 +175,7 @@ class _LoginScreenState extends State<LoginScreen> {
       final uri = await _appLinks.getInitialLink();
       if (uri != null && mounted) _handleOAuthRedirect(uri);
     } catch (e, st) {
-      debugPrint('LoginScreen._checkInitialUri failed — $e\n$st');
+      sdkLog('LoginScreen._checkInitialUri failed — $e\n$st');
     }
   }
 
@@ -202,7 +204,7 @@ class _LoginScreenState extends State<LoginScreen> {
         incomingState != _oauthState) {
       if (mounted) {
         setState(() {
-          _errorMessage = 'OAuth state mismatch. Please try again.';
+          _errorMessage = sdkTr('OAuth state mismatch. Please try again.');
           _isLoading = false;
         });
       }
@@ -233,7 +235,7 @@ class _LoginScreenState extends State<LoginScreen> {
         }
       }
     } catch (e, st) {
-      debugPrint('LoginScreen._handleOAuthRedirect failed — $e\n$st');
+      sdkLog('LoginScreen._handleOAuthRedirect failed — $e\n$st');
       if (mounted) {
         setState(() {
           _errorMessage = e.toString().replaceAll('Exception: ', '');
@@ -259,8 +261,9 @@ class _LoginScreenState extends State<LoginScreen> {
     final clientId = _oauthClientId;
     if (baseUrl.isEmpty || clientId == null || clientId.isEmpty) {
       setState(() {
-        _errorMessage =
-            'OAuth is enabled but oauth_client_id is not set in config';
+        _errorMessage = sdkTr(
+          'OAuth is enabled but oauth_client_id is not set in config',
+        );
       });
       return;
     }
@@ -288,15 +291,16 @@ class _LoginScreenState extends State<LoginScreen> {
         await launchUrl(uri, mode: LaunchMode.externalApplication);
       } else {
         setState(() {
-          _errorMessage =
-              'Cannot open browser. Add https intent to AndroidManifest queries.';
+          _errorMessage = sdkTr(
+            'Cannot open browser. Add https intent to AndroidManifest queries.',
+          );
           _isLoading = false;
         });
         _cancelOAuthListener();
       }
       if (!mounted) return;
     } catch (e, st) {
-      debugPrint('LoginScreen._startOAuth failed — $e\n$st');
+      sdkLog('LoginScreen._startOAuth failed — $e\n$st');
       _cancelOAuthListener();
       setState(() {
         _errorMessage = e.toString().replaceAll('Exception: ', '');
@@ -310,8 +314,9 @@ class _LoginScreenState extends State<LoginScreen> {
     final clientId = _oauthClientId;
     if (baseUrl.isEmpty || clientId == null || clientId.isEmpty) {
       setState(() {
-        _errorMessage =
-            'OAuth is required for social login. Set oauth_client_id in config.';
+        _errorMessage = sdkTr(
+          'OAuth is required for social login. Set oauth_client_id in config.',
+        );
       });
       return;
     }
@@ -334,19 +339,25 @@ class _LoginScreenState extends State<LoginScreen> {
       });
       final uri = Uri.parse(authorizeUrl);
       final canLaunch = await canLaunchUrl(uri);
+      // Match _startOAuth: bail if the widget unmounted while we awaited
+      // canLaunchUrl/launchUrl so the subsequent setState doesn't fire on
+      // a deactivated state.
+      if (!mounted) return;
       if (canLaunch) {
         await launchUrl(uri, mode: LaunchMode.externalApplication);
       } else {
         setState(() {
-          _errorMessage =
-              'Cannot open browser. Add https intent to AndroidManifest queries.';
+          _errorMessage = sdkTr(
+            'Cannot open browser. Add https intent to AndroidManifest queries.',
+          );
           _isLoading = false;
         });
         _cancelOAuthListener();
       }
     } catch (e, st) {
-      debugPrint('LoginScreen._startSocialOAuth failed — $e\n$st');
+      sdkLog('LoginScreen._startSocialOAuth failed — $e\n$st');
       _cancelOAuthListener();
+      if (!mounted) return;
       setState(() {
         _errorMessage = e.toString().replaceAll('Exception: ', '');
         _isLoading = false;
@@ -374,7 +385,9 @@ class _LoginScreenState extends State<LoginScreen> {
         }
         if (widget.database == null) {
           throw Exception(
-            'Database not set. LoginScreen requires database for stateless login.',
+            sdkTr(
+              'Database not set. LoginScreen requires database for stateless login.',
+            ),
           );
         }
         await widget.authService.login(username, password);
@@ -384,18 +397,20 @@ class _LoginScreenState extends State<LoginScreen> {
         widget.onLoginSuccess?.call();
       }
     } catch (e, st) {
-      debugPrint('LoginScreen._handleLogin failed — $e\n$st');
-      setState(() {
-        _errorMessage = e.toString().replaceAll('Exception: ', '');
-        _isLoading = false;
-      });
+      sdkLog('LoginScreen._handleLogin failed — $e\n$st');
+      if (mounted) {
+        setState(() {
+          _errorMessage = e.toString().replaceAll('Exception: ', '');
+          _isLoading = false;
+        });
+      }
     }
   }
 
   Future<void> _handleSendOtp() async {
     final mobileNo = _mobileController.text.trim();
     if (mobileNo.isEmpty) {
-      setState(() => _errorMessage = 'Enter mobile number');
+      setState(() => _errorMessage = sdkTr('Enter mobile number'));
       return;
     }
     setState(() {
@@ -410,12 +425,12 @@ class _LoginScreenState extends State<LoginScreen> {
       }
       final response = await widget.sendLoginOtp!(mobileNo);
       if (response == null) {
-        throw Exception('Send OTP failed');
+        throw Exception(sdkTr('Send OTP failed'));
       }
       final tmpId = response['tmp_id']?.toString();
       if (tmpId == null || tmpId.isEmpty) {
         throw Exception(
-          response['message']?.toString() ?? 'No tmp_id in response',
+          response['message']?.toString() ?? sdkTr('No tmp_id in response'),
         );
       }
       if (mounted) {
@@ -426,7 +441,7 @@ class _LoginScreenState extends State<LoginScreen> {
         });
       }
     } catch (e, st) {
-      debugPrint('LoginScreen._handleSendOtp failed — $e\n$st');
+      sdkLog('LoginScreen._handleSendOtp failed — $e\n$st');
       if (mounted) {
         setState(() {
           _errorMessage = e.toString().replaceAll('Exception: ', '');
@@ -450,11 +465,13 @@ class _LoginScreenState extends State<LoginScreen> {
         widget.onLoginSuccess?.call();
       }
     } catch (e, st) {
-      debugPrint('LoginScreen._handleVerifyOtp failed — $e\n$st');
-      setState(() {
-        _errorMessage = e.toString().replaceAll('Exception: ', '');
-        _isLoading = false;
-      });
+      sdkLog('LoginScreen._handleVerifyOtp failed — $e\n$st');
+      if (mounted) {
+        setState(() {
+          _errorMessage = e.toString().replaceAll('Exception: ', '');
+          _isLoading = false;
+        });
+      }
     }
   }
 
@@ -467,12 +484,14 @@ class _LoginScreenState extends State<LoginScreen> {
         (_enableMobileLogin && _hasMobileOtpCallbacks);
     if (!hasAnyLogin) {
       return Scaffold(
-        appBar: AppBar(title: const Text('Frappe Login')),
+        appBar: AppBar(title: Text(sdkTr('Frappe Login'))),
         body: Center(
           child: Padding(
             padding: const EdgeInsets.all(24.0),
             child: Text(
-              'No login methods enabled. Configure login_config in AppConfig.',
+              sdkTr(
+                'No login methods enabled. Configure login_config in AppConfig.',
+              ),
               textAlign: TextAlign.center,
               style: Theme.of(context).textTheme.bodyLarge,
             ),
@@ -489,7 +508,7 @@ class _LoginScreenState extends State<LoginScreen> {
         (_enableMobileLogin && _hasMobileOtpCallbacks || _enableOAuth);
 
     return Scaffold(
-      appBar: AppBar(title: const Text('Frappe Login')),
+      appBar: AppBar(title: Text(sdkTr('Frappe Login'))),
       body: Center(
         child: SingleChildScrollView(
           padding: padding,
@@ -506,7 +525,7 @@ class _LoginScreenState extends State<LoginScreen> {
                 ),
                 const SizedBox(height: 32),
                 Text(
-                  'Login to Frappe',
+                  sdkTr('Login to Frappe'),
                   textAlign: TextAlign.center,
                   style:
                       style?.titleStyle ??
@@ -521,20 +540,20 @@ class _LoginScreenState extends State<LoginScreen> {
                     controller: _baseUrlController,
                     decoration:
                         style?.baseUrlDecoration ??
-                        const InputDecoration(
-                          labelText: 'Base URL',
-                          hintText: 'https://your-site.com',
-                          prefixIcon: Icon(Icons.link),
-                          border: OutlineInputBorder(),
+                        InputDecoration(
+                          labelText: sdkTr('Base URL'),
+                          hintText: sdkTr('https://your-site.com'),
+                          prefixIcon: const Icon(Icons.link),
+                          border: const OutlineInputBorder(),
                         ),
                     keyboardType: TextInputType.url,
                     validator: (value) {
                       if (value == null || value.isEmpty) {
-                        return 'Please enter base URL';
+                        return sdkTr('Please enter base URL');
                       }
                       final uri = Uri.tryParse(value);
                       if (uri == null || !uri.hasScheme || !uri.hasAuthority) {
-                        return 'Please enter a valid URL';
+                        return sdkTr('Please enter a valid URL');
                       }
                       return null;
                     },
@@ -546,15 +565,15 @@ class _LoginScreenState extends State<LoginScreen> {
                     controller: _usernameController,
                     decoration:
                         style?.usernameDecoration ??
-                        const InputDecoration(
-                          labelText: 'Username / Email',
-                          prefixIcon: Icon(Icons.person),
-                          border: OutlineInputBorder(),
+                        InputDecoration(
+                          labelText: sdkTr('Username / Email'),
+                          prefixIcon: const Icon(Icons.person),
+                          border: const OutlineInputBorder(),
                         ),
                     keyboardType: TextInputType.emailAddress,
                     validator: (value) {
                       if (value == null || value.isEmpty) {
-                        return 'Please enter username';
+                        return sdkTr('Please enter username');
                       }
                       return null;
                     },
@@ -564,15 +583,15 @@ class _LoginScreenState extends State<LoginScreen> {
                     controller: _passwordController,
                     decoration:
                         style?.passwordDecoration ??
-                        const InputDecoration(
-                          labelText: 'Password',
-                          prefixIcon: Icon(Icons.lock),
-                          border: OutlineInputBorder(),
+                        InputDecoration(
+                          labelText: sdkTr('Password'),
+                          prefixIcon: const Icon(Icons.lock),
+                          border: const OutlineInputBorder(),
                         ),
                     obscureText: true,
                     validator: (value) {
                       if (value == null || value.isEmpty) {
-                        return 'Please enter password';
+                        return sdkTr('Please enter password');
                       }
                       return null;
                     },
@@ -594,7 +613,7 @@ class _LoginScreenState extends State<LoginScreen> {
                               width: 20,
                               child: CircularProgressIndicator(strokeWidth: 2),
                             )
-                          : const Text('Login'),
+                          : Text(sdkTr('Login')),
                     ),
                   ),
                 ],
@@ -607,7 +626,7 @@ class _LoginScreenState extends State<LoginScreen> {
                       Padding(
                         padding: const EdgeInsets.symmetric(horizontal: 16),
                         child: Text(
-                          'OR',
+                          sdkTr('OR'),
                           style:
                               style?.orDividerTextStyle ??
                               Theme.of(context).textTheme.titleSmall?.copyWith(
@@ -632,13 +651,13 @@ class _LoginScreenState extends State<LoginScreen> {
                                   setState(() => _mobileSectionExpanded = true),
                         style: style?.mobileButtonStyle,
                         icon: const Icon(Icons.phone),
-                        label: const Text('Login with mobile'),
+                        label: Text(sdkTr('Login with mobile')),
                       ),
                     ),
                   if (_mobileSectionExpanded) ...[
                     if (_enablePasswordLogin)
                       Text(
-                        'Login with mobile',
+                        sdkTr('Login with mobile'),
                         style: Theme.of(context).textTheme.titleSmall,
                       ),
                     if (_enablePasswordLogin) const SizedBox(height: 12),
@@ -646,11 +665,11 @@ class _LoginScreenState extends State<LoginScreen> {
                       controller: _mobileController,
                       decoration:
                           style?.mobileDecoration ??
-                          const InputDecoration(
-                            labelText: 'Mobile number',
+                          InputDecoration(
+                            labelText: sdkTr('Mobile number'),
                             hintText: '+15551234567',
-                            prefixIcon: Icon(Icons.phone),
-                            border: OutlineInputBorder(),
+                            prefixIcon: const Icon(Icons.phone),
+                            border: const OutlineInputBorder(),
                           ),
                       keyboardType: TextInputType.phone,
                       enabled: !_otpSent && !_isLoading,
@@ -661,7 +680,7 @@ class _LoginScreenState extends State<LoginScreen> {
                         width: double.infinity,
                         child: OutlinedButton(
                           onPressed: _isLoading ? null : _handleSendOtp,
-                          child: const Text('Send OTP'),
+                          child: Text(sdkTr('Send OTP')),
                         ),
                       ),
                     ] else ...[
@@ -670,11 +689,11 @@ class _LoginScreenState extends State<LoginScreen> {
                         controller: _otpController,
                         decoration:
                             style?.otpDecoration ??
-                            const InputDecoration(
-                              labelText: 'OTP',
+                            InputDecoration(
+                              labelText: sdkTr('OTP'),
                               hintText: '123456',
-                              prefixIcon: Icon(Icons.pin),
-                              border: OutlineInputBorder(),
+                              prefixIcon: const Icon(Icons.pin),
+                              border: const OutlineInputBorder(),
                             ),
                         keyboardType: TextInputType.number,
                         maxLength: 6,
@@ -692,7 +711,7 @@ class _LoginScreenState extends State<LoginScreen> {
                                     strokeWidth: 2,
                                   ),
                                 )
-                              : const Text('Verify OTP'),
+                              : Text(sdkTr('Verify OTP')),
                         ),
                       ),
                       TextButton(
@@ -705,14 +724,14 @@ class _LoginScreenState extends State<LoginScreen> {
                                   _otpController.clear();
                                 });
                               },
-                        child: const Text('Change number'),
+                        child: Text(sdkTr('Change number')),
                       ),
                     ],
                     if (_enablePasswordLogin)
                       TextButton(
                         onPressed: () =>
                             setState(() => _mobileSectionExpanded = false),
-                        child: const Text('Back to password'),
+                        child: Text(sdkTr('Back to password')),
                       ),
                   ],
                   if (_enableMobileLogin &&
@@ -733,7 +752,7 @@ class _LoginScreenState extends State<LoginScreen> {
                             minimumSize: const Size(double.infinity, 48),
                           ),
                       icon: const Icon(Icons.login),
-                      label: const Text('Login with OAuth'),
+                      label: Text(sdkTr('Login with OAuth')),
                     ),
                   ),
                 if (_enableSocialLogin && _socialProviders.isNotEmpty) ...[
@@ -759,7 +778,9 @@ class _LoginScreenState extends State<LoginScreen> {
                                       const Icon(Icons.public),
                                 )
                               : const Icon(Icons.public),
-                          label: Text('Continue with ${provider.label}'),
+                          label: Text(
+                            sdkTr('Continue with {0}', [provider.label]),
+                          ),
                         ),
                       ),
                     );

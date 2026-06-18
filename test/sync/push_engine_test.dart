@@ -349,18 +349,42 @@ void main() {
     },
   );
 
-  test('ServerRejection → markFailed with mapped errorCode', () async {
-    final engine = buildEngine(
-      send: (m, p, sn) async => throw ServerRejection(
-        status: 417,
-        rawBody: '{"exc_type":"MandatoryError"}',
-      ),
-    );
-    await engine.runOnce();
-    final row = await outbox.findById(1);
-    expect(row!.state, OutboxState.failed);
-    expect(row.errorCode, ErrorCode.MANDATORY);
-  });
+  test(
+    'terminal ServerRejection (417) → markPaused, not retried (#53)',
+    () async {
+      final engine = buildEngine(
+        send: (m, p, sn) async => throw ServerRejection(
+          status: 417,
+          rawBody: '{"exc_type":"MandatoryError"}',
+        ),
+      );
+      await engine.runOnce();
+      final row = await outbox.findById(1);
+      // MANDATORY is terminal — parking it out of the retry loop avoids the
+      // infinite-retry deadlock the app previously string-matched 417 to detect.
+      expect(row!.state, OutboxState.paused);
+      expect(row.errorCode, ErrorCode.MANDATORY);
+      expect(row.isTerminal, isTrue);
+      // The drain must not pick it back up.
+      expect(await outbox.findByState(OutboxState.pending), isEmpty);
+    },
+  );
+
+  test(
+    'non-terminal ServerRejection (500) → markFailed, still retryable (#53)',
+    () async {
+      final engine = buildEngine(
+        send: (m, p, sn) async => throw ServerRejection(
+          status: 500,
+          rawBody: '{"exc_type":"SomeServerError"}',
+        ),
+      );
+      await engine.runOnce();
+      final row = await outbox.findById(1);
+      expect(row!.state, OutboxState.failed);
+      expect(row.isTerminal, isFalse);
+    },
+  );
 
   test('LinkExistsError on DELETE → markFailed with structured JSON', () async {
     await db.update(

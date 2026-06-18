@@ -1,7 +1,9 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_form_builder/flutter_form_builder.dart';
 import 'package:intl/intl.dart';
+import '../../../utils/date_helpers.dart';
 import 'base_field.dart';
+import 'field_helpers.dart';
 
 /// Widget for Date field type
 class DateField extends BaseField {
@@ -16,22 +18,16 @@ class DateField extends BaseField {
 
   @override
   Widget buildField(BuildContext context) {
-    DateTime? initialDate;
-    if (value != null) {
-      if (value is DateTime) {
-        initialDate = value;
-      } else if (value is String) {
-        initialDate = DateTime.tryParse(value);
-      }
-    }
-
     return FormBuilderDateTimePicker(
+      autovalidateMode: AutovalidateMode.onUserInteraction,
       key: ValueKey('date_${field.fieldname}'),
       name: field.fieldname ?? '',
-      initialValue: initialDate,
+      initialValue: parseDateTime(value),
       enabled: enabled && !field.readOnly,
       inputType: InputType.date,
       format: DateFormat('yyyy-MM-dd'),
+      firstDate: style?.getFirstDate?.call(field),
+      lastDate: style?.getLastDate?.call(field),
       decoration:
           style?.decoration ??
           InputDecoration(
@@ -42,12 +38,7 @@ class DateField extends BaseField {
             suffixIcon: const Icon(Icons.calendar_today),
           ),
       validator: field.reqd
-          ? (value) {
-              if (value == null) {
-                return '${field.displayLabel} is required';
-              }
-              return null;
-            }
+          ? (value) => requiredValidator(value, field.displayLabel)
           : null,
       onChanged: (val) => onChanged?.call(val?.toIso8601String()),
     );

@@ -147,7 +147,7 @@ void main() {
       ),
       formKey: formKey,
     );
-    await tester.enterText(find.byType(TextField), 'abc');
+    await tester.enterText(find.byType(TextField), '-');
     formKey.currentState!.saveAndValidate();
     await tester.pump();
     expect(find.text('Please enter a valid number'), findsOneWidget);
