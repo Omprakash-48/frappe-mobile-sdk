@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../../../models/doc_field.dart';
+import '../../../utils/translate.dart';
 import 'base_field.dart';
 
 /// `validator` for a required field. Returns the standard
@@ -11,9 +12,9 @@ import 'base_field.dart';
 /// `(value) => requiredValidator(value, field.displayLabel)` (or fold
 /// translation through [BaseField.style]) at the call site.
 String? requiredValidator(dynamic value, String label) {
-  if (value == null || value.toString().isEmpty) {
-    return '$label is required';
-  }
+  if (value == null) { return sdkTr('{0} is required', [label]); }
+  if (value is Iterable && value.isEmpty) { return sdkTr('{0} is required', [label]); }
+  if (value.toString().isEmpty) { return sdkTr('{0} is required', [label]); }
   return null;
 }
 

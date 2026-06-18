@@ -20,6 +20,7 @@ class PasswordField extends BaseField {
   @override
   Widget buildField(BuildContext context) {
     return FormBuilderTextField(
+      autovalidateMode: AutovalidateMode.onUserInteraction,
       key: ValueKey('password_${field.fieldname}'),
       name: field.fieldname ?? '',
       initialValue: value?.toString() ?? field.defaultValue ?? '',

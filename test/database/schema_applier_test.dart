@@ -43,8 +43,11 @@ void main() {
         DocField(fieldname: 'customer', fieldtype: 'Link', label: 'Customer'),
       ],
     );
-    await db.insert('doctype_meta',
-        {'doctype': 'Sales Order', 'metaJson': '{}', 'isMobileForm': 0});
+    await db.insert('doctype_meta', {
+      'doctype': 'Sales Order',
+      'metaJson': '{}',
+      'isMobileForm': 0,
+    });
     await SchemaApplier.apply(db, meta, isChildTable: false);
 
     final tbls = await db.rawQuery(
@@ -53,8 +56,11 @@ void main() {
     final tableNames = tbls.map((r) => r['name'] as String).toSet();
     expect(tableNames, contains('docs__sales_order'));
 
-    final metaRow = await db.query('doctype_meta',
-        where: 'doctype=?', whereArgs: ['Sales Order']);
+    final metaRow = await db.query(
+      'doctype_meta',
+      where: 'doctype=?',
+      whereArgs: ['Sales Order'],
+    );
     expect(metaRow.first['table_name'], 'docs__sales_order');
   });
 
@@ -65,8 +71,11 @@ void main() {
         DocField(fieldname: 'item_code', fieldtype: 'Data', label: 'Item'),
       ],
     );
-    await db.insert('doctype_meta',
-        {'doctype': 'Sales Order Item', 'metaJson': '{}', 'isMobileForm': 0});
+    await db.insert('doctype_meta', {
+      'doctype': 'Sales Order Item',
+      'metaJson': '{}',
+      'isMobileForm': 0,
+    });
     await SchemaApplier.apply(db, meta, isChildTable: true);
 
     final cols = await db.rawQuery('PRAGMA table_info(docs__sales_order_item)');
@@ -77,7 +86,11 @@ void main() {
 
   test('apply is idempotent on re-run (skips existing tables)', () async {
     final meta = DocTypeMeta(name: 'X', fields: const []);
-    await db.insert('doctype_meta', {'doctype': 'X', 'metaJson': '{}', 'isMobileForm': 0});
+    await db.insert('doctype_meta', {
+      'doctype': 'X',
+      'metaJson': '{}',
+      'isMobileForm': 0,
+    });
     await SchemaApplier.apply(db, meta, isChildTable: false);
     // Second run should not throw.
     await SchemaApplier.apply(db, meta, isChildTable: false);

@@ -31,6 +31,7 @@ class CheckField extends BaseField {
     }
 
     return FormBuilderSwitch(
+      autovalidateMode: AutovalidateMode.onUserInteraction,
       key: ValueKey('check_${field.fieldname}'),
       name: field.fieldname ?? '',
       initialValue: initialValue,

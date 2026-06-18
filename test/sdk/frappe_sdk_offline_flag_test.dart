@@ -94,8 +94,11 @@ void main() {
           'offline_enabled': false,
         });
 
-        // Give the unawaited transition a tick to run.
-        await Future<void>.delayed(const Duration(milliseconds: 50));
+        // Give the unawaited transition enough time to complete.
+        // 50 ms was sufficient in isolation but flaked under full-suite
+        // load when concurrent disk-I/O from migration tests competed for
+        // OS resources. 500 ms keeps the test fast while removing the race.
+        await Future<void>.delayed(const Duration(milliseconds: 500));
 
         // Empty residue → drain succeeds → wipe → completed.
         expect(emitted, contains(TransitionDraining));

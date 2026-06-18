@@ -1,6 +1,8 @@
 import 'dart:async';
 import 'dart:io';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_form_builder/flutter_form_builder.dart';
 import '../../models/doc_type_meta.dart';
 import '../../models/doc_field.dart';
@@ -13,6 +15,8 @@ import '../../utils/field_normalizer.dart';
 import 'fields/field_factory.dart';
 import 'fields/base_field.dart';
 import 'default_form_style.dart';
+
+export 'fields/link_field_picker_mode.dart';
 
 /// Simple 2-arg callback for Button field. Used by [FrappeFormBuilder] and [renderForm].
 typedef ButtonPressedCallback =
@@ -124,6 +128,15 @@ class FrappeFormStyle {
   /// Optional section card color.
   final Color? sectionCardColor;
 
+  /// Custom input formatters builder for text fields
+  final List<TextInputFormatter>? Function(DocField field)? inputFormatters;
+
+  final LinkFieldPickerMode linkFieldPickerMode;
+
+  /// Optional bounds evaluators for Date Pickers
+  final DateTime? Function(String doctype, DocField field)? getFirstDate;
+  final DateTime? Function(String doctype, DocField field)? getLastDate;
+
   const FrappeFormStyle({
     this.fieldDecoration,
     this.labelStyle,
@@ -139,6 +152,10 @@ class FrappeFormStyle {
     this.showFieldLabel = true,
     this.showFieldDescription = true,
     this.sectionCardColor,
+    this.inputFormatters,
+    this.linkFieldPickerMode = LinkFieldPickerMode.inline,
+    this.getFirstDate,
+    this.getLastDate,
   });
 }
 
@@ -259,7 +276,7 @@ class _FormColumn {
 }
 
 class _FrappeFormBuilderState extends State<FrappeFormBuilder>
-    with SingleTickerProviderStateMixin {
+    with TickerProviderStateMixin {
   late GlobalKey<FormBuilderState> _formKey;
   late final FieldFactory _fieldFactory;
   LinkFieldCoordinator? _linkFieldCoordinator;
@@ -275,6 +292,8 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
   /// builder is a top-level form (not a child-row form).
   Map<String, dynamic> get effectiveParentFormData =>
       widget.parentFormData ?? _formData;
+
+  TabController get tabController => _tabController;
 
   void _attachTabControllerListener() {
     _tabController.addListener(() {
@@ -383,6 +402,36 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
       normalized[entry.key] = FieldNormalizer.normalize(fieldMeta, entry.value);
     }
     return normalized;
+  }
+
+  /// The number of tabs [_buildFormStructure] will actually produce for [meta]
+  /// — i.e. the live `_tabs.length`, which is what the [TabController] length
+  /// must match.
+  ///
+  /// A plain count of `Tab Break` fields is NOT equivalent and must not be used
+  /// for the [didUpdateWidget] rebuild guard: [_buildFormStructure] skips
+  /// `hidden` fields (so a hidden Tab Break yields no tab) and synthesises an
+  /// implicit leading "Details" tab when content precedes the first Tab Break.
+  /// Counting raw Tab Break fields would miss both, letting the guard skip a
+  /// needed [TabController] rebuild and crash with a length/`_tabs` mismatch.
+  static int _effectiveTabCount(DocTypeMeta meta) {
+    var tabs = 0;
+    var sawContentBeforeFirstTab = false;
+    var inTab = false;
+    for (final field in meta.fields) {
+      if (field.hidden) continue;
+      final type = field.fieldtype;
+      if (type == FieldTypes.tabBreak) {
+        tabs++;
+        inTab = true;
+      } else if (type != FieldTypes.sectionBreak &&
+          type != FieldTypes.columnBreak) {
+        // A real content field outside any tab → implicit "Details" tab.
+        if (!inTab) sawContentBeforeFirstTab = true;
+      }
+    }
+    if (sawContentBeforeFirstTab) tabs++;
+    return tabs;
   }
 
   void _buildFormStructure() {
@@ -647,6 +696,10 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
       translate: widget.translate,
       showLabel: formStyle.showFieldLabel,
       showDescription: formStyle.showFieldDescription,
+      inputFormatters: formStyle.inputFormatters?.call(field),
+      linkFieldPickerMode: formStyle.linkFieldPickerMode,
+      getFirstDate: formStyle.getFirstDate != null ? (f) => formStyle.getFirstDate!(widget.meta.name, f) : null,
+      getLastDate: formStyle.getLastDate != null ? (f) => formStyle.getLastDate!(widget.meta.name, f) : null,
     );
 
     final fieldWithEffectiveProps = DocField(
@@ -1085,8 +1138,13 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
   @override
   void didUpdateWidget(FrappeFormBuilder oldWidget) {
     super.didUpdateWidget(oldWidget);
-    if (oldWidget.initialData != widget.initialData ||
-        oldWidget.meta != widget.meta) {
+    final initialDataChanged = !mapEquals(
+      oldWidget.initialData,
+      widget.initialData,
+    );
+    final metaChanged = oldWidget.meta.name != widget.meta.name ||
+        _effectiveTabCount(oldWidget.meta) != _effectiveTabCount(widget.meta);
+    if (initialDataChanged || metaChanged) {
       _progressSubscription?.cancel();
       _linkFieldCoordinator?.dispose();
       _linkFieldCoordinator = null;
@@ -1149,11 +1207,13 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
     final isValid = state.saveAndValidate();
     if (!isValid) {
       // Switch to tab containing the first invalid field so user sees the error.
+      String? firstInvalidField;
       for (final field in widget.meta.fields) {
         final name = field.fieldname;
         if (name == null || name.isEmpty) continue;
         final fieldState = state.fields[name];
         if (fieldState != null && fieldState.hasError) {
+          firstInvalidField = name;
           final tabIndex = _fieldTabIndex[name];
           if (tabIndex != null && _tabs.length > 1) {
             setState(() {
@@ -1163,6 +1223,38 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
           break;
         }
       }
+
+      // Smooth scroll to the first invalid field element
+      if (firstInvalidField != null) {
+        Future.delayed(const Duration(milliseconds: 150), () {
+          if (!mounted) return;
+          Element? errorElement;
+          void findErrorRecursive(Element element) {
+            if (errorElement != null) return;
+            final state = element is StatefulElement ? element.state : null;
+            if (state is FormFieldState && state.hasError) {
+              errorElement = element;
+              return;
+            }
+            element.visitChildren(findErrorRecursive);
+          }
+
+          context.visitChildElements(findErrorRecursive);
+
+          if (errorElement != null) {
+            final renderObject = errorElement!.renderObject;
+            if (renderObject != null && renderObject.attached) {
+              Scrollable.ensureVisible(
+                errorElement!,
+                duration: const Duration(milliseconds: 400),
+                curve: Curves.easeInOutCubic,
+                alignment: 0.2, // 20% offset from top
+              );
+            }
+          }
+        });
+      }
+
       widget.onValidationFailed?.call();
       return;
     }
@@ -1323,6 +1415,7 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
 
     return FormBuilder(
       key: _formKey,
+      initialValue: Map<String, dynamic>.from(_formData),
       child: Column(
         children: [
           if (_linkOptionsLoading)

@@ -57,6 +57,7 @@ class DurationField extends BaseField {
     }
 
     return FormBuilderTextField(
+      autovalidateMode: AutovalidateMode.onUserInteraction,
       key: ValueKey('duration_${field.fieldname}'),
       name: field.fieldname ?? '',
       initialValue: initialSeconds != null

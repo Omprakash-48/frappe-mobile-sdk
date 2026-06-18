@@ -57,7 +57,7 @@ typedef ApplySingleDocFn =
 /// scheduling, dependency tracking, and retry semantics live in
 /// PullEngine / PushEngine. The controller's job is to:
 /// - Provide a consumer-facing API (`syncNow`, `retry`, `retryAll`,
-///   `pause/resume`, `resolveConflict`).
+///   `retryPaused`, `pause/resume`, `resolveConflict`).
 /// - Re-prioritise outbox rows for `Retry all` per Spec §7.4.
 /// - Surface the `SyncState` stream the UI subscribes to.
 ///
@@ -192,6 +192,9 @@ class SyncController {
 
   /// Re-queue a single failed/blocked/conflict row and run a single
   /// push drain. No-op for `done` rows.
+  ///
+  /// For paused SUBMIT/CANCEL rows that cannot auto-retry, use
+  /// [retryPaused] instead.
   Future<void> retry(int outboxId) async {
     final row = await outboxDao.findById(outboxId);
     if (row == null) return;
@@ -200,15 +203,37 @@ class SyncController {
     await runPush();
   }
 
+  /// Resets a single paused row to [OutboxState.pending] and triggers a
+  /// push drain. Use when a terminal server rejection has been resolved
+  /// (e.g. corrected permissions, re-enabled workflow rule) and the user
+  /// explicitly requests a retry.
+  ///
+  /// For SAVE operations, prefer having the user re-save the corrected
+  /// document — [OutboxDao.recordSave] will collapse the paused row
+  /// automatically. This method is intended for SUBMIT and CANCEL rows
+  /// where no re-save mechanism exists.
+  ///
+  /// No-op when [outboxId] is not found.
+  Future<void> retryPaused(int outboxId) async {
+    final row = await outboxDao.findById(outboxId);
+    if (row == null) return;
+    await outboxDao.resetToPending(outboxId);
+    await runPush();
+  }
+
   /// All outbox rows in any "actionable" terminal state — failed,
-  /// conflict, or blocked. These are the buckets surfaced to the user as
-  /// errors and the rows that [retryAll] re-queues. Shared by `retryAll`
-  /// and `pendingErrors` so the set of "error" states stays uniform.
+  /// conflict, blocked, or paused. These are the buckets surfaced to the
+  /// user as errors. Shared by `retryAll` and `pendingErrors` so the set
+  /// of "error" states stays uniform. Note: `paused` rows are surfaced
+  /// here so they appear in the errors screen and [pendingErrors], but
+  /// [retryAll] explicitly skips them — paused rows re-enter `pending`
+  /// only via a user re-save (recordSave collapse) or explicit retry.
   Future<List<OutboxRow>> _allActionableRows() async {
     return [
       ...await outboxDao.findByState(OutboxState.failed),
       ...await outboxDao.findByState(OutboxState.conflict),
       ...await outboxDao.findByState(OutboxState.blocked),
+      ...await outboxDao.findByState(OutboxState.paused),
     ];
   }
 
@@ -216,12 +241,19 @@ class SyncController {
   /// priority, then run a single push drain. [filterDoctypes] limits
   /// the operation to a doctype subset (used by the per-doctype
   /// `Retry` action in SyncErrorsScreen).
+  ///
+  /// `paused` rows are intentionally excluded: they represent terminal
+  /// server rejections (validation/permission) that cannot succeed on
+  /// an automatic retry. They re-enter `pending` only when the user
+  /// re-saves the corrected record (recordSave collapses them).
   Future<void> retryAll({List<String>? filterDoctypes}) async {
     final all = await _allActionableRows();
     final filtered = filterDoctypes == null
         ? all
         : all.where((r) => filterDoctypes.contains(r.doctype)).toList();
-    final sorted = RetryPriority.sort(filtered);
+    final sorted = RetryPriority.sort(
+      filtered.where((r) => r.state != OutboxState.paused).toList(),
+    );
     for (final r in sorted) {
       await outboxDao.resetToPending(r.id);
     }

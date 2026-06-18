@@ -1,7 +1,7 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:math';
 
-import 'package:flutter/foundation.dart';
 import 'package:sqflite/sqflite.dart';
 
 import '../concurrency/concurrency_pool.dart';
@@ -24,6 +24,7 @@ import 'sync_state_notifier.dart';
 import 'tier_computer.dart';
 import 'three_way_merge.dart';
 import 'uuid_rewriter.dart';
+import '../utils/sdk_log.dart';
 import '../utils/uuid_pattern.dart';
 
 /// Sends a push request. [method] is one of POST / PUT / SUBMIT / CANCEL /
@@ -124,6 +125,12 @@ class PushEngine {
   /// and before HTTP dispatch. See [PayloadTransformerFn].
   final PayloadTransformerFn? payloadTransformer;
 
+  /// Optional. Invoked once at the end of every [runOnce] (in the `finally`,
+  /// after the rerun loop completes). Used to flush the per-drain error-log
+  /// collector. Best-effort: exceptions are swallowed so a flush failure can
+  /// never break the push drain.
+  final Future<void> Function()? onDrainComplete;
+
   /// RNG for backoff jitter. Deadlock victims that retry on a fixed
   /// schedule re-collide in lockstep; jitter spreads them out.
   final Random _rng = Random();
@@ -155,6 +162,7 @@ class PushEngine {
     DependenciesForRowFn? dependencyScanner,
     this.writeQueueResolver,
     this.payloadTransformer,
+    this.onDrainComplete,
     this.attachmentBackoff = kDefaultSyncBackoff,
     this.networkBackoff = kDefaultSyncBackoff,
   }) : dependencyScanner = dependencyScanner ?? _defaultDependencyScanner;
@@ -187,6 +195,27 @@ class PushEngine {
     } finally {
       _running = false;
       notifier.value = notifier.value.copyWith(isPushing: false);
+      final hook = onDrainComplete;
+      if (hook != null) {
+        // Fire-and-forget: best-effort telemetry must NOT extend the push
+        // critical section. SyncService.pushSync awaits runOnce() while
+        // holding _syncMutex (shared with pullSync), so awaiting a slow or
+        // timing-out flush here would stall pulls. The hook captures its
+        // data synchronously (errorLogCollector.drain() is evaluated when
+        // the closure runs), so the network POST can finish in the
+        // background after runOnce() resolves.
+        try {
+          unawaited(
+            hook().catchError((Object e, StackTrace st) {
+              sdkLog('PushEngine.onDrainComplete threw (ignored) — $e\n$st');
+            }),
+          );
+        } catch (e, st) {
+          sdkLog(
+            'PushEngine.onDrainComplete threw synchronously (ignored) — $e\n$st',
+          );
+        }
+      }
     }
   }
 
@@ -197,10 +226,10 @@ class PushEngine {
     await outboxDao.resetInFlightToPending();
 
     // Supersede pass — for any (doctype, mobile_uuid, operation) tuple
-    // with both a `failed` row AND a newer `pending` row, delete the
-    // older failed row directly. Keeps the outbox a true pending-work-
-    // only table (Invariant 2) and avoids a redundant retry that the
-    // newer pending row already covers.
+    // with both a `failed` or `paused` row AND a newer `pending` row,
+    // delete the older failed/paused row directly. Keeps the outbox a
+    // true pending-work-only table (Invariant 2) and avoids a redundant
+    // retry that the newer pending row already covers.
     await db.execute('''
         DELETE FROM outbox
          WHERE id IN (
@@ -210,7 +239,7 @@ class PushEngine {
                ON older.doctype     = newer.doctype
               AND older.mobile_uuid = newer.mobile_uuid
               AND older.operation   = newer.operation
-              AND older.state       = '${OutboxState.failed.wireName}'
+              AND older.state       IN ('${OutboxState.failed.wireName}', '${OutboxState.paused.wireName}')
               AND newer.state       = '${OutboxState.pending.wireName}'
               AND older.created_at  < newer.created_at
          )
@@ -322,13 +351,26 @@ class PushEngine {
         errorMessage: e.message,
       );
     } on ServerRejection catch (e) {
-      await outboxDao.markFailed(
-        row.id,
-        errorCode: e.toErrorCode(),
-        errorMessage: e.message,
-      );
+      // #53: a terminal rejection (validation/mandatory/permission/link) can
+      // never succeed on retry. Park it in `paused` (the drain reads only
+      // `pending`, so it won't loop) instead of `failed`, which the user/retry
+      // flow may re-attempt. A re-save of the corrected record re-queues it.
+      final code = e.toErrorCode();
+      if (code.isTerminal) {
+        await outboxDao.markPaused(
+          row.id,
+          errorCode: code,
+          errorMessage: e.message,
+        );
+      } else {
+        await outboxDao.markFailed(
+          row.id,
+          errorCode: code,
+          errorMessage: e.message,
+        );
+      }
     } catch (e, st) {
-      debugPrint(
+      sdkLog(
         'PushEngine: row(${row.id}, ${row.doctype}/${row.mobileUuid}) failed with unknown error — $e\n$st',
       );
       await outboxDao.markFailed(
@@ -414,8 +456,7 @@ class PushEngine {
       try {
         payload = transformer(row.doctype, payload, meta);
       } catch (e, st) {
-        // ignore: avoid_print
-        print('PushEngine._dispatchOnce: payloadTransformer threw — $e\n$st');
+        sdkLog('PushEngine._dispatchOnce: payloadTransformer threw — $e\n$st');
         // Fall through with un-transformed payload — never block the push.
       }
     }
@@ -733,7 +774,7 @@ class PushEngine {
     try {
       meta = await metaResolver(row.doctype);
     } catch (e, st) {
-      debugPrint('PushEngine: metaResolver(${row.doctype}) failed — $e\n$st');
+      sdkLog('PushEngine: metaResolver(${row.doctype}) failed — $e\n$st');
       return const [];
     }
 
@@ -763,9 +804,7 @@ class PushEngine {
       try {
         childMeta = await childMetaResolver(childDoctype);
       } catch (e, st) {
-        debugPrint(
-          'PushEngine: childMetaResolver($childDoctype) failed — $e\n$st',
-        );
+        sdkLog('PushEngine: childMetaResolver($childDoctype) failed — $e\n$st');
         continue;
       }
       for (final cr in childRows) {

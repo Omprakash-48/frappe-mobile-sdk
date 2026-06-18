@@ -4,6 +4,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:frappe_mobile_sdk/src/database/entities/link_option_entity.dart';
+import 'package:frappe_mobile_sdk/src/ui/widgets/fields/link_field_picker_mode.dart';
 import 'package:frappe_mobile_sdk/src/ui/widgets/fields/searchable_select.dart';
 
 LinkOptionEntity _opt(String name, [String? label]) => LinkOptionEntity(
@@ -21,6 +22,7 @@ Future<void> _pump(
   bool multi = false,
   bool enabled = true,
   bool loading = false,
+  LinkFieldPickerMode pickerMode = LinkFieldPickerMode.inline,
 }) async {
   await tester.pumpWidget(
     MaterialApp(
@@ -32,6 +34,7 @@ Future<void> _pump(
           multiSelect: multi,
           enabled: enabled,
           loading: loading,
+          pickerMode: pickerMode,
         ),
       ),
     ),
@@ -150,4 +153,33 @@ void main() {
     );
     expect(find.byType(TextField), findsNothing);
   });
+
+  testWidgets(
+    'dialog mode: tapping field opens SearchableSelectDialog and selects option',
+    (tester) async {
+      List<String>? emitted;
+      await _pump(
+        tester,
+        options: [_opt('TN', 'Tamil Nadu'), _opt('KL', 'Kerala')],
+        selected: const [],
+        onChanged: (v) => emitted = v,
+        pickerMode: LinkFieldPickerMode.dialog,
+      );
+
+      expect(find.byType(TextField), findsNothing);
+
+      await tester.tap(find.byType(InputDecorator));
+      await tester.pumpAndSettle();
+
+      expect(find.byType(AlertDialog), findsOneWidget);
+      expect(find.byType(TextField), findsOneWidget);
+      expect(find.text('Tamil Nadu'), findsOneWidget);
+
+      await tester.tap(find.text('Tamil Nadu'));
+      await tester.pumpAndSettle();
+
+      expect(find.byType(AlertDialog), findsNothing);
+      expect(emitted, ['TN']);
+    },
+  );
 }

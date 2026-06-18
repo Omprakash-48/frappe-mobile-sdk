@@ -51,9 +51,7 @@ void main() {
       final meta = DocTypeMeta(
         name: 'Comment',
         fields: [
-          f('reference_name',
-              'Dynamic Link',
-              options: 'reference_doctype'),
+          f('reference_name', 'Dynamic Link', options: 'reference_doctype'),
         ],
       );
       final g = DependencyGraphBuilder.buildOutgoing(meta);
@@ -62,10 +60,7 @@ void main() {
     });
 
     test('Link with no options is skipped (malformed meta)', () {
-      final meta = DocTypeMeta(
-        name: 'X',
-        fields: [f('broken', 'Link')],
-      );
+      final meta = DocTypeMeta(name: 'X', fields: [f('broken', 'Link')]);
       final g = DependencyGraphBuilder.buildOutgoing(meta);
       expect(g.outgoing, isEmpty);
     });

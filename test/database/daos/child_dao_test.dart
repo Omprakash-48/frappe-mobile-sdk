@@ -23,7 +23,10 @@ void main() {
         DocField(fieldname: 'qty', fieldtype: 'Int', label: 'Q'),
       ],
     );
-    for (final stmt in buildChildSchemaDDL(meta, tableName: 'docs__order_item')) {
+    for (final stmt in buildChildSchemaDDL(
+      meta,
+      tableName: 'docs__order_item',
+    )) {
       await db.execute(stmt);
     }
     dao = ChildDao(db, tableName: 'docs__order_item');
@@ -33,12 +36,20 @@ void main() {
 
   test('insert + listByParent ordered by idx', () async {
     await dao.insert({
-      'parent_uuid': 'P', 'parent_doctype': 'Order',
-      'parentfield': 'items', 'idx': 2, 'item_code': 'B', 'qty': 2,
+      'parent_uuid': 'P',
+      'parent_doctype': 'Order',
+      'parentfield': 'items',
+      'idx': 2,
+      'item_code': 'B',
+      'qty': 2,
     });
     await dao.insert({
-      'parent_uuid': 'P', 'parent_doctype': 'Order',
-      'parentfield': 'items', 'idx': 1, 'item_code': 'A', 'qty': 1,
+      'parent_uuid': 'P',
+      'parent_doctype': 'Order',
+      'parentfield': 'items',
+      'idx': 1,
+      'item_code': 'A',
+      'qty': 1,
     });
     final rows = await dao.listByParent('P', 'items');
     expect(rows.map((r) => r['idx']).toList(), [1, 2]);
@@ -46,12 +57,18 @@ void main() {
 
   test('deleteByParent removes all children for parent+field', () async {
     await dao.insert({
-      'parent_uuid': 'P1', 'parent_doctype': 'O',
-      'parentfield': 'items', 'idx': 1, 'item_code': 'A',
+      'parent_uuid': 'P1',
+      'parent_doctype': 'O',
+      'parentfield': 'items',
+      'idx': 1,
+      'item_code': 'A',
     });
     await dao.insert({
-      'parent_uuid': 'P2', 'parent_doctype': 'O',
-      'parentfield': 'items', 'idx': 1, 'item_code': 'X',
+      'parent_uuid': 'P2',
+      'parent_doctype': 'O',
+      'parentfield': 'items',
+      'idx': 1,
+      'item_code': 'X',
     });
     final n = await dao.deleteByParent('P1', 'items');
     expect(n, 1);
@@ -60,15 +77,21 @@ void main() {
 
   test('transactional replace: delete + insert new rows', () async {
     await dao.insert({
-      'parent_uuid': 'P', 'parent_doctype': 'O',
-      'parentfield': 'items', 'idx': 1, 'item_code': 'Old',
+      'parent_uuid': 'P',
+      'parent_doctype': 'O',
+      'parentfield': 'items',
+      'idx': 1,
+      'item_code': 'Old',
     });
     await db.transaction((txn) async {
       final tdao = ChildDao(txn, tableName: 'docs__order_item');
       await tdao.deleteByParent('P', 'items');
       await tdao.insert({
-        'parent_uuid': 'P', 'parent_doctype': 'O',
-        'parentfield': 'items', 'idx': 1, 'item_code': 'New',
+        'parent_uuid': 'P',
+        'parent_doctype': 'O',
+        'parentfield': 'items',
+        'idx': 1,
+        'item_code': 'New',
       });
     });
     final rows = await dao.listByParent('P', 'items');

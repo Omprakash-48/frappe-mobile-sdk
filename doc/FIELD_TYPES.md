@@ -34,10 +34,17 @@ for Frappe field types that require custom rendering beyond simple text inputs.
 
 ---
 
-## SearchableSelect
+## SearchableSelect (Internal Widget)
 
 A reusable type-ahead search widget used internally by Link fields and
 Table MultiSelect fields.
+
+> **Note:** `SearchableSelect` and `SearchableSelectDialog` are **internal
+> implementation details** of the SDK. They are **not exported** from the
+> SDK barrel (`frappe_mobile_sdk.dart`) and are not part of the public API.
+> Consumer apps cannot instantiate them directly. If you need a searchable
+> dropdown in custom widgets, build one using Flutter's standard widgets or
+> a third-party package.
 
 **File:** `lib/src/ui/widgets/fields/searchable_select.dart`
 
@@ -57,24 +64,18 @@ Table MultiSelect fields.
 - Option loading is the caller's responsibility; the widget is purely
   presentational
 
-### Usage
+### Picker Modes (Inline vs Dialog)
 
-SearchableSelect is not typically used directly by app code. It is used
-internally by `LinkField` and `TableMultiSelectFieldBase`. If you need a
-searchable dropdown in your custom widgets, you can use it:
+By default, the SDK renders the search interface inline. This behavior can be controlled using the `linkFieldPickerMode` property on `FrappeFormStyle` (which **is** exported and available to consumers):
 
-```dart
-SearchableSelect(
-  options: linkOptions,        // List<LinkOptionEntity>
-  selected: ['selected-id'],   // List<String>
-  multiSelect: false,
-  enabled: true,
-  hintText: 'Search...',
-  onChanged: (values) {
-    // values is List<String> of selected option names
-  },
-)
-```
+- **Inline Mode** (`LinkFieldPickerMode.inline`):
+  - Renders a dropdown suggestion list directly beneath the input field as the user types.
+  - Good for quick, simple selections.
+- **Dialog Mode** (`LinkFieldPickerMode.dialog`):
+  - Tapping the field opens a modal popup (`SearchableSelectDialog`).
+  - Contains a dedicated search input.
+  - Displays choices in a list. For single-select, selecting an option automatically commits it and dismisses the dialog. For multi-select, it displays checkboxes alongside options and requires tapping "Done" to commit.
+  - Useful when options need more screen space or for cleaner form presentation.
 
 ---
 

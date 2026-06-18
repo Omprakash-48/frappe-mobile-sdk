@@ -13,9 +13,18 @@ import '../widgets/screen_helpers.dart';
 /// `retryAllRunning` disables per-row Retry buttons (as the engine
 /// drains the queue in priority order) and swaps the header button
 /// from `Retry all` → `Stop`.
+///
+/// For a [OutboxState.paused] row, the per-row Retry uses [onRetryPaused] when
+/// supplied (wire it to `SyncController.retryPaused`) so the paused-row
+/// recovery path is taken explicitly rather than routing through the generic
+/// [onRetry]. When [onRetryPaused] is null, paused rows fall back to [onRetry].
 class SyncErrorsScreen extends StatelessWidget {
   final List<OutboxRow> rows;
   final Future<void> Function(int outboxId) onRetry;
+
+  /// Recovery action for [OutboxState.paused] rows. Optional for backward
+  /// compatibility; falls back to [onRetry] when not provided.
+  final Future<void> Function(int outboxId)? onRetryPaused;
   final Future<void> Function() onRetryAll;
   final Future<void> Function() onStop;
   final void Function(OutboxRow) onOpen;
@@ -26,12 +35,21 @@ class SyncErrorsScreen extends StatelessWidget {
     super.key,
     required this.rows,
     required this.onRetry,
+    this.onRetryPaused,
     required this.onRetryAll,
     required this.onStop,
     required this.onOpen,
     required this.onViewError,
     required this.retryAllRunning,
   });
+
+  /// Routes a row's per-row Retry to the state-appropriate action.
+  Future<void> _retryRow(OutboxRow r) {
+    if (r.state == OutboxState.paused && onRetryPaused != null) {
+      return onRetryPaused!(r.id);
+    }
+    return onRetry(r.id);
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -78,7 +96,7 @@ class SyncErrorsScreen extends StatelessWidget {
                                 ? null
                                 : () => _runAndSurface(
                                     context,
-                                    () => onRetry(r.id),
+                                    () => _retryRow(r),
                                     'Retry',
                                   ),
                             child: const Text('Retry'),

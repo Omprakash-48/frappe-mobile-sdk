@@ -7,27 +7,37 @@ import '../../models/outbox_row.dart';
 /// knew about the doc, so there is nothing to push).
 enum RecordSaveResult { enqueued, cancelledLocally }
 
-/// The four outbox states that can be collapsed into a newer save:
-/// `pending`, `failed`, `blocked`, `conflict`. `in_flight` and `done`
-/// are deliberately excluded (a save during an in-flight push always
+/// The outbox states that can be collapsed into a newer save:
+/// `pending`, `failed`, `blocked`, `conflict`, `paused`. `in_flight` and
+/// `done` are deliberately excluded (a save during an in-flight push always
 /// inserts a fresh follow-up row).
+///
+/// `paused` (#53) is collapsable so that a corrected re-save re-queues a row
+/// the server had terminally rejected — that is the resume path out of pause.
 final List<String> _collapsableStateWireNames = <String>[
   OutboxState.pending.wireName,
   OutboxState.failed.wireName,
   OutboxState.blocked.wireName,
   OutboxState.conflict.wireName,
+  OutboxState.paused.wireName,
 ];
+
+/// `state IN (?, ?, ...)` — one placeholder per collapsable state. Built from
+/// [_collapsableStateWireNames] so the placeholder count can never drift from
+/// the arg list when a state is added (e.g. `paused`).
+final String _collapsableStateInClause =
+    'state IN (${List.filled(_collapsableStateWireNames.length, '?').join(', ')})';
 
 /// SQL WHERE clause that matches outbox rows in any collapsable state
 /// for a given (doctype, mobileUuid). Used by [OutboxDao.recordSave]
 /// (for both the collapse-candidate lookup and the DELETE-cancels-prior
-/// branch) and [OutboxDao.cancelPendingFor]. The four `?` placeholders
-/// after `state IN` are filled from [_collapsableStateWireNames].
-const String _collapsableWhereClause =
-    'doctype = ? AND mobile_uuid = ? AND state IN (?, ?, ?, ?)';
+/// branch) and [OutboxDao.cancelPendingFor]. Placeholders after `state IN`
+/// are filled from [_collapsableStateWireNames].
+final String _collapsableWhereClause =
+    'doctype = ? AND mobile_uuid = ? AND $_collapsableStateInClause';
 
 /// Builds the whereArgs list to go with [_collapsableWhereClause]:
-/// `[doctype, mobileUuid, pending, failed, blocked, conflict]`.
+/// `[doctype, mobileUuid, pending, failed, blocked, conflict, paused]`.
 List<Object?> _collapsableWhereArgs(String doctype, String mobileUuid) =>
     <Object?>[doctype, mobileUuid, ..._collapsableStateWireNames];
 
@@ -57,9 +67,9 @@ class OutboxDao {
   /// Records a save against the outbox.
   ///
   /// Only collapses against rows in `pending`, `failed`, `blocked`,
-  /// `conflict` (the "collapsable" buckets). `in_flight` and `done` are
-  /// never touched — a save during an in-flight push always inserts a
-  /// fresh follow-up row.
+  /// `conflict`, `paused` (the "collapsable" buckets). `in_flight` and
+  /// `done` are never touched — a save during an in-flight push always
+  /// inserts a fresh follow-up row.
   Future<RecordSaveResult> recordSave({
     required String doctype,
     required String mobileUuid,
@@ -103,7 +113,7 @@ class OutboxDao {
         'outbox',
         where:
             'doctype = ? AND mobile_uuid = ? AND operation = ? '
-            'AND state IN (?, ?, ?, ?)',
+            'AND $_collapsableStateInClause',
         whereArgs: [
           doctype,
           mobileUuid,
@@ -140,6 +150,23 @@ class OutboxDao {
     );
     if (existingInsert.isNotEmpty) {
       await resetToPending(existingInsert['id'] as int);
+      // Delete any redundant collapsable INSERT rows (e.g. a paused row
+      // that co-exists with the pending one after the supersede pass
+      // didn't clean it up). Without this, two pending INSERTs can pile
+      // up for the same document.
+      await _db.delete(
+        'outbox',
+        where:
+            'doctype = ? AND mobile_uuid = ? AND operation = ? AND id != ? '
+            'AND $_collapsableStateInClause',
+        whereArgs: [
+          doctype,
+          mobileUuid,
+          'INSERT',
+          existingInsert['id'],
+          ..._collapsableStateWireNames,
+        ],
+      );
       return RecordSaveResult.enqueued;
     }
     final existingUpdate = existing.firstWhere(
@@ -148,6 +175,20 @@ class OutboxDao {
     );
     if (existingUpdate.isNotEmpty) {
       await resetToPending(existingUpdate['id'] as int);
+      // Delete any redundant collapsable UPDATE rows for the same tuple.
+      await _db.delete(
+        'outbox',
+        where:
+            'doctype = ? AND mobile_uuid = ? AND operation = ? AND id != ? '
+            'AND $_collapsableStateInClause',
+        whereArgs: [
+          doctype,
+          mobileUuid,
+          'UPDATE',
+          existingUpdate['id'],
+          ..._collapsableStateWireNames,
+        ],
+      );
       return RecordSaveResult.enqueued;
     }
     await insertPending(
@@ -235,6 +276,28 @@ class OutboxDao {
       'outbox',
       <String, Object?>{
         'state': OutboxState.failed.wireName,
+        'error_code': errorCode.wireName,
+        'error_message': errorMessage,
+      },
+      where: 'id = ?',
+      whereArgs: [id],
+    );
+  }
+
+  /// Parks a row out of the auto-retry loop after a terminal server rejection
+  /// (#53). Distinct from [markFailed]: the push drain reads only `pending`,
+  /// so a `paused` row is never auto-retried. It re-enters `pending` when the
+  /// user re-saves the record ([recordSave] collapses it) or explicitly via
+  /// [resetToPending].
+  Future<void> markPaused(
+    int id, {
+    required ErrorCode errorCode,
+    required String errorMessage,
+  }) async {
+    await _db.update(
+      'outbox',
+      <String, Object?>{
+        'state': OutboxState.paused.wireName,
         'error_code': errorCode.wireName,
         'error_message': errorMessage,
       },

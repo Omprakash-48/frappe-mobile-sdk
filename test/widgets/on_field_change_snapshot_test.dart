@@ -34,18 +34,19 @@ void main() {
         ),
       );
 
-      await tester.enterText(
-        find.byKey(const ValueKey('data_a')),
-        'hello',
-      );
+      await tester.enterText(find.byKey(const ValueKey('data_a')), 'hello');
       await tester.pumpAndSettle();
 
-      expect(lastEmitted, isNotNull,
-          reason: 'onFormDataChanged must fire after a field edit');
+      expect(
+        lastEmitted,
+        isNotNull,
+        reason: 'onFormDataChanged must fire after a field edit',
+      );
       expect(
         lastEmitted!.containsKey('sneaky'),
         isFalse,
-        reason: 'onFieldChange must receive a snapshot; mutations must not '
+        reason:
+            'onFieldChange must receive a snapshot; mutations must not '
             'propagate into the SDK\'s _formData',
       );
     },

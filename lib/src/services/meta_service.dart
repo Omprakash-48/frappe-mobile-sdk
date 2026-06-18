@@ -515,10 +515,12 @@ class MetaService {
     List<String> doctypes, {
     BulkWatermarkProbe? probe,
     Future<String?> Function(String doctype)? watermarkFetcher,
+    void Function(double progress, String step)? onProgress,
   }) async {
     if (probe != null) {
       final detection = await probe.detect(candidates: doctypes);
       if (detection.available) {
+        onProgress?.call(0.5, 'Checking schemas via bulk probe...');
         final rows = await probe.fetchWatermarks(doctypes);
         return {
           for (final r in rows)
@@ -529,7 +531,9 @@ class MetaService {
     final out = <String, String?>{};
     final fallback =
         watermarkFetcher ?? (dt) => _client.doctype.getDocTypeWatermark(dt);
-    for (final dt in doctypes) {
+    for (int i = 0; i < doctypes.length; i++) {
+      final dt = doctypes[i];
+      onProgress?.call(i / doctypes.length, 'Checking schema for $dt...');
       try {
         out[dt] = await fallback(dt);
       } catch (e, st) {
@@ -557,6 +561,7 @@ class MetaService {
     BulkWatermarkProbe? probe,
     Future<String?> Function(String doctype)? watermarkFetcher,
     MetaFetcher? metaFetcher,
+    void Function(double progress, String step)? onProgress,
   }) async {
     final dao = _database.doctypeMetaDao;
     final fetchMeta = metaFetcher ?? (dt) => getMeta(dt, forceRefresh: true);
@@ -564,13 +569,18 @@ class MetaService {
       doctypes,
       probe: probe,
       watermarkFetcher: watermarkFetcher,
+      onProgress: (p, step) {
+        onProgress?.call(p * 0.5, step);
+      },
     );
 
     final updated = <String>[];
     final unchanged = <String>[];
     final failed = <String, String>{};
 
-    for (final dt in doctypes) {
+    for (int i = 0; i < doctypes.length; i++) {
+      final dt = doctypes[i];
+      onProgress?.call(0.5 + (i / doctypes.length) * 0.5, 'Updating schema for $dt...');
       try {
         final newMark = serverMarks[dt];
         if (newMark == null) {

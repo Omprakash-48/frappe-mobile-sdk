@@ -7,11 +7,14 @@ DocField f(String n, String t) =>
     DocField(fieldname: n, fieldtype: t, label: n);
 
 void main() {
-  final meta = DocTypeMeta(name: 'T', fields: [
-    f('created_at', 'Datetime'),
-    f('created_on', 'Date'),
-    f('qty', 'Int'),
-  ]);
+  final meta = DocTypeMeta(
+    name: 'T',
+    fields: [
+      f('created_at', 'Datetime'),
+      f('created_on', 'Date'),
+      f('qty', 'Int'),
+    ],
+  );
 
   group('between', () {
     test('Datetime between pair — inclusive', () {

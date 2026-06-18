@@ -12,6 +12,7 @@ import '../models/doc_type_meta.dart';
 import '../models/meta_resolver.dart';
 import '../models/offline_mode.dart';
 import '../models/offline_mode_notifier.dart';
+import '../utils/sdk_log.dart';
 import 'filter_parser.dart';
 import 'link_decorator.dart';
 import 'query_result.dart';
@@ -139,15 +140,11 @@ class UnifiedResolver {
       pageSize: pageSize,
     );
     final rawRows = await db.rawQuery(parsed.sql, parsed.params);
-    final rows = await Future.wait(
-      rawRows.map((r) async {
-        return LinkDecorator.decorate(
-          db: db,
-          parentMeta: meta,
-          row: Map<String, Object?>.from(r),
-          targetMetaResolver: metaResolver,
-        );
-      }),
+    final rows = await LinkDecorator.decorateBatch(
+      db: db,
+      parentMeta: meta,
+      rows: rawRows,
+      targetMetaResolver: metaResolver,
     );
 
     if (isOnline()) {
@@ -211,8 +208,12 @@ class UnifiedResolver {
       if (raw is int) return raw;
       if (raw is num) return raw.toInt();
       return 0;
-    } on DatabaseException {
+    } on DatabaseException catch (e) {
       // Table doesn't exist yet — pull engine creates it lazily.
+      sdkLog(
+        'UnifiedResolver.count: table "$tableName" not yet created, '
+        'returning 0 — $e',
+      );
       return 0;
     }
   }

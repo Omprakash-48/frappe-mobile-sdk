@@ -19,12 +19,15 @@ class DateField extends BaseField {
   @override
   Widget buildField(BuildContext context) {
     return FormBuilderDateTimePicker(
+      autovalidateMode: AutovalidateMode.onUserInteraction,
       key: ValueKey('date_${field.fieldname}'),
       name: field.fieldname ?? '',
       initialValue: parseDateTime(value),
       enabled: enabled && !field.readOnly,
       inputType: InputType.date,
       format: DateFormat('yyyy-MM-dd'),
+      firstDate: style?.getFirstDate?.call(field),
+      lastDate: style?.getLastDate?.call(field),
       decoration:
           style?.decoration ??
           InputDecoration(

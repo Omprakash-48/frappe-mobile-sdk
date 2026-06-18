@@ -15,7 +15,11 @@ void main() {
         meta: meta,
         tableName: 'docs__x',
         filters: [
-          ['status', 'in', ['A', 'B']],
+          [
+            'status',
+            'in',
+            ['A', 'B'],
+          ],
         ],
         page: 0,
         pageSize: 10,
@@ -42,7 +46,11 @@ void main() {
         meta: meta,
         tableName: 'docs__x',
         filters: [
-          ['status', 'not in', ['X']],
+          [
+            'status',
+            'not in',
+            ['X'],
+          ],
         ],
         page: 0,
         pageSize: 10,
@@ -86,19 +94,22 @@ void main() {
       expect(pq.params, ['%@example.com']);
     });
 
-    test('like on norm-target field → IFNULL(col__norm,"") LIKE normalized', () {
-      final pq = FilterParser.toSql(
-        meta: metaWithNorm,
-        tableName: 'docs__contact',
-        filters: [
-          ['full_name', 'like', '%ANKIT%'],
-        ],
-        page: 0,
-        pageSize: 10,
-      );
-      expect(pq.sql, contains("IFNULL(full_name__norm, '') LIKE ?"));
-      expect(pq.params, ['%ankit%']);
-    });
+    test(
+      'like on norm-target field → IFNULL(col__norm,"") LIKE normalized',
+      () {
+        final pq = FilterParser.toSql(
+          meta: metaWithNorm,
+          tableName: 'docs__contact',
+          filters: [
+            ['full_name', 'like', '%ANKIT%'],
+          ],
+          page: 0,
+          pageSize: 10,
+        );
+        expect(pq.sql, contains("IFNULL(full_name__norm, '') LIKE ?"));
+        expect(pq.params, ['%ankit%']);
+      },
+    );
 
     test('like with accents normalized', () {
       final pq = FilterParser.toSql(

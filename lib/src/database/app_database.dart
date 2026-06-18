@@ -1,20 +1,32 @@
 import 'package:flutter/foundation.dart';
 import 'package:path/path.dart';
 import 'package:package_info_plus/package_info_plus.dart';
-import 'package:sqflite/sqflite.dart';
+import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 import 'daos/doctype_meta_dao.dart';
+import '../utils/sdk_log.dart';
 import 'daos/link_option_dao.dart';
 import 'daos/auth_token_dao.dart';
 import 'daos/doctype_permission_dao.dart';
+import 'daos/security_event_dao.dart';
+import 'daos/security_state_dao.dart';
 import 'schema/system_tables.dart';
+import 'table_name.dart';
+
+/// Injectable factory resolver — allows tests to substitute their own
+/// factory (e.g. one that always throws) without mocking internals.
+typedef DatabaseFactoryResolver =
+    Future<DatabaseFactory> Function(
+      void Function(Object, StackTrace)? onFailure,
+    );
 
 class AppDatabase {
-  static const int _version = 3;
+  static const int _version = 5;
 
   /// Singleton instance for the production (on-disk) database. The in-memory
   /// factory does NOT touch this — each call returns an independent instance
   /// for hermetic tests.
   static AppDatabase? _instance;
+  static Future<AppDatabase>? _instanceFuture;
   static String? _databaseName;
 
   /// Underlying sqflite handle. Held per-instance so both production and
@@ -26,13 +38,17 @@ class AppDatabase {
   final LinkOptionDao linkOptionDao;
   final AuthTokenDao authTokenDao;
   final DoctypePermissionDao doctypePermissionDao;
+  final SecurityStateDao securityStateDao;
+  final SecurityEventDao securityEventDao;
 
   AppDatabase._(Database database)
     : _db = database,
       doctypeMetaDao = DoctypeMetaDao(database),
       linkOptionDao = LinkOptionDao(database),
       authTokenDao = AuthTokenDao(database),
-      doctypePermissionDao = DoctypePermissionDao(database);
+      doctypePermissionDao = DoctypePermissionDao(database),
+      securityStateDao = SecurityStateDao(database),
+      securityEventDao = SecurityEventDao(database);
 
   /// Get database name from app name (sanitized for filesystem)
   static Future<String> _getDatabaseName({String? appNameOverride}) async {
@@ -67,7 +83,7 @@ class AppDatabase {
       _databaseName = '${sanitized}_frappe.db';
       return _databaseName!;
     } catch (e, st) {
-      debugPrint(
+      sdkLog(
         'AppDatabase._resolveDatabaseName: PackageInfo lookup failed, falling back to default — $e\n$st',
       );
       _databaseName = 'frappe_mobile_sdk.db';
@@ -83,19 +99,67 @@ class AppDatabase {
         .replaceAll(RegExp(r'^_|_$'), '');
   }
 
-  /// Get database instance (singleton).
-  static Future<AppDatabase> getInstance({String? appName}) async {
-    if (_instance != null) return _instance!;
+  static Future<DatabaseFactory> _resolveDatabaseFactory(
+    void Function(Object, StackTrace)? onFfiInitFailure,
+  ) async {
+    try {
+      sqfliteFfiInit();
+      // Liveness probe only — no schema callbacks; keeps smoke test fast.
+      final smokeDb = await databaseFactoryFfi.openDatabase(
+        inMemoryDatabasePath,
+        options: OpenDatabaseOptions(version: 1),
+      );
+      await smokeDb.close();
+      return databaseFactoryFfi;
+    } catch (e, st) {
+      sdkLog(
+        'AppDatabase: FFI init failed → falling back to sqflite — $e\n$st',
+      );
+      onFfiInitFailure?.call(e, st);
+      return databaseFactory;
+    }
+  }
 
+  static Future<AppDatabase> getInstance({
+    String? appName,
+    void Function(Object, StackTrace)? onFfiInitFailure,
+    DatabaseFactoryResolver? factoryResolver,
+  }) {
+    if (_instance != null) return Future.value(_instance!);
+    return _instanceFuture ??=
+        _createInstance(
+          appName: appName,
+          onFfiInitFailure: onFfiInitFailure,
+          factoryResolver: factoryResolver,
+        ).catchError((Object e, StackTrace st) {
+          _instanceFuture = null; // allow retry on next call
+          return Future<AppDatabase>.error(e, st);
+        });
+  }
+
+  static Future<AppDatabase> _createInstance({
+    String? appName,
+    void Function(Object, StackTrace)? onFfiInitFailure,
+    DatabaseFactoryResolver? factoryResolver,
+  }) async {
+    // Resolve the path BEFORE sqfliteFfiInit() runs. sqfliteFfiInit() overrides
+    // the global databaseFactory to databaseFactoryFfi; after that,
+    // getDatabasesPath() calls the FFI isolate, which cannot make platform
+    // channel calls and returns the wrong path (SQLITE_CANTOPEN, error 14).
+    // Calling it here uses the MethodChannel factory — always correct on Android/iOS.
     final documentsDirectory = await getDatabasesPath();
+    final resolve = factoryResolver ?? _resolveDatabaseFactory;
+    final factory = await resolve(onFfiInitFailure);
     final dbName = await _getDatabaseName(appNameOverride: appName);
     final path = join(documentsDirectory, dbName);
-    final db = await openDatabase(
+    final db = await factory.openDatabase(
       path,
-      version: _version,
-      onCreate: _onCreate,
-      onConfigure: _onConfigure,
-      onUpgrade: _onUpgrade,
+      options: OpenDatabaseOptions(
+        version: _version,
+        onCreate: _onCreate,
+        onConfigure: _onConfigure,
+        onUpgrade: _onUpgrade,
+      ),
     );
     _instance = AppDatabase._(db);
     return _instance!;
@@ -127,6 +191,70 @@ class AppDatabase {
     if (oldVersion < 3) {
       await _migrateV2ToV3(db);
     }
+    if (oldVersion < 4) {
+      await _migrateV3ToV4(db);
+    }
+    if (oldVersion < 5) {
+      await _migrateV4ToV5(db);
+    }
+  }
+
+  /// v3 → v4: add the `kv` translation-cache table that TranslationDao writes to.
+  /// Devices that were on v3 before this PR will not have this table, so we must
+  /// create it here. `CREATE TABLE IF NOT EXISTS` makes the step idempotent for
+  /// devices that reach v4 via a v2→v4 path (where _migrateV2ToV3 already ran
+  /// systemTablesDDL which includes the kv DDL).
+  static Future<void> _migrateV3ToV4(Database db) async {
+    await db.transaction((txn) async {
+      await txn.execute('''
+        CREATE TABLE IF NOT EXISTS kv (
+          lang TEXT NOT NULL,
+          src  TEXT NOT NULL,
+          tgt  TEXT NOT NULL,
+          PRIMARY KEY (lang, src)
+        )
+      ''');
+      await txn.rawUpdate(
+        'UPDATE sdk_meta SET schema_version = 4 WHERE id = 1',
+      );
+    });
+  }
+
+  /// v4 → v5: add the two security tables (`security_state`, `security_events`)
+  /// introduced in the tamper-detection feature. `CREATE TABLE IF NOT EXISTS`
+  /// and `INSERT OR IGNORE` make every statement idempotent so the migration
+  /// is safe to re-run after an interrupted upgrade.
+  static Future<void> _migrateV4ToV5(Database db) async {
+    await db.transaction((txn) async {
+      for (final stmt in securityTablesDDL()) {
+        await txn.execute(stmt);
+      }
+
+      // Backfill the mobile_uuid index on docs__* tables that were created
+      // before `mobile_uuid` was seeded into IndexPolicy (devices upgrading
+      // from v3/v4). `mobile_uuid` is the TEXT PRIMARY KEY, so SQLite already
+      // auto-indexes it and equality lookups never scan — but creating the
+      // named `ix_<suffix>_mobile_uuid` index keeps upgraded DBs byte-for-byte
+      // consistent with freshly-created ones (same name as parent_schema.dart
+      // emits) and removes any doubt for the UUID-fallback pull path. Idempotent
+      // via IF NOT EXISTS.
+      final docTables = await txn.rawQuery(
+        "SELECT name FROM sqlite_master WHERE type = 'table'",
+      );
+      for (final row in docTables) {
+        final name = row['name'] as String;
+        if (!name.startsWith('docs__')) continue;
+        final suffix = stripDocsPrefix(name);
+        await txn.execute(
+          'CREATE INDEX IF NOT EXISTS ix_${suffix}_mobile_uuid '
+          'ON "$name"(mobile_uuid)',
+        );
+      }
+
+      await txn.rawUpdate(
+        'UPDATE sdk_meta SET schema_version = 5 WHERE id = 1',
+      );
+    });
   }
 
   static Future<void> _migrateV2ToV3(Database db) async {
@@ -175,9 +303,23 @@ class AppDatabase {
     }
   }
 
-  /// Configure database (enable foreign keys)
   static Future<void> _onConfigure(Database db) async {
+    final walResult = await db.rawQuery('PRAGMA journal_mode=WAL');
+    final actualMode = walResult.isNotEmpty && walResult.first.values.isNotEmpty
+        ? walResult.first.values.first?.toString().toLowerCase()
+        : null;
+    if (actualMode != 'wal' && actualMode != 'memory') {
+      sdkLog(
+        'AppDatabase._onConfigure: WARNING — WAL mode not active '
+        '(got "$actualMode"). Write throughput will be reduced.',
+      );
+    }
+
     await db.execute('PRAGMA foreign_keys = ON');
+    await db.execute('PRAGMA synchronous=NORMAL');
+    await db.execute('PRAGMA cache_size=-32768');
+    await db.execute('PRAGMA mmap_size=268435456');
+    await db.execute('PRAGMA temp_store=MEMORY');
   }
 
   /// Fresh-install path. Builds every table in its final v3 shape.
@@ -256,11 +398,16 @@ class AppDatabase {
       await exec.execute(stmt);
     }
 
+    // Security tables (security_state, security_events) introduced in v5.
+    for (final stmt in securityTablesDDL()) {
+      await exec.execute(stmt);
+    }
+
     // Singleton upsert — same shape as the migration to keep _onCreate
     // and _onUpgrade post-conditions identical.
     await exec.insert('sdk_meta', <String, Object?>{
       'id': 1,
-      'schema_version': 3,
+      'schema_version': 5,
     }, conflictAlgorithm: ConflictAlgorithm.replace);
   }
 
@@ -293,6 +440,8 @@ class AppDatabase {
     await _db.close();
     if (identical(this, _instance)) {
       _instance = null;
+      _instanceFuture = null;
+      _databaseName = null;
     }
   }
 
@@ -395,5 +544,16 @@ class AppDatabaseTestSeam {
     int newVersion,
   ) => AppDatabase._onUpgrade(db, oldVersion, newVersion);
 
+  static Future<void> runOnConfigure(Database db) =>
+      AppDatabase._onConfigure(db);
+
   static int get version => AppDatabase._version;
+
+  /// Resets the production singleton so tests that call [AppDatabase.getInstance]
+  /// start from a clean state. Never call from production code.
+  static void resetSingleton() {
+    AppDatabase._instance = null;
+    AppDatabase._instanceFuture = null;
+    AppDatabase._databaseName = null;
+  }
 }

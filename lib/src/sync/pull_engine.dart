@@ -1,9 +1,9 @@
 import 'dart:convert';
 
-import 'package:flutter/foundation.dart';
 import 'package:sqflite/sqflite.dart';
 
 import '../concurrency/concurrency_pool.dart';
+import '../utils/sdk_log.dart';
 import '../concurrency/write_queue.dart';
 import '../database/daos/doctype_meta_dao.dart';
 import '../database/daos/outbox_dao.dart';
@@ -156,7 +156,7 @@ class PullEngine {
         final parentTableForReconcile = await metaDao.tableNameFor(doctype);
         await reconciler(doctype, parentTableForReconcile, meta);
       } catch (e, st) {
-        debugPrint(
+        sdkLog(
           'PullEngine._runDoctype($doctype): schemaReconciler failed — $e\n$st',
         );
       }
@@ -168,6 +168,7 @@ class PullEngine {
     final startedAt = DateTime.now().toUtc();
     var pulledCount = 0;
     int? lastPageSize;
+    final bool isInitialSync = !scratch.complete;
 
     notifier.value = notifier.value.updatePerDoctype(
       doctype,
@@ -213,6 +214,7 @@ class PullEngine {
               parentTable: parentTable,
               childMetasByFieldname: childInfo,
               rows: result.rows,
+              isInitialSync: isInitialSync,
             );
           });
         } else {
@@ -222,6 +224,7 @@ class PullEngine {
             parentTable: parentTable,
             childMetasByFieldname: childInfo,
             rows: result.rows,
+            isInitialSync: isInitialSync,
           );
         }
 
@@ -301,7 +304,7 @@ class PullEngine {
       // Mid-pull failure: do NOT persist cursor. Surface the doctype's
       // current progress so the UI can show partial counts; full retry
       // happens on next pull cycle.
-      debugPrint('PullEngine.pull($doctype) failed mid-pull — $e\n$st');
+      sdkLog('PullEngine.pull($doctype) failed mid-pull — $e\n$st');
       notifier.value = notifier.value.updatePerDoctype(
         doctype,
         DoctypeSyncState(

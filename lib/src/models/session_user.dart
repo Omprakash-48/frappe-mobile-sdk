@@ -33,39 +33,33 @@ class SessionUser {
   });
 
   Map<String, Object?> toJson() => {
-        'name': name,
-        if (fullName != null) 'full_name': fullName,
-        if (userImage != null) 'user_image': userImage,
-        if (language != null) 'language': language,
-        if (timeZone != null) 'time_zone': timeZone,
-        'roles': roles,
-        'permissions':
-            permissions.map((k, v) => MapEntry(k, v.toList())),
-        'user_defaults': userDefaults,
-        'extras': extras,
-      };
+    'name': name,
+    if (fullName != null) 'full_name': fullName,
+    if (userImage != null) 'user_image': userImage,
+    if (language != null) 'language': language,
+    if (timeZone != null) 'time_zone': timeZone,
+    'roles': roles,
+    'permissions': permissions.map((k, v) => MapEntry(k, v.toList())),
+    'user_defaults': userDefaults,
+    'extras': extras,
+  };
 
   factory SessionUser.fromJson(Map<String, dynamic> j) => SessionUser(
-        name: j['name'] as String,
-        fullName: j['full_name'] as String?,
-        userImage: j['user_image'] as String?,
-        language: j['language'] as String?,
-        timeZone: j['time_zone'] as String?,
-        roles: ((j['roles'] as List?) ?? const [])
-            .map((e) => e as String)
-            .toList(),
-        permissions: ((j['permissions'] as Map?) ?? const {}).map(
-          (k, v) => MapEntry(
-            k as String,
-            (v as List).map((e) => e as String).toList(),
-          ),
-        ),
-        userDefaults: ((j['user_defaults'] as Map?) ?? const {})
-            .map((k, v) => MapEntry(k as String, v as String)),
-        extras: Map<String, dynamic>.from(
-          (j['extras'] as Map?) ?? const {},
-        ),
-      );
+    name: j['name'] as String,
+    fullName: j['full_name'] as String?,
+    userImage: j['user_image'] as String?,
+    language: j['language'] as String?,
+    timeZone: j['time_zone'] as String?,
+    roles: ((j['roles'] as List?) ?? const []).map((e) => e as String).toList(),
+    permissions: ((j['permissions'] as Map?) ?? const {}).map(
+      (k, v) =>
+          MapEntry(k as String, (v as List).map((e) => e as String).toList()),
+    ),
+    userDefaults: ((j['user_defaults'] as Map?) ?? const {}).map(
+      (k, v) => MapEntry(k as String, v as String),
+    ),
+    extras: Map<String, dynamic>.from((j['extras'] as Map?) ?? const {}),
+  );
 
   /// Returns true if this user has been granted [op] on [doctype]. Mirrors
   /// the server-side `frappe.has_permission(doctype, op)` semantics
@@ -89,10 +83,10 @@ class SessionUser {
 
   @override
   int get hashCode => Object.hash(
-        name,
-        Object.hashAll(roles),
-        Object.hashAll(userDefaults.entries),
-      );
+    name,
+    Object.hashAll(roles),
+    Object.hashAll(userDefaults.entries),
+  );
 
   static bool _eqList(List a, List b) {
     if (a.length != b.length) return false;
