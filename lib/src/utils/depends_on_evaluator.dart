@@ -10,6 +10,37 @@ import 'package:flutter/foundation.dart';
 /// evaluator is NOT sandboxed — do not pass user-supplied strings to
 /// [evaluate].
 class DependsOnEvaluator {
+  /// Returns the set of fieldnames an expression references. Used to build the
+  /// reverse-dependency graph. Returns an EMPTY set for a non-null, non-empty
+  /// expression it cannot parse — callers treat that as "subscribe to all"
+  /// (see DependencyGraph fallback). A bare `field_name` (Frappe truthy form)
+  /// resolves to {field_name}.
+  static Set<String> referencedFields(String? expression) {
+    if (expression == null || expression.trim().isEmpty) return const {};
+    var expr = expression.trim();
+    if (expr.startsWith('eval:')) expr = expr.substring(5).trim();
+
+    final docRefs = RegExp(
+      r'doc\.(\w+)',
+    ).allMatches(expr).map((m) => m.group(1)!).toSet();
+    if (docRefs.isNotEmpty) return docRefs;
+
+    // No `doc.` tokens: a bare identifier is the Frappe truthy form.
+    final bare = RegExp(r'^(\w+)$').firstMatch(expr);
+    if (bare != null) return {bare.group(1)!};
+
+    return const {}; // unparseable -> caller falls back to subscribe-all
+  }
+
+  /// Like [evaluate] but returns [defaultWhenEmpty] for a null/empty expression.
+  /// `depends_on` defaults visible=true; `mandatory_depends_on` /
+  /// `read_only_depends_on` must default false when absent.
+  static bool evaluate2(
+    String? expr,
+    Map<String, dynamic> data,
+    bool defaultWhenEmpty,
+  ) => (expr == null || expr.isEmpty) ? defaultWhenEmpty : evaluate(expr, data);
+
   /// Evaluate depends_on expression
   /// Supports: eval:doc.field == value, eval:doc.field != value, etc.
   static bool evaluate(String? expression, Map<String, dynamic> formData) {

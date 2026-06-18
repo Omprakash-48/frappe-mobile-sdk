@@ -23,9 +23,11 @@ import 'widgets/form_builder.dart'
     show
         FrappeFormBuilder,
         FrappeFormStyle,
+        FormBuilderMode,
         OnButtonPressedCallback,
         FieldChangeHandler,
         FormValidator;
+import 'form/form_controller.dart' show FormController;
 import '../utils/sdk_log.dart';
 
 /// Visual customization for [FormScreen] action area.
@@ -112,6 +114,19 @@ class FormScreen extends StatefulWidget {
   final void Function(bool isDirty)? onFormDirtyChanged;
   final Widget? bottomNavigationBar;
 
+  /// State-management path passed to the underlying [FrappeFormBuilder].
+  /// Defaults to legacy; set [FormBuilderMode.reactive] for per-field rebuilds.
+  final FormBuilderMode mode;
+
+  /// Optional app-owned [FormController] (reactive mode). If null in reactive
+  /// mode, FormScreen creates one, exposes it via [onControllerReady], and
+  /// disposes it. If provided, the app owns + disposes it.
+  final FormController? controller;
+
+  /// Called once with the resolved controller (reactive mode) so the app can
+  /// read/listen/mutate form state directly.
+  final void Function(FormController controller)? onControllerReady;
+
   const FormScreen({
     super.key,
     required this.meta,
@@ -141,6 +156,9 @@ class FormScreen extends StatefulWidget {
     this.onSaveStateChanged,
     this.onFormDirtyChanged,
     this.bottomNavigationBar,
+    this.mode = FormBuilderMode.legacy,
+    this.controller,
+    this.onControllerReady,
   });
 
   @override
@@ -248,13 +266,29 @@ class _FormScreenState extends State<FormScreen> with WidgetsBindingObserver {
     _loadWorkflowTransitions();
     _loadSyncErrors();
     widget.onFormDirtyChanged?.call(false);
+
+    if (widget.mode == FormBuilderMode.reactive) {
+      _formController =
+          widget.controller ??
+          FormController(
+            meta: widget.meta,
+            initialData: widget.document?.data ?? widget.initialData,
+          );
+      _ownsFormController = widget.controller == null;
+      widget.onControllerReady?.call(_formController!);
+    }
   }
+
+  // Reactive mode: resolved controller (app-provided or FormScreen-created).
+  FormController? _formController;
+  bool _ownsFormController = false;
 
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     _isFormDirty.dispose();
     _isSyncing.dispose();
+    if (_ownsFormController) _formController?.dispose();
     super.dispose();
   }
 
@@ -325,7 +359,9 @@ class _FormScreenState extends State<FormScreen> with WidgetsBindingObserver {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
-            content: Text(sdkTr('Retry failed: {0}', [toUserFriendlyMessage(e)])),
+            content: Text(
+              sdkTr('Retry failed: {0}', [toUserFriendlyMessage(e)]),
+            ),
             backgroundColor: Colors.red,
           ),
         );
@@ -474,7 +510,9 @@ class _FormScreenState extends State<FormScreen> with WidgetsBindingObserver {
                         ? widget.translate!(
                             'No workflow actions available for this state.',
                           )
-                        : sdkTr('No workflow actions available for this state.'),
+                        : sdkTr(
+                            'No workflow actions available for this state.',
+                          ),
                     style: Theme.of(context).textTheme.bodyMedium,
                   ),
                 )
@@ -994,6 +1032,8 @@ class _FormScreenState extends State<FormScreen> with WidgetsBindingObserver {
                   key: widget.document != null
                       ? ValueKey('form_${widget.document!.localId}')
                       : const ValueKey('form_new'),
+                  mode: widget.mode,
+                  controller: _formController,
                   meta: widget.meta,
                   initialData:
                       _workflowUpdatedDocData ??

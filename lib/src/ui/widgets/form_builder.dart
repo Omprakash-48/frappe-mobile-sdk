@@ -15,6 +15,8 @@ import '../../utils/field_normalizer.dart';
 import 'fields/field_factory.dart';
 import 'fields/base_field.dart';
 import 'default_form_style.dart';
+import '../form/form_controller.dart';
+import '../form/field_ui_state.dart';
 
 export 'fields/link_field_picker_mode.dart';
 
@@ -56,6 +58,14 @@ typedef FormValidator = String? Function(Map<String, dynamic> data);
 
 /// Layout mode for form tab headers.
 enum FormTabHeaderLayout { tabBar, stepper }
+
+/// Selects the form's state-management path.
+///
+/// [legacy] (default) uses the whole-form `setState`-on-change model.
+/// [reactive] drives the form from an app-ownable [FormController] with
+/// per-field notifiers, so a change rebuilds only the affected fields.
+/// The legacy path is retained intact as the rollout safety valve.
+enum FormBuilderMode { legacy, reactive }
 
 /// Visual style for stepper tab header mode.
 class FormStepHeaderStyle {
@@ -161,6 +171,17 @@ class FrappeFormStyle {
 
 /// Main form builder widget that renders Frappe forms based on metadata
 class FrappeFormBuilder extends StatefulWidget {
+  /// State-management path. Defaults to [FormBuilderMode.legacy]; opt into
+  /// [FormBuilderMode.reactive] per-screen to get per-field rebuilds.
+  final FormBuilderMode mode;
+
+  /// Optional app-owned controller (reactive mode). If null in reactive mode,
+  /// the SDK creates and owns one internally so existing call sites work.
+  final FormController? controller;
+
+  /// Debug-only per-field build counter (asserted by widget tests). Reactive path.
+  static final Map<String, int> debugFieldBuildCounts = {};
+
   final DocTypeMeta meta;
   final Map<String, dynamic>? initialData;
   final Function(Map<String, dynamic>)? onSubmit;
@@ -229,6 +250,8 @@ class FrappeFormBuilder extends StatefulWidget {
 
   const FrappeFormBuilder({
     super.key,
+    this.mode = FormBuilderMode.legacy,
+    this.controller,
     required this.meta,
     this.initialData,
     this.onSubmit,
@@ -287,6 +310,29 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
   late TabController _tabController;
   final List<_FormTab> _tabs = [];
   final Map<String, int> _fieldTabIndex = {};
+
+  // Reactive mode (FormBuilderMode.reactive): app-ownable controller.
+  FormController? _controller;
+  bool _ownsController = false;
+  StreamSubscription<String>? _scrollSub;
+
+  void _syncTabFromController() {
+    if (!mounted || _controller == null) return;
+    final i = _controller!.activeTab.value;
+    if (_tabController.index != i && i >= 0 && i < _tabController.length) {
+      _tabController.animateTo(i);
+    }
+  }
+
+  void _syncControllerFromTab() {
+    if (_controller == null || _tabController.indexIsChanging) return;
+    _controller!.goToTab(_tabController.index); // short-circuits if equal
+  }
+
+  void _handleScrollRequest(String field) {
+    // Cross-tab navigation is already covered by activeTab sync; in-view scroll
+    // is best-effort and intentionally a no-op here (the field's tab is shown).
+  }
 
   /// Parent form data for filter resolution. Equals [_formData] when this
   /// builder is a top-level form (not a child-row form).
@@ -368,6 +414,45 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
     );
     _attachTabControllerListener();
     _triggerFetchFromForPrefilledLinks();
+
+    if (widget.mode == FormBuilderMode.reactive) {
+      _controller =
+          widget.controller ??
+          FormController(meta: widget.meta, initialData: widget.initialData);
+      _ownsController = widget.controller == null;
+      _controller!.fetchLinkedDocument = widget.fetchLinkedDocument;
+      // no-clobber: only wire the bridge hook if the controller has none.
+      if (widget.onFieldChange != null &&
+          _controller!.onFieldReaction == null) {
+        _controller!.onFieldReaction = widget.onFieldChange;
+      }
+      // Backward-compat bridge: emit a coalesced snapshot once per flush.
+      _controller!.addListener(_emitReactiveFormDataChanged);
+      // Reporter wiring: tab <-> controller, scroll requests.
+      _controller!.activeTab.addListener(_syncTabFromController);
+      _scrollSub = _controller!.scrollRequests.listen(_handleScrollRequest);
+      _tabController.addListener(_syncControllerFromTab);
+    }
+  }
+
+  void _emitReactiveFormDataChanged() {
+    final c = _controller;
+    if (c == null) return;
+    widget.onFormDataChanged?.call(c.buildSubmitData());
+  }
+
+  /// Reactive submit: validate via the controller, then emit the payload or
+  /// surface validation failure — mirrors the legacy [_handleSubmit] contract.
+  Future<void> _handleReactiveSubmit() async {
+    final c = _controller;
+    if (c == null) return;
+    // Await async/server/duplicate validators before committing the submit.
+    if (await c.validateAsync()) {
+      widget.onSubmit?.call(c.buildSubmitData());
+    } else {
+      if (c.firstInvalidField != null) c.requestFocus(c.firstInvalidField!);
+      widget.onValidationFailed?.call();
+    }
   }
 
   /// Trigger fetch_from for Link fields that already have values in _formData
@@ -511,9 +596,16 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
   /// [_shouldShowField], [_isFieldRequired], and [_isFieldReadOnly] so a
   /// future change to `DependsOnEvaluator.evaluate` (e.g. adding a parent
   /// context parameter) applies to all three guards at once.
+  /// Data source for depends_on evaluation: the controller's values in reactive
+  /// mode (single source of truth), else the legacy _formData map.
+  Map<String, dynamic> get _evalData =>
+      (widget.mode == FormBuilderMode.reactive && _controller != null)
+      ? _controller!.values
+      : _formData;
+
   bool _evaluateDepends(String? expr, bool defaultValue) {
     if (expr == null || expr.isEmpty) return defaultValue;
-    return DependsOnEvaluator.evaluate(expr, _formData);
+    return DependsOnEvaluator.evaluate(expr, _evalData);
   }
 
   bool _shouldShowField(DocField field) =>
@@ -601,29 +693,13 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
     }
   }
 
-  Widget _buildFieldWidget(DocField field) {
-    if (!_shouldShowField(field)) {
-      // Clear stale data for hidden fields so they don't submit old values
-      if (field.fieldname != null && _formData.containsKey(field.fieldname)) {
-        WidgetsBinding.instance.addPostFrameCallback((_) {
-          if (mounted && _formData.containsKey(field.fieldname)) {
-            setState(() {
-              _formData.remove(field.fieldname);
-            });
-          }
-        });
-      }
-      return const SizedBox.shrink();
-    }
-
-    final formStyle = widget.style ?? DefaultFormStyle.standard;
-
-    // Compute effective reqd / readonly first so the decoration below can
-    // reflect the current state of `mandatory_depends_on` (not just the
-    // static `reqd` flag).
-    final effectiveReqd = _isFieldRequired(field);
-    final effectiveReadOnly = _isFieldReadOnly(field) || widget.readOnly;
-
+  /// Builds the [FieldStyle] (decoration + label/description handling +
+  /// mandatory `*`) for a field. Shared by the legacy and reactive build paths.
+  FieldStyle _fieldStyleFor(
+    DocField field,
+    bool effectiveReqd,
+    FrappeFormStyle formStyle,
+  ) {
     var decoration = formStyle.fieldDecoration?.call(field);
     if (widget.translate != null && decoration != null) {
       final labelText = widget.translate!(field.label ?? field.fieldname ?? '');
@@ -646,10 +722,6 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
     }
 
     // Render the mandatory indicator (`*`) on the visible label.
-    // When showFieldLabel=true, BaseField's external Row already appends a red
-    // `*` Text widget — no need to also mark the decoration label/hint.
-    // When showFieldLabel=false, the decoration carries the visible label, so
-    // append `*` to labelText first, then hintText as fallback.
     if (effectiveReqd && decoration != null && !formStyle.showFieldLabel) {
       final labelTxt = decoration.labelText;
       if (labelTxt != null && labelTxt.isNotEmpty && !labelTxt.endsWith(' *')) {
@@ -662,7 +734,7 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
       }
     }
 
-    final fieldStyle = FieldStyle(
+    return FieldStyle(
       labelStyle: formStyle.labelStyle,
       descriptionStyle: formStyle.descriptionStyle,
       decoration: decoration,
@@ -671,11 +743,23 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
       showDescription: formStyle.showFieldDescription,
       inputFormatters: formStyle.inputFormatters?.call(field),
       linkFieldPickerMode: formStyle.linkFieldPickerMode,
-      getFirstDate: formStyle.getFirstDate != null ? (f) => formStyle.getFirstDate!(widget.meta.name, f) : null,
-      getLastDate: formStyle.getLastDate != null ? (f) => formStyle.getLastDate!(widget.meta.name, f) : null,
+      getFirstDate: formStyle.getFirstDate != null
+          ? (f) => formStyle.getFirstDate!(widget.meta.name, f)
+          : null,
+      getLastDate: formStyle.getLastDate != null
+          ? (f) => formStyle.getLastDate!(widget.meta.name, f)
+          : null,
     );
+  }
 
-    final fieldWithEffectiveProps = DocField(
+  /// Returns a copy of [field] with the effective reqd/readOnly folded in.
+  /// Shared by the legacy and reactive build paths.
+  DocField _withEffectiveProps(
+    DocField field,
+    bool effectiveReqd,
+    bool effectiveReadOnly,
+  ) {
+    return DocField(
       fieldname: field.fieldname,
       fieldtype: field.fieldtype,
       label: field.label,
@@ -698,6 +782,41 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
       inListView: field.inListView,
       allowMultiple: field.allowMultiple,
       searchIndex: field.searchIndex,
+    );
+  }
+
+  Widget _buildFieldWidget(DocField field) {
+    if (widget.mode == FormBuilderMode.reactive && _controller != null) {
+      return _buildReactiveField(field);
+    }
+    if (!_shouldShowField(field)) {
+      // Clear stale data for hidden fields so they don't submit old values
+      if (field.fieldname != null && _formData.containsKey(field.fieldname)) {
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (mounted && _formData.containsKey(field.fieldname)) {
+            setState(() {
+              _formData.remove(field.fieldname);
+            });
+          }
+        });
+      }
+      return const SizedBox.shrink();
+    }
+
+    final formStyle = widget.style ?? DefaultFormStyle.standard;
+
+    // Compute effective reqd / readonly first so the decoration below can
+    // reflect the current state of `mandatory_depends_on` (not just the
+    // static `reqd` flag).
+    final effectiveReqd = _isFieldRequired(field);
+    final effectiveReadOnly = _isFieldReadOnly(field) || widget.readOnly;
+
+    final fieldStyle = _fieldStyleFor(field, effectiveReqd, formStyle);
+
+    final fieldWithEffectiveProps = _withEffectiveProps(
+      field,
+      effectiveReqd,
+      effectiveReadOnly,
     );
 
     final initialValue =
@@ -792,11 +911,17 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
             }
           }
 
-          // Trigger rebuild to update dependent fields
+          // Notify dirty-state listener after the frame settles so
+          // _getCurrentFormData reads post-patchValue field state. No extra
+          // setState here: the enclosing setState (this onChanged body) already
+          // rebuilds with the updated _formData, which re-evaluates every
+          // field's depends_on/mandatory_depends_on in the same frame — so
+          // dependent-field reveal/hide and computed patches land in that first
+          // rebuild. A second post-frame setState would rebuild the whole form
+          // again identically (visible jank on large forms / section reveals).
           if (oldValue != value) {
             WidgetsBinding.instance.addPostFrameCallback((_) {
               if (mounted) {
-                setState(() {});
                 _emitFormDataChanged();
               }
             });
@@ -849,6 +974,30 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
   }
 
   Widget _buildSection(_FormSection section) {
+    // Reactive: the section must re-evaluate its visibility (its own depends_on
+    // AND whether any field is visible) when a gate changes — wrap in a
+    // ListenableBuilder keyed on the referenced gate fields. Built once if there
+    // are no gates. Per-field reactivity inside is unaffected (_ReactiveFieldHost).
+    if (widget.mode == FormBuilderMode.reactive && _controller != null) {
+      final refs = <String>{
+        ...DependsOnEvaluator.referencedFields(section.sectionField.dependsOn),
+        for (final col in section.columns)
+          for (final f in col.fields)
+            ...DependsOnEvaluator.referencedFields(f.dependsOn),
+      };
+      if (refs.isNotEmpty) {
+        return ListenableBuilder(
+          listenable: Listenable.merge([
+            for (final r in refs) _controller!.valueOf(r),
+          ]),
+          builder: (_, _) => _buildSectionContent(section),
+        );
+      }
+    }
+    return _buildSectionContent(section);
+  }
+
+  Widget _buildSectionContent(_FormSection section) {
     final formStyle = widget.style ?? DefaultFormStyle.standard;
 
     if (section.columns.isEmpty) return const SizedBox.shrink();
@@ -1115,7 +1264,8 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
       oldWidget.initialData,
       widget.initialData,
     );
-    final metaChanged = oldWidget.meta.name != widget.meta.name ||
+    final metaChanged =
+        oldWidget.meta.name != widget.meta.name ||
         _tabCount(oldWidget.meta) != _tabCount(widget.meta);
     if (initialDataChanged || metaChanged) {
       _progressSubscription?.cancel();
@@ -1169,6 +1319,15 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
   void dispose() {
     _progressSubscription?.cancel();
     _linkFieldCoordinator?.dispose();
+    _scrollSub?.cancel();
+    if (_controller != null) {
+      // Tear down everything we attached — the controller may be app-owned and
+      // outlive this widget; stale subscriptions would fire into a defunct State.
+      _controller!.removeListener(_emitReactiveFormDataChanged);
+      _controller!.activeTab.removeListener(_syncTabFromController);
+      _tabController.removeListener(_syncControllerFromTab);
+      if (_ownsController) _controller!.dispose();
+    }
     _tabController.dispose();
     super.dispose();
   }
@@ -1377,14 +1536,123 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
     widget.onFormDataChanged?.call(_getCurrentFormData());
   }
 
+  /// Reactive build path: structural widgets are built once; each leaf field is
+  /// wrapped in a [ListenableBuilder] so a change rebuilds only the affected
+  /// field(s). No whole-form setState. The legacy path is untouched.
+  Widget _buildReactive(FrappeFormStyle formStyle) {
+    widget.registerSubmit?.call(_handleReactiveSubmit);
+    return FormBuilder(
+      key: _formKey,
+      initialValue: _controller!.values,
+      child: Column(
+        children: [
+          _buildTabHeader(formStyle),
+          Expanded(
+            child: _tabs.length > 1
+                ? TabBarView(
+                    controller: _tabController,
+                    children: _tabs
+                        .map((tab) => _buildTabContent(tab))
+                        .toList(),
+                  )
+                : _buildTabContent(_tabs.first),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// One reactive leaf field. Rebuilds on its own value OR uiState change only
+  /// (typing A bumps A's valueOf; A ∉ affectedBy(A), so uiStateOf alone would
+  /// not fire — hence the merge).
+  Widget _buildReactiveField(DocField field) {
+    final name = field.fieldname;
+    if (name == null || name.isEmpty) return const SizedBox.shrink();
+    final c = _controller!;
+    final formStyle = widget.style ?? DefaultFormStyle.standard;
+    return _ReactiveFieldHost(
+      name: name,
+      controller: c,
+      build: (ui) {
+        if (!ui.visible) return const SizedBox.shrink();
+        FrappeFormBuilder.debugFieldBuildCounts[name] =
+            (FrappeFormBuilder.debugFieldBuildCounts[name] ?? 0) + 1;
+        final effective = _withEffectiveProps(field, ui.required, ui.readOnly);
+        final fieldStyle = _fieldStyleFor(field, ui.required, formStyle);
+        final value = c.getValue(name);
+        // Keep flutter_form_builder's internal field state in sync for
+        // programmatic / external setValue (FB ignores a changed initialValue on
+        // rebuild). The post-frame diff guard + setValue's equality short-circuit
+        // prevent a patchValue<->onChanged feedback loop.
+        final normalized = FieldNormalizer.normalize(effective, value);
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (!mounted) return;
+          final st = _formKey.currentState?.fields[name];
+          if (st != null && st.value != normalized) {
+            _formKey.currentState?.patchValue({name: normalized});
+          }
+        });
+        final w = _fieldFactory.createField(
+          field: effective,
+          value: value,
+          enabled: !ui.readOnly,
+          onChanged: (v) => c.setValue(name, v, source: ChangeSource.user),
+          formData: c.values,
+          style: fieldStyle,
+          uploadFile: widget.uploadFile,
+          fileUrlBase: widget.fileUrlBase,
+          imageHeaders: widget.imageHeaders,
+          getMeta: widget.getMeta,
+          getLinkFilterBuilder: widget.getLinkFilterBuilder,
+          onButtonPressed: widget.onButtonPressed,
+          // Child tables: the transient row-edit sheet builds its OWN reactive
+          // sub-form. It passes no controller, so that FrappeFormBuilder owns +
+          // disposes its controller on sheet close (add=create / delete=dispose
+          // / reorder fall out of the List<map> model — no per-row machinery).
+          childTableFormBuilder: widget.getMeta != null
+              ? (childMeta, initialData, onSubmit, {registerSubmit}) =>
+                    FrappeFormBuilder(
+                      mode: FormBuilderMode.reactive,
+                      meta: childMeta,
+                      initialData: initialData,
+                      onSubmit: onSubmit,
+                      registerSubmit: registerSubmit,
+                      getMeta: widget.getMeta,
+                      linkOptionService: widget.linkOptionService,
+                      useLinkFieldCoordinator: widget.useLinkFieldCoordinator,
+                      fileUrlBase: widget.fileUrlBase,
+                      imageHeaders: widget.imageHeaders,
+                      fetchLinkedDocument: widget.fetchLinkedDocument,
+                      translate: widget.translate,
+                      onButtonPressed: widget.onButtonPressed,
+                      onFieldChange: widget.onFieldChange,
+                      parentFormData: widget.parentFormData ?? c.values,
+                      getLinkFilterBuilder: widget.getLinkFilterBuilder,
+                    )
+              : null,
+        );
+        if (w == null) return const SizedBox.shrink();
+        return Padding(
+          padding:
+              formStyle.fieldPadding ?? const EdgeInsets.only(bottom: 16.0),
+          child: w,
+        );
+      },
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     if (_tabs.isEmpty) {
       return const Center(child: Text('No fields to display'));
     }
-    widget.registerSubmit?.call(_handleSubmit);
-
     final formStyle = widget.style ?? DefaultFormStyle.standard;
+
+    if (widget.mode == FormBuilderMode.reactive && _controller != null) {
+      return _buildReactive(formStyle);
+    }
+
+    widget.registerSubmit?.call(_handleSubmit);
 
     return FormBuilder(
       key: _formKey,
@@ -1438,5 +1706,59 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
         ],
       ),
     );
+  }
+}
+
+/// Reactive leaf-field host. Rebuilds on its own uiState OR value change only,
+/// and reports semantic lifecycle: mounted/unmounted on its own-depends_on
+/// visibility toggle (host stays in tree, renders SizedBox) AND on disposal
+/// (section/tab removal) — the widget is the only thing that knows the true
+/// rendered state, since the controller's uiState ignores container depends_on.
+class _ReactiveFieldHost extends StatefulWidget {
+  const _ReactiveFieldHost({
+    required this.name,
+    required this.controller,
+    required this.build,
+  });
+  final String name;
+  final FormController controller;
+  final Widget Function(FieldUiState ui) build;
+
+  @override
+  State<_ReactiveFieldHost> createState() => _ReactiveFieldHostState();
+}
+
+class _ReactiveFieldHostState extends State<_ReactiveFieldHost> {
+  bool _reportedVisible = false;
+
+  void _sync(bool visible) {
+    if (visible == _reportedVisible) return;
+    _reportedVisible = visible;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (visible) {
+        widget.controller.reportFieldMounted(widget.name);
+      } else {
+        widget.controller.reportFieldUnmounted(widget.name);
+      }
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) => ListenableBuilder(
+    listenable: Listenable.merge([
+      widget.controller.uiStateOf(widget.name),
+      widget.controller.valueOf(widget.name),
+    ]),
+    builder: (context, _) {
+      final ui = widget.controller.uiStateOf(widget.name).value;
+      _sync(ui.visible);
+      return widget.build(ui);
+    },
+  );
+
+  @override
+  void dispose() {
+    if (_reportedVisible) widget.controller.reportFieldUnmounted(widget.name);
+    super.dispose();
   }
 }
