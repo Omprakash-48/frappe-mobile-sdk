@@ -80,6 +80,7 @@ class PhoneField extends BaseField {
     final initialStored = value?.toString() ?? field.defaultValue?.toString();
 
     return FormBuilderField<String>(
+      autovalidateMode: AutovalidateMode.onUserInteraction,
       key: ValueKey('phonefield_${field.fieldname}'),
       name: field.fieldname ?? '',
       initialValue: (initialStored != null && initialStored.isNotEmpty)

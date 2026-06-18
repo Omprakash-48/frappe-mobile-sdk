@@ -14,6 +14,13 @@ class TranslationService {
   /// when the DAO/stream have already been closed.
   bool _disposed = false;
 
+  /// Incremented by [clearAll] (logout). In-flight [loadTranslations] and
+  /// [_doRefresh] calls snapshot this value before their first await and
+  /// compare after each suspension point — if the snapshot no longer matches,
+  /// clearAll() fired while they were awaiting and they discard their results
+  /// instead of repopulating the freshly-wiped cache and SQLite table.
+  int _clearGeneration = 0;
+
   /// Optional external delegate to intercept/override translations (e.g. static host app ARB strings).
   String Function(String source, [List<Object>? args])? translateDelegate;
 
@@ -25,7 +32,8 @@ class TranslationService {
 
   final _changedController = StreamController<void>.broadcast();
 
-  /// Emits after [loadFromCache] populates rows or [refreshAsync] completes.
+  /// Emits after [loadFromCache] populates rows, [refreshAsync] completes, or
+  /// [clearAll] wipes the cache — so listeners re-translate on logout too.
   Stream<void> get onChanged => _changedController.stream;
 
   TranslationService(this._client);
@@ -52,8 +60,13 @@ class TranslationService {
   /// Fast (<5 ms). No network. Emits [onChanged] if rows were found.
   Future<void> loadFromCache(String lang) async {
     if (_dao == null || _disposed) return;
+    final gen = _clearGeneration; // snapshot before any await
     try {
       final map = await _dao!.readAll(lang);
+      // Guard: clearAll() (logout) may have fired while the DB read was
+      // pending. Writing these rows back would resurrect logged-out data
+      // into the new session's cache.
+      if (_disposed || _clearGeneration != gen) return;
       if (map.isEmpty) return;
       _cache[lang] = map;
       if (!_changedController.isClosed) _changedController.add(null);
@@ -69,8 +82,12 @@ class TranslationService {
   }
 
   Future<void> _doRefresh(String lang) async {
-    final map = await loadTranslations(lang); // fetches + populates _cache[lang]
-    if (_disposed) return; // guard — dispose may have run during the await
+    final gen = _clearGeneration; // snapshot before any await
+    final map = await loadTranslations(
+      lang,
+    ); // fetches + populates _cache[lang]
+    // Guard: dispose OR clearAll() may have fired while we were awaiting.
+    if (_disposed || _clearGeneration != gen) return;
     if (map.isEmpty) return;
     try {
       await _dao?.bulkUpsert(lang, map);
@@ -79,6 +96,10 @@ class TranslationService {
       // fall through — in-memory cache is valid even if SQLite persistence
       // failed; notify listeners so the UI reflects the updated cache.
     }
+    // clearAll()/dispose may have fired while bulkUpsert was awaiting. The
+    // cache is already wiped in that case, so a second onChanged here is a
+    // spurious re-render of stale (logged-out) state — suppress it.
+    if (_disposed || _clearGeneration != gen) return;
     if (!_changedController.isClosed) _changedController.add(null);
   }
 
@@ -96,9 +117,20 @@ class TranslationService {
 
   Future<void> _doRefreshAll() async {
     if (_disposed) return;
+    final gen = _clearGeneration; // snapshot before any await
     final langs = await fetchEnabledLanguages();
+    // Guard: clearAll() (logout) may have fired while we were fetching the
+    // language list. Without this, the loop below fires N redundant
+    // get_translations requests against the logged-out session.
+    if (_disposed || _clearGeneration != gen) return;
+    // Serial by design: awaiting each language fetch prevents concurrent
+    // requests from hammering the Frappe server and triggering rate limits.
+    // This is a necessary trade-off given the current single-language API.
+    // TODO(translations): replace serial loop with a paginated bulk-fetch
+    // endpoint once the translations API supports it — avoids N round-trips.
     for (final lang in langs) {
-      if (_disposed) return;
+      // Re-check each iteration so a logout mid-loop stops the remaining calls.
+      if (_disposed || _clearGeneration != gen) return;
       await _doRefresh(lang);
     }
   }
@@ -158,11 +190,16 @@ class TranslationService {
   ///   { "data": { "translations": { "hi": { "Source": "Translated" } } } }
   Future<Map<String, String>> loadTranslations(String lang) async {
     if (_disposed) return {};
+    final gen = _clearGeneration; // snapshot before any await
     try {
       final result = await _client?.rest.get(
         '/api/v2/method/mobile_auth.get_translations',
         queryParams: {'lang': lang},
       );
+      // If clearAll() fired while we were awaiting the HTTP response, discard
+      // the result — writing stale data back into the freshly-wiped cache
+      // would re-populate it as if logout had never happened.
+      if (_clearGeneration != gen) return {};
       if (result is! Map<String, dynamic>) return {};
       final data = result['data'] as Map<String, dynamic>? ?? result;
       final translationsMap = data['translations'] as Map<String, dynamic>?;
@@ -215,9 +252,17 @@ class TranslationService {
 
   /// Clears in-memory cache, resets currentLang to 'en', and wipes the
   /// SQLite translation cache. Called on logout.
+  ///
+  /// Bumps [_clearGeneration] first so any in-flight [loadTranslations] or
+  /// [_doRefresh] calls detect the logout and discard their results instead
+  /// of repopulating the freshly-wiped cache.
   Future<void> clearAll() async {
+    _clearGeneration++; // must come before _cache.clear() so in-flight paths see it
     _cache.clear();
     _currentLang = 'en';
+    // Notify listeners so any active UI re-translates against the reset
+    // ('en') locale instead of showing the logged-out session's strings.
+    if (!_changedController.isClosed) _changedController.add(null);
     try {
       await _dao?.deleteAll();
     } catch (e, st) {

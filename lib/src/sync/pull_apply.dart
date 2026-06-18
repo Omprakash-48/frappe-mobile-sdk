@@ -146,15 +146,20 @@ class PullApply {
       if (serverNames.isNotEmpty) {
         final dirtyStatuses = [..._locallyDirtyStatuses, 'deleted'];
         final snPlaceholders = List.filled(serverNames.length, '?').join(',');
-        final dirtyPlaceholders =
-            List.filled(dirtyStatuses.length, '?').join(',');
+        final dirtyPlaceholders = List.filled(
+          dirtyStatuses.length,
+          '?',
+        ).join(',');
 
         final String query;
         final List<Object?> args;
         if (incomingUuids.isNotEmpty) {
-          final uuidPlaceholders =
-              List.filled(incomingUuids.length, '?').join(',');
-          query = '''
+          final uuidPlaceholders = List.filled(
+            incomingUuids.length,
+            '?',
+          ).join(',');
+          query =
+              '''
             SELECT COUNT(*) AS n FROM $parentTable
             WHERE (server_name IN ($snPlaceholders)
                    AND sync_status IN ($dirtyPlaceholders))
@@ -163,7 +168,8 @@ class PullApply {
           ''';
           args = [...serverNames, ...dirtyStatuses, ...incomingUuids];
         } else {
-          query = '''
+          query =
+              '''
             SELECT COUNT(*) AS n FROM $parentTable
             WHERE server_name IN ($snPlaceholders)
               AND sync_status IN ($dirtyPlaceholders)
@@ -225,7 +231,6 @@ class PullApply {
     required Uuid uuidGen,
     required Set<String> parentNormFields,
   }) async {
-
     final batch = txn.batch();
     for (final r in rows) {
       final serverName = r['name'] as String?;
@@ -261,6 +266,29 @@ class PullApply {
         }
       }
 
+      // UUID-uniqueness assumption: `mobile_uuid` is a v4 UUID minted on this
+      // device and treated as globally unique, so a fallback match means *this*
+      // device created the row. We deliberately do NOT add a hard consistency
+      // assertion against the incoming server row — it would mis-fire on
+      // legitimate server-side edits and risk dropping good data. As a
+      // non-fatal tripwire we log (never block) when a uuid-matched local row
+      // is already bound to a *different* server_name: that mismatch is the
+      // only observable signature of a cross-device UUID clash or a bad data
+      // migration reusing a mobile_uuid. The incoming row is still applied.
+      if (matchedByUuid) {
+        final priorServerName = existing.first['server_name'] as String?;
+        if (priorServerName != null &&
+            priorServerName.isNotEmpty &&
+            priorServerName != serverName) {
+          sdkLog(
+            'PullApply: mobile_uuid "${r['mobile_uuid']}" matched a local row '
+            'in $parentTable already bound to server_name "$priorServerName", '
+            'but the incoming server row is "$serverName" — possible UUID reuse '
+            '/ cross-device collision; applying the incoming row.',
+          );
+        }
+      }
+
       // Tombstoned rows never resurrect — local DELETE is queued in
       // outbox waiting to push. Skip silently; once the DELETE outbox
       // row drains, the row is hard-deleted server-side too.
@@ -283,8 +311,7 @@ class PullApply {
         // diverged (e.g. a ghost-success push left server_name NULL while
         // the user made further edits). Overwriting here would cause data
         // loss. Check for any non-done, non-in_flight outbox rows.
-        final mobileUuid =
-            existing.first['mobile_uuid'] as String? ?? '';
+        final mobileUuid = existing.first['mobile_uuid'] as String? ?? '';
         if (mobileUuid.isNotEmpty) {
           final pendingWork = await txn.rawQuery(
             "SELECT id FROM outbox WHERE mobile_uuid = ? "
@@ -292,8 +319,17 @@ class PullApply {
             [mobileUuid],
           );
           if (pendingWork.isNotEmpty) {
-            // Local work still owed; don't overwrite. Stamp server_name and
-            // let the conflict guard below decide.
+            // Local work still owed; don't overwrite the local payload. But the
+            // server HAS this row (it round-tripped our mobile_uuid), so stamp
+            // its server_name now — otherwise the conflict guard below updates
+            // sync_status and `continue`s, leaving the row with a NULL
+            // server_name that can never be pushed/resolved.
+            batch.update(
+              parentTable,
+              {'server_name': serverName},
+              where: 'mobile_uuid = ?',
+              whereArgs: [mobileUuid],
+            );
             isOwnInsertRoundtrip = false;
           }
         }
@@ -564,7 +600,7 @@ class PullApply {
           final rawChildUuid = cr['mobile_uuid']?.toString();
           final hasRawUuid = rawChildUuid != null && rawChildUuid.isNotEmpty;
           final childUuid = hasRawUuid ? rawChildUuid : uuidGen.v4();
-          
+
           final childRow = <String, Object?>{
             'mobile_uuid': childUuid,
             'server_name': serverChildName,
@@ -590,7 +626,7 @@ class PullApply {
         }
       }
     }
-    
+
     await batch.commit(noResult: true);
   }
 }

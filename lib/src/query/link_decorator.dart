@@ -3,6 +3,7 @@ import 'package:sqflite/sqflite.dart';
 import '../database/table_name.dart';
 import '../models/doc_type_meta.dart';
 import '../models/meta_resolver.dart';
+import '../utils/sdk_log.dart';
 
 /// Resolves the [DocTypeMeta] for the target of a Link / Dynamic Link
 /// during decoration. Same signature as [MetaResolverFn] — kept as an
@@ -126,12 +127,16 @@ class LinkDecorator {
               final title = tr[titleCol];
               final idVal = tr[col] as String?;
               if (idVal != null) {
-                doctypeCache[idVal] =
-                    (title ?? tr['server_name'] ?? idVal).toString();
+                doctypeCache[idVal] = (title ?? tr['server_name'] ?? idVal)
+                    .toString();
               }
             }
-          } on DatabaseException {
+          } on DatabaseException catch (e) {
             // Target table not yet provisioned. Fall back to raw value.
+            sdkLog(
+              'LinkDecorator: target table "$targetTable" not provisioned, '
+              'falling back to raw values — $e',
+            );
           }
         }
       }

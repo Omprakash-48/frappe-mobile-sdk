@@ -12,6 +12,7 @@ import '../models/doc_type_meta.dart';
 import '../models/meta_resolver.dart';
 import '../models/offline_mode.dart';
 import '../models/offline_mode_notifier.dart';
+import '../utils/sdk_log.dart';
 import 'filter_parser.dart';
 import 'link_decorator.dart';
 import 'query_result.dart';
@@ -207,8 +208,12 @@ class UnifiedResolver {
       if (raw is int) return raw;
       if (raw is num) return raw.toInt();
       return 0;
-    } on DatabaseException {
+    } on DatabaseException catch (e) {
       // Table doesn't exist yet — pull engine creates it lazily.
+      sdkLog(
+        'UnifiedResolver.count: table "$tableName" not yet created, '
+        'returning 0 — $e',
+      );
       return 0;
     }
   }

@@ -868,8 +868,11 @@ class _FormScreenState extends State<FormScreen> with WidgetsBindingObserver {
           sdkTr('Document deleted'),
           severity: SnackBarSeverity.warning,
         );
-        Navigator.pop(context);
+        // Notify the parent BEFORE popping so the callback runs while this
+        // screen is still mounted — a setState/context use inside it would
+        // otherwise operate on a defunct element (M8).
         widget.onSaveSuccess?.call();
+        Navigator.pop(context);
       }
     } catch (e, st) {
       sdkLog('FormScreen.delete failed — $e\n$st');

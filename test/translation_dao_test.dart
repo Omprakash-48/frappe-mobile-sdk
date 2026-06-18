@@ -83,16 +83,17 @@ void main() {
     });
   });
 
-  group('close + reopen', () {
-    test('close nulls db; subsequent call re-opens and works', () async {
-      final dao = await makeDao();
-      await dao.bulkUpsert('hi', {'A': 'B'});
-      await dao.close();
-      // Since TranslationDao now takes an injected AppDatabase, close() doesn't actually close it.
-      // But in tests, if it's the injected one, the query should still work!
-      final result = await dao.readAll('hi');
-      expect(result, isNotEmpty);
-      await dao.close();
-    });
+  group('close', () {
+    test(
+      'forTesting() DAO owns its handle: close() frees it (BS2 — no leak)',
+      () async {
+        final dao = await makeDao();
+        await dao.bulkUpsert('hi', {'A': 'B'});
+        await dao.close();
+        // The in-memory connection this DAO opened is genuinely released —
+        // a subsequent query throws rather than silently leaking the handle.
+        expect(dao.readAll('hi'), throwsA(isA<DatabaseException>()));
+      },
+    );
   });
 }

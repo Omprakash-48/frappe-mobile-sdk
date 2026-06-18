@@ -28,6 +28,7 @@ class AttachField extends BaseField {
     String? filePath = value?.toString();
 
     return FormBuilderField<String>(
+      autovalidateMode: AutovalidateMode.onUserInteraction,
       key: ValueKey('attach_${field.fieldname}'),
       name: field.fieldname ?? '',
       initialValue: filePath,

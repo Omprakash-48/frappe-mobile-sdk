@@ -7,7 +7,10 @@ import '../utils/sdk_log.dart';
 import 'daos/link_option_dao.dart';
 import 'daos/auth_token_dao.dart';
 import 'daos/doctype_permission_dao.dart';
+import 'daos/security_event_dao.dart';
+import 'daos/security_state_dao.dart';
 import 'schema/system_tables.dart';
+import 'table_name.dart';
 
 /// Injectable factory resolver — allows tests to substitute their own
 /// factory (e.g. one that always throws) without mocking internals.
@@ -17,7 +20,7 @@ typedef DatabaseFactoryResolver =
     );
 
 class AppDatabase {
-  static const int _version = 4;
+  static const int _version = 5;
 
   /// Singleton instance for the production (on-disk) database. The in-memory
   /// factory does NOT touch this — each call returns an independent instance
@@ -35,13 +38,17 @@ class AppDatabase {
   final LinkOptionDao linkOptionDao;
   final AuthTokenDao authTokenDao;
   final DoctypePermissionDao doctypePermissionDao;
+  final SecurityStateDao securityStateDao;
+  final SecurityEventDao securityEventDao;
 
   AppDatabase._(Database database)
     : _db = database,
       doctypeMetaDao = DoctypeMetaDao(database),
       linkOptionDao = LinkOptionDao(database),
       authTokenDao = AuthTokenDao(database),
-      doctypePermissionDao = DoctypePermissionDao(database);
+      doctypePermissionDao = DoctypePermissionDao(database),
+      securityStateDao = SecurityStateDao(database),
+      securityEventDao = SecurityEventDao(database);
 
   /// Get database name from app name (sanitized for filesystem)
   static Future<String> _getDatabaseName({String? appNameOverride}) async {
@@ -187,6 +194,9 @@ class AppDatabase {
     if (oldVersion < 4) {
       await _migrateV3ToV4(db);
     }
+    if (oldVersion < 5) {
+      await _migrateV4ToV5(db);
+    }
   }
 
   /// v3 → v4: add the `kv` translation-cache table that TranslationDao writes to.
@@ -206,6 +216,43 @@ class AppDatabase {
       ''');
       await txn.rawUpdate(
         'UPDATE sdk_meta SET schema_version = 4 WHERE id = 1',
+      );
+    });
+  }
+
+  /// v4 → v5: add the two security tables (`security_state`, `security_events`)
+  /// introduced in the tamper-detection feature. `CREATE TABLE IF NOT EXISTS`
+  /// and `INSERT OR IGNORE` make every statement idempotent so the migration
+  /// is safe to re-run after an interrupted upgrade.
+  static Future<void> _migrateV4ToV5(Database db) async {
+    await db.transaction((txn) async {
+      for (final stmt in securityTablesDDL()) {
+        await txn.execute(stmt);
+      }
+
+      // Backfill the mobile_uuid index on docs__* tables that were created
+      // before `mobile_uuid` was seeded into IndexPolicy (devices upgrading
+      // from v3/v4). `mobile_uuid` is the TEXT PRIMARY KEY, so SQLite already
+      // auto-indexes it and equality lookups never scan — but creating the
+      // named `ix_<suffix>_mobile_uuid` index keeps upgraded DBs byte-for-byte
+      // consistent with freshly-created ones (same name as parent_schema.dart
+      // emits) and removes any doubt for the UUID-fallback pull path. Idempotent
+      // via IF NOT EXISTS.
+      final docTables = await txn.rawQuery(
+        "SELECT name FROM sqlite_master WHERE type = 'table'",
+      );
+      for (final row in docTables) {
+        final name = row['name'] as String;
+        if (!name.startsWith('docs__')) continue;
+        final suffix = stripDocsPrefix(name);
+        await txn.execute(
+          'CREATE INDEX IF NOT EXISTS ix_${suffix}_mobile_uuid '
+          'ON "$name"(mobile_uuid)',
+        );
+      }
+
+      await txn.rawUpdate(
+        'UPDATE sdk_meta SET schema_version = 5 WHERE id = 1',
       );
     });
   }
@@ -351,11 +398,16 @@ class AppDatabase {
       await exec.execute(stmt);
     }
 
+    // Security tables (security_state, security_events) introduced in v5.
+    for (final stmt in securityTablesDDL()) {
+      await exec.execute(stmt);
+    }
+
     // Singleton upsert — same shape as the migration to keep _onCreate
     // and _onUpgrade post-conditions identical.
     await exec.insert('sdk_meta', <String, Object?>{
       'id': 1,
-      'schema_version': 4,
+      'schema_version': 5,
     }, conflictAlgorithm: ConflictAlgorithm.replace);
   }
 

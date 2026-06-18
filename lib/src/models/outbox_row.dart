@@ -139,7 +139,15 @@ class OutboxRow {
 
   /// True when this row's error cannot be fixed by retrying (#53). UI surfaces
   /// these as "needs your attention"; the drain loop never auto-retries them.
-  bool get isTerminal => errorCode?.isTerminal ?? false;
+  ///
+  /// A `paused` row is terminal regardless of [errorCode]: the engine parks it
+  /// out of the drain queue precisely because it will not succeed on auto-retry
+  /// (validation / permission / mandatory rejection). Treating it as terminal
+  /// here keeps any consumer UI that gates a Retry button on `isTerminal` from
+  /// offering a retry the engine deliberately refuses — even on the (engine-
+  /// unreachable) edge of a paused row whose [errorCode] is null.
+  bool get isTerminal =>
+      state == OutboxState.paused || (errorCode?.isTerminal ?? false);
 
   factory OutboxRow.fromMap(Map<String, Object?> row) {
     return OutboxRow(

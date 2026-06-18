@@ -1,5 +1,3 @@
-import 'package:flutter/material.dart' show TimeOfDay;
-
 /// Coerces a dynamic value into a [DateTime] or null.
 /// - `null` → null
 /// - `DateTime` → returned as-is
@@ -12,36 +10,6 @@ DateTime? parseDateTime(dynamic value) {
   if (value == null) return null;
   if (value is DateTime) return value;
   if (value is String) return DateTime.tryParse(value);
-  return null;
-}
-
-/// Coerces a dynamic value into a "time of day" expressed as a [DateTime]
-/// on the current calendar day. Accepts the same shapes as [parseDateTime]
-/// plus `TimeOfDay` (returns today @ hh:mm) and a manual `HH:MM[:SS]`
-/// string split that [DateTime.tryParse] would reject (because Frappe
-/// persists Time fields as bare `HH:MM:SS` without a date prefix).
-DateTime? parseTime(dynamic value) {
-  if (value == null) return null;
-  if (value is DateTime) return value;
-  if (value is TimeOfDay) {
-    final now = DateTime.now();
-    return DateTime(now.year, now.month, now.day, value.hour, value.minute);
-  }
-  if (value is String) {
-    final parsed = DateTime.tryParse(value);
-    if (parsed != null) return parsed;
-    // Fall back to manual `HH:MM[:SS]` split.
-    final parts = value.split(':');
-    if (parts.length >= 2) {
-      final h = int.tryParse(parts[0]);
-      final m = int.tryParse(parts[1]);
-      final s = parts.length > 2 ? int.tryParse(parts[2]) ?? 0 : 0;
-      if (h != null && m != null) {
-        final now = DateTime.now();
-        return DateTime(now.year, now.month, now.day, h, m, s);
-      }
-    }
-  }
   return null;
 }
 

@@ -31,6 +31,7 @@ class DataField extends BaseField {
     }
 
     return FormBuilderTextField(
+      autovalidateMode: AutovalidateMode.onUserInteraction,
       key: ValueKey('data_${field.fieldname}'),
       name: field.fieldname ?? '',
       initialValue: initialValue,

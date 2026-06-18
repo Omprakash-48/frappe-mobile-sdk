@@ -26,6 +26,9 @@ class FieldStyle {
 
   final LinkFieldPickerMode linkFieldPickerMode;
 
+  final DateTime? Function(DocField field)? getFirstDate;
+  final DateTime? Function(DocField field)? getLastDate;
+
   const FieldStyle({
     this.labelStyle,
     this.descriptionStyle,
@@ -40,6 +43,8 @@ class FieldStyle {
     this.showDescription = true,
     this.inputFormatters,
     this.linkFieldPickerMode = LinkFieldPickerMode.inline,
+    this.getFirstDate,
+    this.getLastDate,
   });
 }
 
@@ -83,6 +88,7 @@ abstract class BaseField extends StatelessWidget {
                     style?.translate != null
                         ? style!.translate!(field.displayLabel)
                         : field.displayLabel,
+                    softWrap: true,
                     style:
                         style?.labelStyle ??
                         TextStyle(

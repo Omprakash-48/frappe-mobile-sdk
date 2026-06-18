@@ -24,10 +24,24 @@ final Random _backoffRandom = Random();
 /// [attempt] is clamped to `[0, 16]` so a runaway counter can never overflow
 /// `1 << attempt` into a tiny or negative `Duration`. Pass a seeded [random]
 /// in tests for determinism.
-Duration retryBackoffDelay(int attempt, {Random? random}) {
+///
+/// Note the ceiling: at `attempt == 16` the deterministic base is
+/// `500 * 2^16 ≈ 32.8s * 1000 = ~9.1 hours`. In practice `RestHelper` calls
+/// this with `attempt ∈ {0, 1}` (default budget of 2 retries), so the real
+/// delay never exceeds ~1s. Callers that may pass larger attempts — or that
+/// want a hard ceiling regardless — should pass [maxDelayMs] (e.g. `30000`),
+/// which caps the deterministic base before jitter so the returned delay
+/// stays in `[maxDelayMs/2, maxDelayMs]`. Left null (the default), behaviour
+/// is unchanged.
+Duration retryBackoffDelay(int attempt, {Random? random, int? maxDelayMs}) {
   assert(attempt >= 0, 'retry attempt must be non-negative');
+  assert(
+    maxDelayMs == null || maxDelayMs > 0,
+    'maxDelayMs must be positive when provided',
+  );
   final n = attempt.clamp(0, 16);
-  final base = 500 * (1 << n);
+  var base = 500 * (1 << n);
+  if (maxDelayMs != null && base > maxDelayMs) base = maxDelayMs;
   final half = base ~/ 2;
   final rnd = random ?? _backoffRandom;
   return Duration(milliseconds: half + rnd.nextInt(half + 1));

@@ -133,6 +133,10 @@ class FrappeFormStyle {
 
   final LinkFieldPickerMode linkFieldPickerMode;
 
+  /// Optional bounds evaluators for Date Pickers
+  final DateTime? Function(String doctype, DocField field)? getFirstDate;
+  final DateTime? Function(String doctype, DocField field)? getLastDate;
+
   const FrappeFormStyle({
     this.fieldDecoration,
     this.labelStyle,
@@ -150,6 +154,8 @@ class FrappeFormStyle {
     this.sectionCardColor,
     this.inputFormatters,
     this.linkFieldPickerMode = LinkFieldPickerMode.inline,
+    this.getFirstDate,
+    this.getLastDate,
   });
 }
 
@@ -396,6 +402,36 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
       normalized[entry.key] = FieldNormalizer.normalize(fieldMeta, entry.value);
     }
     return normalized;
+  }
+
+  /// The number of tabs [_buildFormStructure] will actually produce for [meta]
+  /// — i.e. the live `_tabs.length`, which is what the [TabController] length
+  /// must match.
+  ///
+  /// A plain count of `Tab Break` fields is NOT equivalent and must not be used
+  /// for the [didUpdateWidget] rebuild guard: [_buildFormStructure] skips
+  /// `hidden` fields (so a hidden Tab Break yields no tab) and synthesises an
+  /// implicit leading "Details" tab when content precedes the first Tab Break.
+  /// Counting raw Tab Break fields would miss both, letting the guard skip a
+  /// needed [TabController] rebuild and crash with a length/`_tabs` mismatch.
+  static int _effectiveTabCount(DocTypeMeta meta) {
+    var tabs = 0;
+    var sawContentBeforeFirstTab = false;
+    var inTab = false;
+    for (final field in meta.fields) {
+      if (field.hidden) continue;
+      final type = field.fieldtype;
+      if (type == FieldTypes.tabBreak) {
+        tabs++;
+        inTab = true;
+      } else if (type != FieldTypes.sectionBreak &&
+          type != FieldTypes.columnBreak) {
+        // A real content field outside any tab → implicit "Details" tab.
+        if (!inTab) sawContentBeforeFirstTab = true;
+      }
+    }
+    if (sawContentBeforeFirstTab) tabs++;
+    return tabs;
   }
 
   void _buildFormStructure() {
@@ -662,6 +698,8 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
       showDescription: formStyle.showFieldDescription,
       inputFormatters: formStyle.inputFormatters?.call(field),
       linkFieldPickerMode: formStyle.linkFieldPickerMode,
+      getFirstDate: formStyle.getFirstDate != null ? (f) => formStyle.getFirstDate!(widget.meta.name, f) : null,
+      getLastDate: formStyle.getLastDate != null ? (f) => formStyle.getLastDate!(widget.meta.name, f) : null,
     );
 
     final fieldWithEffectiveProps = DocField(
@@ -1104,7 +1142,8 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
       oldWidget.initialData,
       widget.initialData,
     );
-    final metaChanged = oldWidget.meta.name != widget.meta.name;
+    final metaChanged = oldWidget.meta.name != widget.meta.name ||
+        _effectiveTabCount(oldWidget.meta) != _effectiveTabCount(widget.meta);
     if (initialDataChanged || metaChanged) {
       _progressSubscription?.cancel();
       _linkFieldCoordinator?.dispose();
@@ -1376,6 +1415,7 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
 
     return FormBuilder(
       key: _formKey,
+      initialValue: Map<String, dynamic>.from(_formData),
       child: Column(
         children: [
           if (_linkOptionsLoading)
