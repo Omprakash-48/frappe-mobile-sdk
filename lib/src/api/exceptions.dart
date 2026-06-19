@@ -5,6 +5,15 @@ class FrappeException implements Exception {
   final String message;
   final int? statusCode;
 
+  /// Wire-capture diagnostics. Best-effort; populated by [RestHelper] on
+  /// HTTP ≥400 responses so the push-side error-log collector can rebuild
+  /// the exact request. Null on success paths and on non-HTTP failures.
+  String? requestUrl;
+  String? requestMethod;
+  Object? requestBody;
+  String? responseBodyRaw;
+  String? traceId;
+
   FrappeException(this.message, [this.statusCode]);
 
   @override

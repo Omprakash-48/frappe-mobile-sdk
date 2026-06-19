@@ -389,6 +389,13 @@ class FrappeSDK {
 
     _metaService = MetaService(_client!, _database!);
     final rawDb = _database!.rawDatabase;
+    // Create + restore the session user BEFORE building the sync engine: the
+    // push-engine error-log capture holds onto this reference, so it must be
+    // the real (restored) instance, not a null placeholder. Creating it after
+    // the build (as before) left the capture reading a null service forever,
+    // so every Mobile Error Log row had an empty error_user / roles.
+    _sessionUserService = SessionUserService(rawDb);
+    await _sessionUserService!.restoreFromDb();
     final metaSvc = _metaService!;
     final metaFn = metaSvc.getMeta;
     final localWriter = LocalWriter(rawDb, metaFn);
@@ -433,6 +440,8 @@ class FrappeSDK {
       schemaReconciler: _repository!.reconcileParentTableForMeta,
       payloadTransformer: payloadTransformer,
       pullPageSize: pullPageSize,
+      // Supplies error-log capture with the current user identity + roles.
+      sessionUserService: _sessionUserService,
     );
     _syncStateNotifier = pack.notifier;
     _pushPool = pack.pushPool;
@@ -491,9 +500,7 @@ class FrappeSDK {
         try {
           await syncSvc.pullSyncWaiting(doctype: doctype);
         } catch (e, st) {
-          sdkLog(
-            'FrappeSDK: background pullSync($doctype) failed — $e\n$st',
-          );
+          sdkLog('FrappeSDK: background pullSync($doctype) failed — $e\n$st');
         }
       },
       metaResolver: metaFn,
@@ -529,10 +536,8 @@ class FrappeSDK {
       residueCounter: _residueCount,
     );
 
-    _sessionUserService = SessionUserService(_database!.rawDatabase);
-    // Best-effort: re-hydrate any persisted SessionUser from the previous
-    // app run. Idempotent — no-op when sdk_meta.session_user_json is null.
-    await _sessionUserService!.restoreFromDb();
+    // _sessionUserService is created + restored earlier (before the sync-engine
+    // build) so the error-log capture sees the real instance. See above.
 
     // If a persisted SessionUser carries a language preference, warm the
     // translation cache from SQLite before the UI renders. This is a fast
@@ -1346,9 +1351,7 @@ class FrappeSDK {
           try {
             metasByDoctype[dt] = await meta.getMeta(dt);
           } catch (e, st) {
-            sdkLog(
-              'FrappeSDK: closure pull — getMeta($dt) failed — $e\n$st',
-            );
+            sdkLog('FrappeSDK: closure pull — getMeta($dt) failed — $e\n$st');
           }
         }
         try {
@@ -1394,9 +1397,7 @@ class FrappeSDK {
           // incremental cycle. Adding the sentinel requires a new cursor field
           // (e.g. `zeroRowAt`) and a read in the eligibility filter here.
         } catch (e, st) {
-          sdkLog(
-            'FrappeSDK: sync_details cursor read($dt) failed — $e\n$st',
-          );
+          sdkLog('FrappeSDK: sync_details cursor read($dt) failed — $e\n$st');
         }
       }
       if (eligible.isNotEmpty) {

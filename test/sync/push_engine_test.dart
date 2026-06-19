@@ -87,8 +87,10 @@ void main() {
     DocTypeMeta? customMeta,
     IdempotencyStrategy? idempotencyStrategy,
     WriteQueue Function(String doctype)? writeQueueResolver,
+    Future<void> Function()? onDrainComplete,
   }) {
     return PushEngine(
+      onDrainComplete: onDrainComplete,
       db: db,
       outboxDao: outbox,
       attachmentDao: PendingAttachmentDao(db),
@@ -933,4 +935,53 @@ void main() {
     expect(sentParentCustomer[childUuid], 'SRV-1');
     expect(sentParentCustomer[childUuid], isNot(parentUuid));
   });
+
+  test('onDrainComplete fires once after a drain', () async {
+    var fired = 0;
+    final engine = buildEngine(
+      send: (m, p, sn) async => {
+        'name': 'CUST-1',
+        'modified': '2026-01-01 00:00:00',
+      },
+      onDrainComplete: () async => fired++,
+    );
+    await engine.runOnce();
+    expect(fired, 1);
+  });
+
+  test('a throwing onDrainComplete does not escape runOnce', () async {
+    final engine = buildEngine(
+      send: (m, p, sn) async => {
+        'name': 'CUST-1',
+        'modified': '2026-01-01 00:00:00',
+      },
+      onDrainComplete: () async => throw StateError('boom'),
+    );
+    await engine.runOnce(); // must not throw
+  });
+
+  test(
+    'onDrainComplete is fire-and-forget — a slow hook does not block runOnce',
+    () async {
+      // HIGH: SyncService.pushSync awaits runOnce() while holding _syncMutex
+      // (shared with pullSync). Awaiting a slow/timing-out telemetry flush in
+      // the finally would stall pulls. The drain hook must not be awaited.
+      final hookStarted = Completer<void>();
+      final neverFinishes = Completer<void>(); // simulates a hung network POST
+      final engine = buildEngine(
+        send: (m, p, sn) async => {
+          'name': 'CUST-1',
+          'modified': '2026-01-01 00:00:00',
+        },
+        onDrainComplete: () async {
+          hookStarted.complete();
+          await neverFinishes.future;
+        },
+      );
+      // Must return promptly even though the hook never completes.
+      await engine.runOnce().timeout(const Duration(seconds: 2));
+      // The hook was still invoked (drain still flushed) — just not awaited.
+      expect(hookStarted.isCompleted, isTrue);
+    },
+  );
 }
