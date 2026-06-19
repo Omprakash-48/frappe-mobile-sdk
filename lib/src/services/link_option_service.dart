@@ -87,6 +87,15 @@ class LinkOptionService {
     return _rowsToEntities(result.rows, doctype, titleField);
   }
 
+  /// Test-only access to [_rowsToEntities] so the row→entity mapping
+  /// (including the snapshot-exclusion gate) can be asserted directly.
+  @visibleForTesting
+  List<LinkOptionEntity> rowsToEntitiesForTest(
+    List<Map<String, Object?>> rows,
+    String doctype,
+    String? titleField,
+  ) => _rowsToEntities(rows, doctype, titleField);
+
   /// Converts resolver rows to [LinkOptionEntity] list.
   List<LinkOptionEntity> _rowsToEntities(
     List<Map<String, Object?>> rows,
@@ -96,6 +105,9 @@ class LinkOptionService {
     final now = DateTime.now().millisecondsSinceEpoch;
     final out = <LinkOptionEntity>[];
     for (final row in rows) {
+      // Local-only snapshots (half-filled / parked records) are never offered
+      // as link-field options — they aren't real records yet.
+      if (row['sync_status'] == 'snapshot') continue;
       // Offline rows from `docs__<doctype>` carry `server_name`; online rows
       // from `frappe.client.get_list` carry `name`. Mobile-created rows
       // pre-server-confirm carry only `mobile_uuid`. Try all three so the

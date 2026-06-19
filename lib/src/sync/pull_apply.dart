@@ -63,6 +63,9 @@ const _locallyDirtyStatuses = <String>[
   'failed',
   'conflict',
   'blocked',
+  // Local-only snapshot (half-filled / parked edits). Must never be
+  // overwritten by a server pull — the user has unsaved work in this row.
+  'snapshot',
 ];
 
 /// Back-compat alias for [ChildTableInfo]. Retained so existing call
@@ -350,7 +353,12 @@ class PullApply {
             incomingModified != null &&
             (storedModified == null ||
                 incomingModified.isAfter(storedModified));
-        if (serverAdvanced) {
+        // A 'snapshot' is parked local-only work that has NOT entered the
+        // sync pipeline. It must stay 'snapshot' (shielded, never synced)
+        // regardless of server advances — any divergence is resolved later,
+        // when the user taps Save and the push path runs its conflict
+        // handling. So preserve the local row and skip the conflict flag.
+        if (serverAdvanced && existing.first['sync_status'] != 'snapshot') {
           batch.update(
             parentTable,
             <String, Object?>{

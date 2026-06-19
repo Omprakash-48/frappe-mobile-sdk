@@ -44,6 +44,7 @@ class LocalWriter {
     String? serverName,
     String? syncOp,
     String? pushBasePayload,
+    String? syncStatusOverride,
   }) async {
     final rawUuid = data['mobile_uuid'] as String?;
     final mobileUuid = (rawUuid != null && rawUuid.isNotEmpty)
@@ -80,6 +81,7 @@ class LocalWriter {
         pushBasePayload: pushBasePayload,
         parentMeta: parentMeta,
         childMetasByDoctype: childMetasByDoctype,
+        syncStatusOverride: syncStatusOverride,
       );
     });
     return mobileUuid;
@@ -119,6 +121,7 @@ class LocalWriter {
     String? pushBasePayload,
     DocTypeMeta? parentMeta,
     Map<String, DocTypeMeta>? childMetasByDoctype,
+    String? syncStatusOverride,
   }) async {
     // Resolve metas BEFORE doing any work inside the txn. The metaResolver
     // typically queries `doctype_meta` through the outer Database, which
@@ -160,9 +163,11 @@ class LocalWriter {
     final parentRow = <String, Object?>{
       'mobile_uuid': mobileUuid,
       'server_name': serverName,
-      'sync_status': syncOp != null
-          ? 'dirty'
-          : (serverName != null ? 'synced' : 'dirty'),
+      'sync_status':
+          syncStatusOverride ??
+          (syncOp != null
+              ? 'dirty'
+              : (serverName != null ? 'synced' : 'dirty')),
       'sync_op': ?syncOp,
       'docstatus': _coerceInt(data['docstatus']) ?? 0,
       'modified': data['modified']?.toString(),

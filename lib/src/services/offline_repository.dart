@@ -527,6 +527,86 @@ class OfflineRepository {
     return mobileUuid;
   }
 
+  /// Persists a half-filled form locally as a non-synced "snapshot".
+  ///
+  /// Writes the parent (+ child) rows to `docs__<doctype>` with
+  /// `sync_status='snapshot'` and creates **no** outbox row, so the record
+  /// never enters the push pipeline and is excluded from link-option pickers.
+  /// No validation is performed — validation is the caller's Save path. When
+  /// editing an existing row, the current `server_name` is preserved so a
+  /// later real Save promotes the same record. Returns the `mobile_uuid`.
+  Future<String> saveSnapshot({
+    required String doctype,
+    required Map<String, dynamic> data,
+  }) async {
+    if (!offlineMode.enabled) {
+      throw StateError('OfflineRepository.saveSnapshot requires offline mode');
+    }
+    final localWriter = _localWriter;
+    if (localWriter == null) {
+      throw StateError(
+        'OfflineRepository.saveSnapshot: offline mode requires localWriter',
+      );
+    }
+
+    final rawUuid = data['mobile_uuid'] as String?;
+    final mobileUuid = (rawUuid != null && rawUuid.isNotEmpty)
+        ? rawUuid
+        : _uuid.v4();
+    final dataWithUuid = <String, dynamic>{...data, 'mobile_uuid': mobileUuid};
+
+    // Pre-resolve metas outside the txn (deadlock guard — see saveDocument).
+    final parentMeta = await _loadMeta(doctype);
+    final childMetasByDoctype = <String, DocTypeMeta>{};
+    if (parentMeta != null) {
+      for (final f in parentMeta.fields) {
+        final opt = f.options;
+        if ((f.fieldtype == 'Table' || f.fieldtype == 'Table MultiSelect') &&
+            opt != null &&
+            opt.isNotEmpty) {
+          final cm = await _loadMeta(opt);
+          if (cm != null) childMetasByDoctype[opt] = cm;
+        }
+      }
+    }
+
+    final tableName = normalizeDoctypeTableName(doctype);
+    Map<String, Object?>? existing;
+    try {
+      final rows = await _database.rawDatabase.query(
+        tableName,
+        where: 'mobile_uuid = ?',
+        whereArgs: [mobileUuid],
+        limit: 1,
+      );
+      existing = rows.isEmpty ? null : rows.first;
+    } on DatabaseException catch (e, st) {
+      sdkLog(
+        'OfflineRepository.saveSnapshot: existing-row probe failed for '
+        '$doctype/$mobileUuid (table likely missing) — $e\n$st',
+      );
+      existing = null;
+    }
+    final existingServerName = existing?['server_name'] as String?;
+
+    await _database.rawDatabase.transaction((txn) async {
+      await localWriter.writeParentInTxn(
+        txn: txn,
+        parentDoctype: doctype,
+        mobileUuid: mobileUuid,
+        data: dataWithUuid,
+        serverName: existingServerName,
+        syncOp: existingServerName != null ? 'UPDATE' : 'INSERT',
+        parentMeta: parentMeta,
+        childMetasByDoctype: childMetasByDoctype,
+        syncStatusOverride: 'snapshot',
+      );
+      // Deliberately NO OutboxDao.recordSave — a snapshot never enqueues.
+    });
+
+    return mobileUuid;
+  }
+
   /// Tombstones the docs__ row and enqueues a DELETE outbox row. If a
   /// pending INSERT existed (the doc never reached the server), cancels
   /// it and hard-deletes the docs__ row instead — there is nothing to
@@ -711,10 +791,7 @@ class OfflineRepository {
     required String serverName,
     required Map<String, dynamic> data,
   }) async {
-    await applyServerPage(
-      doctype: doctype,
-      rows: [data],
-    );
+    await applyServerPage(doctype: doctype, rows: [data]);
   }
 
   /// Applies a page of server-pulled snapshots via PullApply.
@@ -725,7 +802,7 @@ class OfflineRepository {
     bool isInitialSync = false,
   }) async {
     if (rows.isEmpty) return;
-    
+
     final meta = await _loadMeta(doctype);
     if (meta == null) {
       // Meta absent means the DocType schema was never synced — we cannot
