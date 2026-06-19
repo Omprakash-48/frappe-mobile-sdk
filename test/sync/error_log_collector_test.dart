@@ -40,12 +40,19 @@ void main() {
     expect(out.first.occurrenceCount, 2);
   });
 
-  test('different user => different signature => separate rows', () {
-    final c = ErrorLogCollector();
-    c.record(rec(user: 'u1@x'));
-    c.record(rec(user: 'u2@x'));
-    expect(c.drain().length, 2);
-  });
+  test(
+    'different user => different signature => separate rows (M2 intentional)',
+    () {
+      // errorUser is INTENTIONALLY part of the signature: per-user error
+      // attribution is a product requirement, so the same failing endpoint hit
+      // by different field workers must surface as separate rows. (Reviewer
+      // suggested aggregating across users; pushed back — see computeSignature.)
+      final c = ErrorLogCollector();
+      c.record(rec(user: 'u1@x'));
+      c.record(rec(user: 'u2@x'));
+      expect(c.drain().length, 2);
+    },
+  );
 
   test(
     'different exc_type / status / doctype / operation => separate rows',
