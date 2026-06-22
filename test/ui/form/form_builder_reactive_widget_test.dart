@@ -98,4 +98,55 @@ void main() {
     expect(submitted, false);
     c.dispose();
   });
+
+  testWidgets(
+    'reactive mode: changing a link_filters source rebuilds the dependent Link',
+    (tester) async {
+      // Regression for the District-stuck-on-"Select state first" bug: a Link
+      // field whose options are filtered by another field (link_filters) has
+      // no depends_on, so a parent change alters neither its own value nor its
+      // FieldUiState. Before the fix its reactive host never rebuilt, so it kept
+      // stale parent data and never re-resolved options.
+      final meta = DocTypeMeta(
+        name: 'T',
+        fields: [
+          DocField(fieldname: 'state', fieldtype: 'Data', label: 'State'),
+          DocField(
+            fieldname: 'district',
+            fieldtype: 'Link',
+            label: 'District',
+            options: 'District',
+            linkFilters: '[["District","state","=","eval:doc.state"]]',
+          ),
+        ],
+      );
+      final controller = FormController(meta: meta);
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: FrappeFormBuilder(
+              meta: meta,
+              mode: FormBuilderMode.reactive,
+              controller: controller,
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      FrappeFormBuilder.debugFieldBuildCounts.clear();
+
+      // Change the link_filters source. The dependent Link must rebuild so its
+      // didUpdateWidget can re-resolve options against the new parent value.
+      controller.setValue('state', 'Madhya Pradesh');
+      await tester.pumpAndSettle();
+
+      expect(
+        (FrappeFormBuilder.debugFieldBuildCounts['district'] ?? 0) > 0,
+        true,
+        reason:
+            'dependent Link did not rebuild when its link_filters source changed',
+      );
+      controller.dispose();
+    },
+  );
 }

@@ -1597,9 +1597,18 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
     if (name == null || name.isEmpty) return const SizedBox.shrink();
     final c = _controller!;
     final formStyle = widget.style ?? DefaultFormStyle.standard;
+    // Reactive Link fields must also rebuild when a field referenced by their
+    // `link_filters` changes (e.g. District filtered by State): such a source
+    // change alters neither this field's own value nor its FieldUiState, so
+    // without watching the source notifiers the dropdown keeps stale parent
+    // data and stays pinned on "Select <parent> first".
+    final linkSources = LinkOptionService.getDependentFieldNames(
+      field.linkFilters,
+    );
     return _ReactiveFieldHost(
       name: name,
       controller: c,
+      watch: linkSources,
       build: (ui) {
         if (!ui.visible) return const SizedBox.shrink();
         FrappeFormBuilder.debugFieldBuildCounts[name] =
@@ -1746,10 +1755,17 @@ class _ReactiveFieldHost extends StatefulWidget {
     required this.name,
     required this.controller,
     required this.build,
+    this.watch = const <String>[],
   });
   final String name;
   final FormController controller;
   final Widget Function(FieldUiState ui) build;
+
+  /// Extra field names whose value notifiers also trigger a rebuild — e.g. the
+  /// fields a Link field references via `link_filters`. A change to one of them
+  /// alters neither this field's own value nor its FieldUiState, but the field
+  /// must re-read form data to re-resolve its filtered options.
+  final List<String> watch;
 
   @override
   State<_ReactiveFieldHost> createState() => _ReactiveFieldHostState();
@@ -1775,6 +1791,7 @@ class _ReactiveFieldHostState extends State<_ReactiveFieldHost> {
     listenable: Listenable.merge([
       widget.controller.uiStateOf(widget.name),
       widget.controller.valueOf(widget.name),
+      for (final f in widget.watch) widget.controller.valueOf(f),
     ]),
     builder: (context, _) {
       final ui = widget.controller.uiStateOf(widget.name).value;
