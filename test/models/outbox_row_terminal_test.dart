@@ -25,25 +25,40 @@ void main() {
   });
 
   group('OutboxRow.isTerminal (#53)', () {
-    OutboxRow row({ErrorCode? code}) => OutboxRow(
-      id: 1,
-      doctype: 'X',
-      mobileUuid: 'u1',
-      operation: OutboxOperation.insert,
-      state: OutboxState.failed,
-      retryCount: 0,
-      errorCode: code,
-      createdAt: DateTime.utc(2026),
-    );
+    OutboxRow row({ErrorCode? code, OutboxState state = OutboxState.failed}) =>
+        OutboxRow(
+          id: 1,
+          doctype: 'X',
+          mobileUuid: 'u1',
+          operation: OutboxOperation.insert,
+          state: state,
+          retryCount: 0,
+          errorCode: code,
+          createdAt: DateTime.utc(2026),
+        );
 
     test('derives from errorCode', () {
       expect(row(code: ErrorCode.VALIDATION).isTerminal, isTrue);
       expect(row(code: ErrorCode.NETWORK).isTerminal, isFalse);
     });
 
-    test('null errorCode is not terminal', () {
+    test('null errorCode is not terminal (non-paused)', () {
       expect(row(code: null).isTerminal, isFalse);
     });
+
+    test(
+      'paused row is terminal regardless of errorCode (H6 — no stray Retry)',
+      () {
+        // The engine parks paused rows out of the drain queue; isTerminal must
+        // report true so a consumer UI gating Retry on it never offers a retry
+        // the engine refuses — even on the edge of a null errorCode.
+        expect(row(state: OutboxState.paused, code: null).isTerminal, isTrue);
+        expect(
+          row(state: OutboxState.paused, code: ErrorCode.NETWORK).isTerminal,
+          isTrue,
+        );
+      },
+    );
   });
 
   group('OutboxState.paused (#53)', () {

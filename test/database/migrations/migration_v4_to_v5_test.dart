@@ -133,58 +133,116 @@ void main() {
     if (tmpDir.existsSync()) tmpDir.deleteSync(recursive: true);
   });
 
-  test('v4 device gets security_state and security_events on upgrade to v5', () async {
-    final v4db = await openDatabase(
-      dbPath,
-      version: 4,
-      onCreate: _v4OnCreate,
-      singleInstance: false,
-    );
-    await v4db.close();
+  test(
+    'v4 device gets security_state and security_events on upgrade to v5',
+    () async {
+      final v4db = await openDatabase(
+        dbPath,
+        version: 4,
+        onCreate: _v4OnCreate,
+        singleInstance: false,
+      );
+      await v4db.close();
 
-    AppDatabaseTestSeam.resetSingleton();
-    final v5db = await openDatabase(
-      dbPath,
-      version: 5,
-      onConfigure: AppDatabaseTestSeam.runOnConfigure,
-      onUpgrade: AppDatabaseTestSeam.runOnUpgrade,
-      singleInstance: false,
-    );
+      AppDatabaseTestSeam.resetSingleton();
+      final v5db = await openDatabase(
+        dbPath,
+        version: 5,
+        onConfigure: AppDatabaseTestSeam.runOnConfigure,
+        onUpgrade: AppDatabaseTestSeam.runOnUpgrade,
+        singleInstance: false,
+      );
 
-    final tables = (await v5db.rawQuery(
-      "SELECT name FROM sqlite_master WHERE type='table'",
-    )).map((r) => r['name'] as String).toSet();
+      final tables = (await v5db.rawQuery(
+        "SELECT name FROM sqlite_master WHERE type='table'",
+      )).map((r) => r['name'] as String).toSet();
 
-    expect(tables, contains('security_state'));
-    expect(tables, contains('security_events'));
+      expect(tables, contains('security_state'));
+      expect(tables, contains('security_events'));
 
-    // security_state must have singleton row seeded by migration
-    final stateRows = await v5db.rawQuery('SELECT id FROM security_state');
-    expect(stateRows, hasLength(1));
-    expect(stateRows.first['id'], 1);
+      // security_state must have singleton row seeded by migration
+      final stateRows = await v5db.rawQuery('SELECT id FROM security_state');
+      expect(stateRows, hasLength(1));
+      expect(stateRows.first['id'], 1);
 
-    // sdk_meta schema_version must be bumped to 5
-    final meta = await v5db.rawQuery(
-      'SELECT schema_version FROM sdk_meta WHERE id = 1',
-    );
-    expect(meta.first['schema_version'], 5);
+      // sdk_meta schema_version must be bumped to 5
+      final meta = await v5db.rawQuery(
+        'SELECT schema_version FROM sdk_meta WHERE id = 1',
+      );
+      expect(meta.first['schema_version'], 5);
 
-    await v5db.close();
-  });
+      await v5db.close();
+    },
+  );
 
-  test('fresh install via AppDatabase.inMemoryDatabase creates both security tables', () async {
-    AppDatabaseTestSeam.resetSingleton();
-    final db = await AppDatabase.inMemoryDatabase();
+  test(
+    'fresh install via AppDatabase.inMemoryDatabase creates both security tables',
+    () async {
+      AppDatabaseTestSeam.resetSingleton();
+      final db = await AppDatabase.inMemoryDatabase();
 
-    final tables = (await db.rawDatabase.rawQuery(
-      "SELECT name FROM sqlite_master WHERE type='table'",
-    )).map((r) => r['name'] as String).toSet();
+      final tables = (await db.rawDatabase.rawQuery(
+        "SELECT name FROM sqlite_master WHERE type='table'",
+      )).map((r) => r['name'] as String).toSet();
 
-    expect(tables, contains('security_state'));
-    expect(tables, contains('security_events'));
+      expect(tables, contains('security_state'));
+      expect(tables, contains('security_events'));
 
-    await db.close();
-  });
+      await db.close();
+    },
+  );
+
+  test(
+    'v4→v5 backfills the named mobile_uuid index on existing docs__ tables (H4)',
+    () async {
+      final v4db = await openDatabase(
+        dbPath,
+        version: 4,
+        onCreate: (db, v) async {
+          await _v4OnCreate(db, v);
+          // A docs__ table as a v3/v4 device would have it: mobile_uuid is the
+          // PRIMARY KEY (auto-indexed) but the NAMED ix_<suffix>_mobile_uuid
+          // index that newer IndexPolicy emits is absent.
+          await db.execute(
+            'CREATE TABLE docs__demo ('
+            '  mobile_uuid TEXT PRIMARY KEY,'
+            '  server_name TEXT,'
+            '  sync_status TEXT'
+            ')',
+          );
+        },
+        singleInstance: false,
+      );
+      // Precondition: the named index does not exist yet on the v4 table.
+      final before = (await v4db.rawQuery(
+        "SELECT name FROM sqlite_master WHERE type='index' "
+        "AND tbl_name='docs__demo'",
+      )).map((r) => r['name'] as String).toSet();
+      expect(before, isNot(contains('ix_demo_mobile_uuid')));
+      await v4db.close();
+
+      AppDatabaseTestSeam.resetSingleton();
+      final v5db = await openDatabase(
+        dbPath,
+        version: 5,
+        onConfigure: AppDatabaseTestSeam.runOnConfigure,
+        onUpgrade: AppDatabaseTestSeam.runOnUpgrade,
+        singleInstance: false,
+      );
+
+      final after = (await v5db.rawQuery(
+        "SELECT name FROM sqlite_master WHERE type='index' "
+        "AND tbl_name='docs__demo'",
+      )).map((r) => r['name'] as String).toSet();
+      expect(
+        after,
+        contains('ix_demo_mobile_uuid'),
+        reason: 'migration must backfill the named mobile_uuid index',
+      );
+
+      await v5db.close();
+    },
+  );
 
   test('migration is idempotent — running v4→v5 twice does not throw', () async {
     final v4db = await openDatabase(
@@ -215,9 +273,11 @@ void main() {
       singleInstance: false,
     );
 
-    final count = (await db2.rawQuery(
-      "SELECT count(*) as c FROM sqlite_master WHERE type='table' AND name='security_state'",
-    )).first['c'] as int;
+    final count =
+        (await db2.rawQuery(
+              "SELECT count(*) as c FROM sqlite_master WHERE type='table' AND name='security_state'",
+            )).first['c']
+            as int;
     expect(count, 1);
 
     await db2.close();

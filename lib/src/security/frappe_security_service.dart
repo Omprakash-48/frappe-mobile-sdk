@@ -53,7 +53,16 @@ class FrappeSecurityService {
   }
 
   final AppDatabase _db;
+
+  /// Master switch for all tamper checks. **Defaults to `false`** — a service
+  /// constructed without `enabled: true` runs NO checks and silently passes,
+  /// by design (the SDK ships security opt-in so it can never brick a consumer
+  /// that hasn't adopted it). You MUST pass both `enabled: true` and a non-empty
+  /// [checks] set to actually enforce anything; the constructor logs a warning
+  /// if you enable the service but leave [checks] empty.
   final bool enabled;
+
+  /// The checks to run when [enabled]. Empty by default — see [enabled].
   final Set<SecurityCheck> checks;
 
   /// Minimum monotonic-clock milliseconds that must have elapsed since boot

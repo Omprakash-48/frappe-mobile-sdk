@@ -10,6 +10,7 @@ import 'daos/doctype_permission_dao.dart';
 import 'daos/security_event_dao.dart';
 import 'daos/security_state_dao.dart';
 import 'schema/system_tables.dart';
+import 'table_name.dart';
 
 /// Injectable factory resolver — allows tests to substitute their own
 /// factory (e.g. one that always throws) without mocking internals.
@@ -228,6 +229,28 @@ class AppDatabase {
       for (final stmt in securityTablesDDL()) {
         await txn.execute(stmt);
       }
+
+      // Backfill the mobile_uuid index on docs__* tables that were created
+      // before `mobile_uuid` was seeded into IndexPolicy (devices upgrading
+      // from v3/v4). `mobile_uuid` is the TEXT PRIMARY KEY, so SQLite already
+      // auto-indexes it and equality lookups never scan — but creating the
+      // named `ix_<suffix>_mobile_uuid` index keeps upgraded DBs byte-for-byte
+      // consistent with freshly-created ones (same name as parent_schema.dart
+      // emits) and removes any doubt for the UUID-fallback pull path. Idempotent
+      // via IF NOT EXISTS.
+      final docTables = await txn.rawQuery(
+        "SELECT name FROM sqlite_master WHERE type = 'table'",
+      );
+      for (final row in docTables) {
+        final name = row['name'] as String;
+        if (!name.startsWith('docs__')) continue;
+        final suffix = stripDocsPrefix(name);
+        await txn.execute(
+          'CREATE INDEX IF NOT EXISTS ix_${suffix}_mobile_uuid '
+          'ON "$name"(mobile_uuid)',
+        );
+      }
+
       await txn.rawUpdate(
         'UPDATE sdk_meta SET schema_version = 5 WHERE id = 1',
       );
