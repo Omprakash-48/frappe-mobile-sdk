@@ -28,6 +28,7 @@ import 'widgets/form_builder.dart'
         FieldChangeHandler,
         FormValidator;
 import 'form/form_controller.dart' show FormController;
+import 'widgets/fields/field_factory.dart' show FieldFactory;
 import '../utils/sdk_log.dart';
 
 /// Visual customization for [FormScreen] action area.
@@ -127,6 +128,11 @@ class FormScreen extends StatefulWidget {
   /// read/listen/mutate form state directly.
   final void Function(FormController controller)? onControllerReady;
 
+  /// Optional factory for rendering custom field widgets, forwarded to the
+  /// underlying [FrappeFormBuilder] (which already supports it). Lets hosts
+  /// (e.g. ChetnaFieldFactory) override specific field types.
+  final FieldFactory? customFieldFactory;
+
   const FormScreen({
     super.key,
     required this.meta,
@@ -159,6 +165,7 @@ class FormScreen extends StatefulWidget {
     this.mode = FormBuilderMode.legacy,
     this.controller,
     this.onControllerReady,
+    this.customFieldFactory,
   });
 
   @override
@@ -1067,6 +1074,7 @@ class _FormScreenState extends State<FormScreen> with WidgetsBindingObserver {
                   onFormDataChanged: _onFormDataChanged,
                   linkOptionService: widget.linkOptionService,
                   useLinkFieldCoordinator: widget.useLinkFieldCoordinator,
+                  customFieldFactory: widget.customFieldFactory,
                   uploadFile: widget.api != null
                       ? (file) async {
                           final res = await widget.api!.attachment.uploadFile(
