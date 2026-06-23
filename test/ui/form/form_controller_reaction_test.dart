@@ -34,36 +34,35 @@ void main() {
           DocField(fieldname: 'total', fieldtype: 'Int'),
         ]),
       );
-      c.onFieldReaction = (name, value, data) =>
-          name == 'qty' ? {'total': (value as int) * 2} : null;
+      c.onFieldReaction =
+          (name, value, data, {ChangeSource source = ChangeSource.user}) =>
+              name == 'qty' ? {'total': (value as int) * 2} : null;
       c.setValue('qty', 5, source: ChangeSource.user);
       expect(c.getValue('total'), 10); // computed in the same flush
       c.dispose();
     },
   );
 
-  test(
-    'reaction does NOT fire for reaction/system-sourced writes (loop-free)',
-    () {
-      final c = FormController(
-        meta: _meta([
-          DocField(fieldname: 'a', fieldtype: 'Int'),
-          DocField(fieldname: 'b', fieldtype: 'Int'),
-        ]),
-      );
-      var calls = 0;
-      c.onFieldReaction = (name, value, data) {
-        calls++;
-        return name == 'a'
-            ? {'b': 1}
-            : null; // b is reaction-sourced -> no re-fire
-      };
-      c.setValue('a', 1, source: ChangeSource.user);
-      expect(calls, 1); // only 'a' fired
-      expect(c.getValue('b'), 1);
-      c.dispose();
-    },
-  );
+  test('reaction-sourced patches do NOT re-fire the reaction (loop-free)', () {
+    final c = FormController(
+      meta: _meta([
+        DocField(fieldname: 'a', fieldtype: 'Int'),
+        DocField(fieldname: 'b', fieldtype: 'Int'),
+      ]),
+    );
+    var calls = 0;
+    c.onFieldReaction =
+        (name, value, data, {ChangeSource source = ChangeSource.user}) {
+          calls++;
+          return name == 'a'
+              ? {'b': 1}
+              : null; // b is reaction-sourced -> no re-fire
+        };
+    c.setValue('a', 1, source: ChangeSource.user);
+    expect(calls, 1); // only 'a' fired
+    expect(c.getValue('b'), 1);
+    c.dispose();
+  });
 
   test(
     'flush-completion invariant: exactly one notifyListeners per setValue',
@@ -88,4 +87,46 @@ void main() {
       c.dispose();
     },
   );
+
+  test('system-sourced change (fetch_from sim) recomputes its dependent', () {
+    final c = FormController(
+      meta: _meta([
+        DocField(fieldname: 'src', fieldtype: 'Data'),
+        DocField(fieldname: 'derived', fieldtype: 'Data'),
+      ]),
+    );
+    final fired = <String>[];
+    c.onFieldReaction =
+        (name, value, data, {ChangeSource source = ChangeSource.user}) {
+          fired.add('$name:$source');
+          return name == 'src' ? {'derived': '$value!'} : null;
+        };
+    c.setValue('src', 'X', source: ChangeSource.system); // simulate fetch_from
+    expect(c.getValue('derived'), 'X!'); // recomputed despite system source
+    expect(fired, contains('src:ChangeSource.system'));
+    c.dispose();
+  });
+
+  test('clear-on-hide of a computed source converges (no oscillation)', () {
+    final c = FormController(
+      meta: _meta([
+        DocField(fieldname: 'gate', fieldtype: 'Data'),
+        DocField(
+          fieldname: 'shown',
+          fieldtype: 'Data',
+          dependsOn: 'eval:doc.gate == "on"',
+        ),
+      ]),
+    );
+    c.onFieldReaction =
+        (name, value, data, {ChangeSource source = ChangeSource.user}) =>
+            (name == 'gate' && value == 'on') ? {'shown': 'visible'} : null;
+    c.setValue('gate', 'on', source: ChangeSource.user);
+    expect(c.getValue('shown'), 'visible');
+    // Turning the gate off hides 'shown' -> cleared (system). With system now
+    // firing reactions, 'shown' reacts (returns null) -> converges, no hang.
+    c.setValue('gate', 'off', source: ChangeSource.user);
+    expect(c.getValue('shown'), isNull);
+    c.dispose();
+  });
 }

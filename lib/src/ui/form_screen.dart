@@ -283,6 +283,13 @@ class _FormScreenState extends State<FormScreen> with WidgetsBindingObserver {
   FormController? _formController;
   bool _ownsFormController = false;
 
+  // Enclosing route, captured in didChangeDependencies() where the element is
+  // guaranteed active. App-lifecycle callbacks read this cached reference
+  // instead of calling ModalRoute.of(context): `mounted` stays true during the
+  // inactive phase (after deactivate(), before unmount()), so an ancestor
+  // lookup there can assert "Looking up a deactivated widget's ancestor".
+  ModalRoute<dynamic>? _route;
+
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
@@ -290,6 +297,14 @@ class _FormScreenState extends State<FormScreen> with WidgetsBindingObserver {
     _isSyncing.dispose();
     if (_ownsFormController) _formController?.dispose();
     super.dispose();
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    // Cache the enclosing route while the element is active so lifecycle
+    // callbacks never look it up on a deactivated context.
+    _route = ModalRoute.of(context);
   }
 
   @override
@@ -302,7 +317,12 @@ class _FormScreenState extends State<FormScreen> with WidgetsBindingObserver {
     // times per foreground. Cap to the form the user is actually
     // looking at. (PR#36 round-2 M14)
     if (!mounted) return;
-    final route = ModalRoute.of(context);
+    // Use the route cached in didChangeDependencies — NOT ModalRoute.of(context)
+    // here. `mounted` is still true while an element is inactive (deactivated
+    // but not yet unmounted), and an ancestor lookup on such a context asserts
+    // "Looking up a deactivated widget's ancestor is unsafe", destabilising the
+    // element tree (the cascade then surfaces as `_dependents.isEmpty`).
+    final route = _route;
     if (route != null && !route.isCurrent) return;
     _loadSyncErrors();
   }

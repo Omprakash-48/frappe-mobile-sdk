@@ -149,4 +149,23 @@ void main() {
       controller.dispose();
     },
   );
+
+  testWidgets('reactive mode: an in-progress decimal is not clobbered', (
+    tester,
+  ) async {
+    final meta = DocTypeMeta(
+      name: 'T',
+      fields: [DocField(fieldname: 'w', fieldtype: 'Float', label: 'W')],
+    );
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: FrappeFormBuilder(meta: meta, mode: FormBuilderMode.reactive),
+        ),
+      ),
+    );
+    await tester.enterText(find.byKey(const ValueKey('numeric_w')), '7.');
+    await tester.pumpAndSettle();
+    expect(find.text('7.'), findsOneWidget);
+  });
 }

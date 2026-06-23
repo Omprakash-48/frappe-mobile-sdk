@@ -98,6 +98,11 @@ class FormController extends ChangeNotifier {
   ValueNotifier<FieldUiState> uiStateOf(String field) => _uiNotifiers
       .putIfAbsent(field, () => ValueNotifier(_computeUiState(field)));
 
+  /// Origin of the field's most recent value mutation, or null if never set.
+  /// The reactive widget layer uses this to avoid clobbering an in-progress
+  /// user edit on rebuild (the user's keystroke already lives in the field).
+  ChangeSource? lastSourceOf(String field) => _lastSource[field];
+
   // ── batching / flush state ──────────────────────────────────────────────
   bool _batching = false;
   bool _flushing = false;
@@ -177,36 +182,45 @@ class FormController extends ChangeNotifier {
     final cap = (_meta.fields.length + 1) * 4; // backstop vs non-convergence
     var iterations = 0;
 
-    // In-pipeline reactions: run once on the seed's user/programmatic changes,
-    // in meta order. Patches re-enter as ChangeSource.reaction (excluded from
-    // `eligible`, so no reaction re-fires; last-writer-wins via apply order).
-    if (onFieldReaction != null) {
-      final eligible =
-          _pendingChanged
-              .where(
-                (f) =>
-                    _lastSource[f] == ChangeSource.user ||
-                    _lastSource[f] == ChangeSource.programmatic,
-              )
-              .toList()
-            ..sort((a, b) => _metaIndex(a).compareTo(_metaIndex(b)));
-      for (final f in eligible) {
-        final patches = onFieldReaction!(f, _rawValues[f], values);
-        if (patches != null) {
-          patches.forEach((k, v) {
-            _lastSource[k] = ChangeSource.reaction;
-            _applyValue(k, v);
-          });
-        }
-      }
-    }
-
     try {
       while (_pendingChanged.isNotEmpty) {
+        // (0) In-pipeline reactions for THIS round. Fire for every changed field
+        //     whose source is not `reaction`, so user/programmatic AND system
+        //     (fetch_from, link-clear, clear-on-hide) recompute their dependents.
+        //     Patches re-enter as ChangeSource.reaction and are excluded here, so
+        //     a reaction never re-fires on its own output (loop-free); the
+        //     iteration cap below backstops a pathological reaction<->clear cycle.
+        if (onFieldReaction != null) {
+          final reactSeed =
+              _pendingChanged
+                  .where((f) => _lastSource[f] != ChangeSource.reaction)
+                  .toList()
+                ..sort((a, b) => _metaIndex(a).compareTo(_metaIndex(b)));
+          for (final f in reactSeed) {
+            final patches = onFieldReaction!(
+              f,
+              _rawValues[f],
+              values,
+              source: _lastSource[f] ?? ChangeSource.user,
+            );
+            if (patches != null) {
+              patches.forEach((k, v) {
+                _lastSource[k] = ChangeSource.reaction;
+                _applyValue(k, v);
+              });
+            }
+          }
+        }
+
         final worklist = <String>[..._pendingChanged];
         _pendingChanged.clear();
         while (worklist.isNotEmpty) {
           if (iterations++ > cap) {
+            assert(
+              false,
+              'FormController: propagation exceeded cap ($cap) — likely a '
+              'reaction<->clear oscillation; aborting.',
+            );
             debugPrint(
               'FormController: propagation exceeded cap ($cap); aborting.',
             );
@@ -579,6 +593,48 @@ class FormController extends ChangeNotifier {
   });
 
   void requestFocus(String field) => focusNodeOf(field).requestFocus();
+
+  // ── field render contexts (scroll-into-view) ──────────────────────────────
+  // The field hosts register their BuildContext while mounted+visible, so a
+  // field can be scrolled into view by name regardless of its type. This is
+  // more reliable than focus-based scrolling (FocusNode.requestFocus only
+  // scrolls editable text into view, not dropdowns / multiselects) and than
+  // FormFieldState.hasError tree-walks (app-level validation errors — cross
+  // field, required-multiselect — never set FormFieldState.hasError).
+  final Map<String, BuildContext> _fieldContexts = {};
+
+  void registerFieldContext(String field, BuildContext context) =>
+      _fieldContexts[field] = context;
+
+  void unregisterFieldContext(String field) => _fieldContexts.remove(field);
+
+  /// Scrolls the first of [fields] (in iteration order) that is currently
+  /// mounted and visible into view, and returns it; null if none had a live
+  /// render context. [alignment] 0.1 leaves room for a sticky header/banner.
+  String? scrollToFirstField(
+    Iterable<String> fields, {
+    double alignment = 0.1,
+  }) {
+    for (final f in fields) {
+      final ctx = _fieldContexts[f];
+      if (ctx == null || !ctx.mounted) continue;
+      final ro = ctx.findRenderObject();
+      if (ro == null || !ro.attached) continue;
+      Scrollable.ensureVisible(
+        ctx,
+        duration: const Duration(milliseconds: 400),
+        curve: Curves.easeInOutCubic,
+        alignment: alignment,
+      );
+      return f;
+    }
+    return null;
+  }
+
+  /// Convenience: scroll a single [field] into view. Returns true if it had a
+  /// live render context and was scrolled to.
+  bool scrollToField(String field, {double alignment = 0.1}) =>
+      scrollToFirstField([field], alignment: alignment) != null;
 
   // ── view intents: tab / section navigation (no BuildContext) ──────────────
   late final List<FormTabInfo> _tabs = _computeTabs();

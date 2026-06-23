@@ -44,8 +44,9 @@ typedef FieldChangeHandler =
     Map<String, dynamic>? Function(
       String fieldName,
       dynamic newValue,
-      Map<String, dynamic> formData,
-    );
+      Map<String, dynamic> formData, {
+      ChangeSource source,
+    });
 
 /// Called before save with the current form data. Return a non-null error
 /// message to block the save and surface the message to the user; return
@@ -450,7 +451,16 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
     if (await c.validateAsync()) {
       widget.onSubmit?.call(c.buildSubmitData());
     } else {
-      if (c.firstInvalidField != null) c.requestFocus(c.firstInvalidField!);
+      final invalid = c.firstInvalidField;
+      if (invalid != null) {
+        c.requestFocus(invalid);
+        // requestFocus only scrolls editable text into view; explicitly scroll
+        // so non-text invalid fields (dropdowns, multiselects, links) land in
+        // view too. Post-frame so any focus-driven layout settles first.
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (mounted) c.scrollToField(invalid);
+        });
+      }
       widget.onValidationFailed?.call();
     }
   }
@@ -1623,6 +1633,10 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
         final normalized = FieldNormalizer.normalize(effective, value);
         WidgetsBinding.instance.addPostFrameCallback((_) {
           if (!mounted) return;
+          // The field the user is actively editing owns its own text; a user
+          // keystroke already lives in the FB field, so re-patching the
+          // normalized value would clobber an in-progress edit (e.g. '7.').
+          if (c.lastSourceOf(name) == ChangeSource.user) return;
           final st = _formKey.currentState?.fields[name];
           if (st != null && st.value != normalized) {
             _formKey.currentState?.patchValue({name: normalized});
@@ -1782,6 +1796,7 @@ class _ReactiveFieldHostState extends State<_ReactiveFieldHost> {
         widget.controller.reportFieldMounted(widget.name);
       } else {
         widget.controller.reportFieldUnmounted(widget.name);
+        widget.controller.unregisterFieldContext(widget.name);
       }
     });
   }
@@ -1796,6 +1811,13 @@ class _ReactiveFieldHostState extends State<_ReactiveFieldHost> {
     builder: (context, _) {
       final ui = widget.controller.uiStateOf(widget.name).value;
       _sync(ui.visible);
+      // Register this field's render context while it is visible so the
+      // controller can scroll it into view by name (e.g. first invalid field
+      // on submit). Off-screen fields are still registered — the form body is
+      // a single eager scroll view — but depends_on-hidden fields are not.
+      if (ui.visible) {
+        widget.controller.registerFieldContext(widget.name, context);
+      }
       return widget.build(ui);
     },
   );
@@ -1803,6 +1825,7 @@ class _ReactiveFieldHostState extends State<_ReactiveFieldHost> {
   @override
   void dispose() {
     if (_reportedVisible) widget.controller.reportFieldUnmounted(widget.name);
+    widget.controller.unregisterFieldContext(widget.name);
     super.dispose();
   }
 }
