@@ -87,6 +87,29 @@ class OfflineRepository {
     _childMetasByParent.clear();
   }
 
+  /// Drops the in-memory meta state for a SINGLE [doctype] after its meta
+  /// was re-fetched from the server (see [MetaService.onMetaRefreshed]).
+  ///
+  /// Without this, a mid-session meta refresh — e.g. a reconnect resync
+  /// running `checkAndSyncDoctypes` / `resyncMobileConfiguration` after the
+  /// cache was already warmed at boot — updates the DAO + MetaService LRU
+  /// but leaves this repository's copy stale until logout. A subsequent
+  /// [saveDocument] would then read the old schema via [_loadMeta] and
+  /// silently drop any newly-added field. Evicting here forces the next
+  /// [_loadMeta] to re-read the fresh meta from the DAO.
+  ///
+  /// Clears three mirrors keyed on this doctype:
+  ///   * `_metaCache`        — so save/delete read fresh parent meta;
+  ///   * `_childMetasByParent` — so a changed child-table set is rebuilt;
+  ///   * `_ensuredTables`    — so the next closure pull re-reconciles the
+  ///     table schema (the save path already self-heals via
+  ///     [reconcileParentTableForMeta], but the pull path relies on this).
+  void invalidateMetaCacheFor(String doctype) {
+    _metaCache.remove(doctype);
+    _childMetasByParent.remove(doctype);
+    _ensuredTables.remove(normalizeDoctypeTableName(doctype));
+  }
+
   /// Doctype names whose meta has at least one Table / Table MultiSelect
   /// field. Used by SyncService to decide whether to fetch full docs
   /// (with children) instead of bare `frappe.client.get_list` rows.
@@ -444,6 +467,23 @@ class OfflineRepository {
     }
 
     final tableName = normalizeDoctypeTableName(doctype);
+
+    // Heal parent-table schema drift BEFORE reading or writing the row.
+    // If the cached meta has gained a field since this docs__ table was
+    // created (e.g. a field added to the doctype server-side, picked up by
+    // a later meta refresh), the INSERT below would reference a column the
+    // table lacks and fail with "no such column". This mirrors the
+    // self-heal PullEngine already performs via [reconcileParentTableForMeta]
+    // before applying a pull page — the save path needs the same guard
+    // because meta refresh and the boot-time `ensureSchemaForClosure` run
+    // at different moments. No-ops when the table doesn't exist yet (the
+    // INSERT path provisions it). MUST run outside the write txn below: it
+    // does its own PRAGMA + ALTER on rawDatabase and would deadlock inside
+    // a transaction.
+    if (parentMeta != null) {
+      await reconcileParentTableForMeta(doctype, tableName, parentMeta);
+    }
+
     Map<String, Object?>? existing;
     try {
       final rows = await _database.rawDatabase.query(
@@ -711,10 +751,7 @@ class OfflineRepository {
     required String serverName,
     required Map<String, dynamic> data,
   }) async {
-    await applyServerPage(
-      doctype: doctype,
-      rows: [data],
-    );
+    await applyServerPage(doctype: doctype, rows: [data]);
   }
 
   /// Applies a page of server-pulled snapshots via PullApply.
@@ -725,7 +762,7 @@ class OfflineRepository {
     bool isInitialSync = false,
   }) async {
     if (rows.isEmpty) return;
-    
+
     final meta = await _loadMeta(doctype);
     if (meta == null) {
       // Meta absent means the DocType schema was never synced — we cannot

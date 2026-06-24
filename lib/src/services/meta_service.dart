@@ -37,6 +37,16 @@ class MetaService {
   /// [onMetaSyncFailure].
   void Function(String doctype)? onMetaSyncRecovered;
 
+  /// Fires whenever a doctype's meta JSON is (re)written from the server
+  /// in [_upsertMetaJson] — i.e. `checkAndSyncDoctypes`,
+  /// `resyncMobileConfiguration`, `prefetch*`, or [getMeta]'s network
+  /// branch picked up fresh schema. Wired by `FrappeSDK` to
+  /// `OfflineRepository.invalidateMetaCacheFor` so the offline save path's
+  /// own per-doctype meta cache cannot serve a session-stale snapshot
+  /// after a mid-session refresh (which would silently drop newly-added
+  /// fields). Optional — when null, only this service's LRU is cleared.
+  void Function(String doctype)? onMetaRefreshed;
+
   MetaService(this._client, this._database);
 
   void _putInCache(String doctype, DocTypeMeta meta) {
@@ -77,6 +87,10 @@ class MetaService {
     } else {
       await _database.doctypeMetaDao.insertDoctypeMeta(entity);
     }
+    // Server (re)wrote this doctype's meta — notify downstream caches
+    // (e.g. OfflineRepository's per-doctype meta cache) so they don't
+    // keep serving a stale snapshot for the rest of the session.
+    onMetaRefreshed?.call(doctype);
   }
 
   /// Fetches from server and saves to DB only (no in-memory cache). Use for prefetch.
@@ -580,7 +594,10 @@ class MetaService {
 
     for (int i = 0; i < doctypes.length; i++) {
       final dt = doctypes[i];
-      onProgress?.call(0.5 + (i / doctypes.length) * 0.5, 'Updating schema for $dt...');
+      onProgress?.call(
+        0.5 + (i / doctypes.length) * 0.5,
+        'Updating schema for $dt...',
+      );
       try {
         final newMark = serverMarks[dt];
         if (newMark == null) {

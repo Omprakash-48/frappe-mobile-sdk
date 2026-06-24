@@ -121,6 +121,130 @@ void main() {
     },
   );
 
+  test('saveDocument heals parent table when meta gained a field after the '
+      'table was created (no such column regression)', () async {
+    // Arrange: docs__order was created from orderMeta (title, customer)
+    // in setUp. The doctype then gained a new field server-side, so the
+    // refreshed meta now carries `rejection_reason` — but the on-disk
+    // table predates it and has no such column. This reproduces the
+    // reported crash: "table docs__... has no column named rejection_reason".
+    final evolvedMeta = DocTypeMeta(
+      name: 'Order',
+      titleField: 'title',
+      fields: [
+        f('title', 'Data'),
+        f('customer', 'Link', options: 'Customer'),
+        f('rejection_reason', 'Data'),
+      ],
+    );
+    await appDb.doctypeMetaDao.upsertMetaJson(
+      'Order',
+      jsonEncode(evolvedMeta.toJson()),
+    );
+
+    // Act: a save carrying the new field. Before the fix this throws a
+    // DatabaseException while preparing the INSERT.
+    const mobileUuid = 'Z-uuid';
+    await repo.saveDocument(
+      doctype: 'Order',
+      data: {
+        'mobile_uuid': mobileUuid,
+        'title': 'rejected order',
+        'customer': 'CUST-003',
+        'rejection_reason': 'Duplicate entry',
+      },
+    );
+
+    // Assert: the table was ALTERed to add the column and the value
+    // persisted onto the row.
+    final cols = await appDb.rawDatabase.rawQuery(
+      'PRAGMA table_info(docs__order)',
+    );
+    expect(
+      cols.map((c) => c['name']),
+      contains('rejection_reason'),
+      reason: 'saveDocument must reconcile the table to the current meta',
+    );
+    final rows = await appDb.rawDatabase.query(
+      'docs__order',
+      where: 'mobile_uuid = ?',
+      whereArgs: [mobileUuid],
+    );
+    expect(rows.length, 1);
+    expect(rows.first['rejection_reason'], 'Duplicate entry');
+  });
+
+  test('invalidateMetaCacheFor lets a mid-session meta refresh take effect on '
+      'the next save (no silently-dropped field)', () async {
+    // Prime: first save warms OfflineRepository._metaCache with the v1
+    // meta (title, customer).
+    await repo.saveDocument(
+      doctype: 'Order',
+      data: {'mobile_uuid': 'A-uuid', 'title': 'first', 'customer': 'CUST-001'},
+    );
+
+    // The doctype gains a field server-side; a reconnect resync rewrites
+    // the stored meta JSON. (checkAndSyncDoctypes does exactly this via
+    // fetchAndStoreInDb.)
+    final evolvedMeta = DocTypeMeta(
+      name: 'Order',
+      titleField: 'title',
+      fields: [
+        f('title', 'Data'),
+        f('customer', 'Link', options: 'Customer'),
+        f('rejection_reason', 'Data'),
+      ],
+    );
+    await appDb.doctypeMetaDao.upsertMetaJson(
+      'Order',
+      jsonEncode(evolvedMeta.toJson()),
+    );
+
+    // Without invalidation, the warm cache still holds v1: the new field
+    // is not in parentMeta.fields, so it is silently dropped and the
+    // table is never altered.
+    await repo.saveDocument(
+      doctype: 'Order',
+      data: {
+        'mobile_uuid': 'B-uuid',
+        'title': 'stale-cache save',
+        'customer': 'CUST-002',
+        'rejection_reason': 'dropped',
+      },
+    );
+    var cols = (await appDb.rawDatabase.rawQuery(
+      'PRAGMA table_info(docs__order)',
+    )).map((c) => c['name']).toList();
+    expect(
+      cols,
+      isNot(contains('rejection_reason')),
+      reason: 'stale warm cache must still be serving v1 here',
+    );
+
+    // After invalidation the next save re-reads the fresh meta from the
+    // DAO, the table self-heals, and the field persists.
+    repo.invalidateMetaCacheFor('Order');
+    await repo.saveDocument(
+      doctype: 'Order',
+      data: {
+        'mobile_uuid': 'C-uuid',
+        'title': 'fresh save',
+        'customer': 'CUST-003',
+        'rejection_reason': 'kept',
+      },
+    );
+    cols = (await appDb.rawDatabase.rawQuery(
+      'PRAGMA table_info(docs__order)',
+    )).map((c) => c['name']).toList();
+    expect(cols, contains('rejection_reason'));
+    final rows = await appDb.rawDatabase.query(
+      'docs__order',
+      where: 'mobile_uuid = ?',
+      whereArgs: ['C-uuid'],
+    );
+    expect(rows.single['rejection_reason'], 'kept');
+  });
+
   test(
     'reconcileServerSave is a no-op on outbox for clean documents',
     () async {
