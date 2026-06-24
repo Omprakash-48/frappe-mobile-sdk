@@ -19,7 +19,7 @@
 //
 // Each case asserts the designed classification reached the outbox row:
 //   * 417 ValidationError       → `paused`,   error_code VALIDATION (#53)
-//   * 409 TimestampMismatchError→ `conflict`, error_code TIMESTAMP_MISMATCH
+//   * 417 TimestampMismatchError→ `conflict`, error_code TIMESTAMP_MISMATCH
 //   * 409 DuplicateEntryError   → reconciled via L3 lookup (outbox cleared)
 //   * 417 LinkExistsError       → error_code LINK_EXISTS
 //   * SocketException           → error_code NETWORK
@@ -232,25 +232,28 @@ void main() {
     },
   );
 
-  test('optimistic-lock conflict (HTTP 409) → row CONFLICT with error_code '
+  test('optimistic-lock conflict (HTTP 417) → row CONFLICT with error_code '
       'TIMESTAMP_MISMATCH', () async {
-    // Frappe raises TimestampMismatchError as HTTP 409.
+    // Frappe's TimestampMismatchError extends ValidationError, so it is raised
+    // at HTTP 417 (NOT 409 — 409 is NameError/DuplicateEntry). Routing keys on
+    // exc_type, so this still reaches the auto-merge path. This case doubles
+    // as the H3 regression guard: a genuine timestamp mismatch carries
+    // exc_type and must still classify as TIMESTAMP_MISMATCH after the
+    // unknown-409 default was removed.
     const body =
         '{"exc_type":"TimestampMismatchError",'
         '"exception":"frappe.exceptions.TimestampMismatchError: '
         'Document has been modified after you have opened it"}';
-    final engine = buildEngine(clientReturning(409, body));
+    final engine = buildEngine(clientReturning(417, body));
 
     await engine.runOnce();
 
     final row = await outboxRow();
-    // DESIGNED: `on TimestampMismatchError` → _autoMergeAndRetry →
-    // markConflict. ACTUAL: 'failed' / 'UNKNOWN'.
     expect(
       row['error_code'],
       ErrorCode.TIMESTAMP_MISMATCH.wireName, // 'TIMESTAMP_MISMATCH'
       reason:
-          'A 409 timestamp mismatch must classify as TIMESTAMP_MISMATCH '
+          'A timestamp mismatch must classify as TIMESTAMP_MISMATCH '
           'so the three-way auto-merge path runs — not UNKNOWN.',
     );
     expect(row['state'], OutboxState.conflict.wireName); // 'conflict'
@@ -331,5 +334,67 @@ void main() {
           'A transient connectivity failure must classify as NETWORK, '
           'not UNKNOWN — otherwise it reads as a permanent error.',
     );
+  });
+
+  test('session expiry (HTTP 401) → retryable NETWORK, NOT terminal paused '
+      '(B2)', () async {
+    // A 401 is session expiry, not a permanent permission denial. After the
+    // user re-authenticates the queued rows must still push, so it must land
+    // in a retryable bucket — never `paused` like a 403.
+    const body =
+        '{"exc_type":"PermissionError",'
+        '"exception":"frappe.exceptions.AuthenticationError: session expired"}';
+    final engine = buildEngine(clientReturning(401, body));
+
+    await engine.runOnce();
+
+    final row = await outboxRow();
+    expect(
+      row['error_code'],
+      ErrorCode.NETWORK.wireName,
+      reason:
+          'A 401 must be retryable (NETWORK), not terminal PERMISSION_DENIED.',
+    );
+    expect(
+      row['state'],
+      OutboxState.failed.wireName,
+      reason: 'A 401 must NOT be paused — re-auth + retry must recover it.',
+    );
+  });
+
+  test('permission denied (HTTP 403) → terminal PERMISSION_DENIED, paused '
+      '(B2)', () async {
+    // A genuine 403 IS terminal — the user lacks permission; retry can't help.
+    const body =
+        '{"exc_type":"PermissionError",'
+        '"exception":"frappe.exceptions.PermissionError: not permitted"}';
+    final engine = buildEngine(clientReturning(403, body));
+
+    await engine.runOnce();
+
+    final row = await outboxRow();
+    expect(row['error_code'], ErrorCode.PERMISSION_DENIED.wireName);
+    expect(row['state'], OutboxState.paused.wireName);
+  });
+
+  test('409 without exc_type → generic ServerRejection, NOT timestamp '
+      'mismatch (H3)', () async {
+    // A 409 with no exc_type may be a duplicate-name or custom-app conflict,
+    // not an optimistic-lock mismatch. Defaulting it to TimestampMismatchError
+    // triggers a refresh+retry that hits the same 409 and loops until the
+    // budget exhausts, then mislabels the cause. Treat unknown 409s as a
+    // generic ServerRejection (UNKNOWN) instead.
+    const body = '{"exception":"Duplicate name CUST-1 already exists"}';
+    final engine = buildEngine(clientReturning(409, body));
+
+    await engine.runOnce();
+
+    final row = await outboxRow();
+    expect(
+      row['error_code'],
+      isNot(ErrorCode.TIMESTAMP_MISMATCH.wireName),
+      reason: 'unknown 409 must not be auto-classified as timestamp mismatch',
+    );
+    expect(row['error_code'], ErrorCode.UNKNOWN.wireName);
   });
 }

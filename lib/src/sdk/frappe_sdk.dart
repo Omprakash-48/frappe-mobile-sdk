@@ -459,6 +459,12 @@ class FrappeSDK {
     _metaService!.onMetaSyncRecovered = (doctype) {
       _syncStateNotifier?.clearMetaSyncFailure(doctype);
     };
+    // Keep the offline save path consistent with server meta refreshes:
+    // when MetaService rewrites a doctype's meta (boot sync, reconnect
+    // resync, config refresh), evict OfflineRepository's per-doctype cache
+    // so the next saveDocument reads the fresh schema rather than a
+    // session-stale snapshot that would silently drop newly-added fields.
+    _metaService!.onMetaRefreshed = _repository!.invalidateMetaCacheFor;
 
     _syncService = SyncService(
       _client!,
