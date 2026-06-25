@@ -472,6 +472,15 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
     if (widget.fetchLinkedDocument == null) return;
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
+      // Reactive mode: the controller is the single source of truth. The
+      // legacy patchValue path below only updates flutter_form_builder field
+      // state, which reactive Link targets (value-sourced from the controller)
+      // never read — so prefilled fetch_from must run through the controller.
+      final c = _controller;
+      if (widget.mode == FormBuilderMode.reactive && c != null) {
+        c.runInitialFetchFrom();
+        return;
+      }
       for (final field in widget.meta.fields) {
         if (field.fieldtype == 'Link' && field.fieldname != null) {
           final val = _formData[field.fieldname];
@@ -1623,7 +1632,10 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
         if (!ui.visible) return const SizedBox.shrink();
         FrappeFormBuilder.debugFieldBuildCounts[name] =
             (FrappeFormBuilder.debugFieldBuildCounts[name] ?? 0) + 1;
-        final effective = _withEffectiveProps(field, ui.required, ui.readOnly);
+        // Form-level readOnly (e.g. workflow freeze) must disable every field,
+        // mirroring the legacy path (`_isFieldReadOnly(field) || widget.readOnly`).
+        final effectiveReadOnly = ui.readOnly || widget.readOnly;
+        final effective = _withEffectiveProps(field, ui.required, effectiveReadOnly);
         final fieldStyle = _fieldStyleFor(field, ui.required, formStyle);
         final value = c.getValue(name);
         // Keep flutter_form_builder's internal field state in sync for
@@ -1645,7 +1657,7 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
         final w = _fieldFactory.createField(
           field: effective,
           value: value,
-          enabled: !ui.readOnly,
+          enabled: !effectiveReadOnly,
           onChanged: (v) => c.setValue(name, v, source: ChangeSource.user),
           formData: c.values,
           style: fieldStyle,

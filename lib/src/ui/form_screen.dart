@@ -111,6 +111,10 @@ class FormScreen extends StatefulWidget {
 
   final void Function(void Function() submit)? registerSubmit;
   final bool hideAppBarActions;
+
+  /// When false, the workflow header shows the state chip only (no Actions
+  /// button) and workflow transitions are not loaded. Default true.
+  final bool showWorkflowActions;
   final void Function(bool isSaving)? onSaveStateChanged;
   final void Function(bool isDirty)? onFormDirtyChanged;
   final Widget? bottomNavigationBar;
@@ -130,7 +134,7 @@ class FormScreen extends StatefulWidget {
 
   /// Optional factory for rendering custom field widgets, forwarded to the
   /// underlying [FrappeFormBuilder] (which already supports it). Lets hosts
-  /// (e.g. ChetnaFieldFactory) override specific field types.
+  /// supply an app-specific [FieldFactory] subclass to override field types.
   final FieldFactory? customFieldFactory;
 
   const FormScreen({
@@ -159,6 +163,7 @@ class FormScreen extends StatefulWidget {
     this.syncController,
     this.registerSubmit,
     this.hideAppBarActions = false,
+    this.showWorkflowActions = true,
     this.onSaveStateChanged,
     this.onFormDirtyChanged,
     this.bottomNavigationBar,
@@ -431,6 +436,7 @@ class _FormScreenState extends State<FormScreen> with WidgetsBindingObserver {
 
   Future<void> _loadWorkflowTransitions() async {
     if (!widget.meta.hasWorkflow ||
+        !widget.showWorkflowActions ||
         widget.api == null ||
         widget.document?.serverId == null) {
       return;
@@ -1056,6 +1062,7 @@ class _FormScreenState extends State<FormScreen> with WidgetsBindingObserver {
                   loading: _workflowLoading,
                   translate: widget.translate,
                   onShowActions: _showWorkflowActionsSheet,
+                  showActions: widget.showWorkflowActions,
                 ),
               Expanded(
                 child: FrappeFormBuilder(
@@ -1152,6 +1159,7 @@ class _WorkflowHeader extends StatelessWidget {
     required this.loading,
     this.translate,
     required this.onShowActions,
+    required this.showActions,
   });
 
   final DocTypeMeta meta;
@@ -1159,6 +1167,7 @@ class _WorkflowHeader extends StatelessWidget {
   final bool loading;
   final String Function(String)? translate;
   final VoidCallback onShowActions;
+  final bool showActions;
 
   @override
   Widget build(BuildContext context) {
@@ -1199,7 +1208,7 @@ class _WorkflowHeader extends StatelessWidget {
               width: 20,
               child: CircularProgressIndicator(strokeWidth: 2),
             )
-          else
+          else if (showActions)
             TextButton.icon(
               onPressed: onShowActions,
               icon: const Icon(Icons.playlist_play),

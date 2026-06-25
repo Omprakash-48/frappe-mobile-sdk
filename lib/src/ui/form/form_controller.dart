@@ -318,6 +318,23 @@ class FormController extends ChangeNotifier {
     _isDirty.value = dirty;
   }
 
+  /// Run fetch_from for every field already holding a value (seeded from
+  /// initialData) that is the SOURCE of a fetch_from edge. Call once after
+  /// [fetchLinkedDocument] is wired so an edit-form prefilled with a Link
+  /// populates its fetch targets (e.g. patient_name/doctor from patient).
+  /// Idempotent: re-fetching writes the same values via ChangeSource.system.
+  void runInitialFetchFrom() {
+    if (fetchLinkedDocument == null) return;
+    for (final f in _meta.fields) {
+      final name = f.fieldname;
+      if (name == null || name.isEmpty) continue;
+      final v = _rawValues[name];
+      if (v == null || v.toString().trim().isEmpty) continue;
+      if (_graph.fetchTargetsOf(name).isEmpty) continue;
+      _runFetchFrom(name);
+    }
+  }
+
   void _runFetchFrom(String changed) {
     final targets = _graph.fetchTargetsOf(changed);
     if (targets.isEmpty || fetchLinkedDocument == null) return;
