@@ -53,6 +53,8 @@ InputDecoration baseFieldDecoration(
 /// inset as the dropdown's own `padding`, which IS part of the clickable area
 /// (per `FormBuilderDropdown.padding` docs). The value therefore stays visually
 /// inset while the entire box — full width AND full height — opens the menu.
+/// Assumes `TextDirection.ltr` when resolving a directional (non-[EdgeInsets])
+/// `contentPadding`; pass a concrete [EdgeInsets] for RTL-correct insets.
 ({InputDecoration decoration, EdgeInsetsGeometry padding}) dropdownFullTap(
   InputDecoration decoration,
 ) {

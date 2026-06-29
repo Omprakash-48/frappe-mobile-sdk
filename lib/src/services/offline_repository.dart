@@ -104,6 +104,12 @@ class OfflineRepository {
   ///   * `_ensuredTables`    — so the next closure pull re-reconciles the
   ///     table schema (the save path already self-heals via
   ///     [reconcileParentTableForMeta], but the pull path relies on this).
+  ///
+  /// NOTE: `_childMetasByParent` is keyed by the PARENT doctype, so refreshing
+  /// a CHILD doctype alone does not evict the parent's cached child-meta set —
+  /// it stays until the parent is refreshed. This only affects the pull path's
+  /// [_resolveChildMetas] cache; the save path rebuilds child metas via
+  /// [_loadMeta] (evicted above), so saves are unaffected.
   void invalidateMetaCacheFor(String doctype) {
     _metaCache.remove(doctype);
     _childMetasByParent.remove(doctype);
@@ -441,27 +447,41 @@ class OfflineRepository {
     // deadlocks (sqflite serializes ops through one queue, and the txn
     // holds it).
     final parentMeta = await _loadMeta(doctype);
+    if (parentMeta == null) {
+      // No local meta for this doctype — the form can't have rendered
+      // without it, so it was never synced. Fail clean BEFORE opening the
+      // write txn rather than letting LocalWriter resolve meta in-txn,
+      // which would hang on the sqflite write queue.
+      throw StateError(
+        'OfflineRepository.saveDocument: no local meta for "$doctype" — '
+        'sync the doctype before saving offline.',
+      );
+    }
+    // Pre-resolve every child-table meta BEFORE the write txn — LocalWriter
+    // never resolves meta in-txn (that would hang on the sqflite queue).
+    // A child whose meta isn't synced locally is deliberately SKIPPED here
+    // (its rows dropped, with a loud log) rather than resolved in-txn.
+    // NOTE: a mid-sync race where a child's meta AND table are both still
+    // absent (closure expansion vs. a save) drops those child rows; closing
+    // that fully needs a pre-txn meta + table backfill and is out of scope
+    // for this deadlock fix.
     final childMetasByDoctype = <String, DocTypeMeta>{};
-    if (parentMeta != null) {
-      for (final f in parentMeta.fields) {
-        final opt = f.options;
-        if ((f.fieldtype == 'Table' || f.fieldtype == 'Table MultiSelect') &&
-            opt != null &&
-            opt.isNotEmpty) {
-          final cm = await _loadMeta(opt);
-          if (cm != null) {
-            childMetasByDoctype[opt] = cm;
-          } else {
-            // Match LocalWriter.writeParent's loud-on-failure pattern —
-            // a missing child meta means the save will silently drop the
-            // child rows, and visibility into that is critical when
-            // debugging "child data went missing" reports.
-            developer.log(
-              'OfflineRepository.saveDocument: child meta missing for '
-              '$opt (skipping child rows for this fieldtype)',
-              name: 'OfflineRepository',
-            );
-          }
+    for (final f in parentMeta.fields) {
+      final opt = f.options;
+      if ((f.fieldtype == 'Table' || f.fieldtype == 'Table MultiSelect') &&
+          opt != null &&
+          opt.isNotEmpty) {
+        final cm = await _loadMeta(opt);
+        if (cm != null) {
+          childMetasByDoctype[opt] = cm;
+        } else {
+          // Child meta not synced — skip its rows (loud log: child data is
+          // dropped, critical for "child data went missing" reports).
+          developer.log(
+            'OfflineRepository.saveDocument: child meta missing for '
+            '$opt (skipping child rows for this fieldtype)',
+            name: 'OfflineRepository',
+          );
         }
       }
     }
@@ -480,9 +500,7 @@ class OfflineRepository {
     // INSERT path provisions it). MUST run outside the write txn below: it
     // does its own PRAGMA + ALTER on rawDatabase and would deadlock inside
     // a transaction.
-    if (parentMeta != null) {
-      await reconcileParentTableForMeta(doctype, tableName, parentMeta);
-    }
+    await reconcileParentTableForMeta(doctype, tableName, parentMeta);
 
     Map<String, Object?>? existing;
     try {
@@ -512,7 +530,7 @@ class OfflineRepository {
       if (preserved != null) {
         // Don't overwrite a base captured by an earlier edit (Invariant 6).
         pushBase = preserved;
-      } else if (parentMeta != null) {
+      } else {
         pushBase = jsonEncode(
           PayloadSerializer.serializeForBase(existing, parentMeta),
         );

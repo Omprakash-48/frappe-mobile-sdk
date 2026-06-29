@@ -274,6 +274,7 @@ class FrappeSDK {
       client: _client,
       metaFetcher: testMetaFn,
     );
+    _wireMetaRefreshInvalidation();
     _permissionService = PermissionService(_client!, _database!);
     final translationDao = TranslationDao(database.rawDatabase);
     _translationService = TranslationService(_client!)
@@ -322,6 +323,17 @@ class FrappeSDK {
       restartGapMs: tamperProtectionRestartGapMs,
     );
     _initialized = true;
+  }
+
+  /// Wires a server meta refresh to offline-cache invalidation: whenever
+  /// [MetaService] rewrites a doctype's meta (boot sync, reconnect resync,
+  /// config refresh) it evicts [OfflineRepository]'s per-doctype cache so the
+  /// next saveDocument reads the fresh schema rather than a session-stale
+  /// snapshot that would silently drop newly-added fields. Called from BOTH
+  /// [_doInitialize] (production) and [FrappeSDK.forTesting] so tests exercise
+  /// the exact production wiring.
+  void _wireMetaRefreshInvalidation() {
+    _metaService!.onMetaRefreshed = _repository!.invalidateMetaCacheFor;
   }
 
   /// Initialize SDK (call this first).
@@ -460,12 +472,7 @@ class FrappeSDK {
     _metaService!.onMetaSyncRecovered = (doctype) {
       _syncStateNotifier?.clearMetaSyncFailure(doctype);
     };
-    // Keep the offline save path consistent with server meta refreshes:
-    // when MetaService rewrites a doctype's meta (boot sync, reconnect
-    // resync, config refresh), evict OfflineRepository's per-doctype cache
-    // so the next saveDocument reads the fresh schema rather than a
-    // session-stale snapshot that would silently drop newly-added fields.
-    _metaService!.onMetaRefreshed = _repository!.invalidateMetaCacheFor;
+    _wireMetaRefreshInvalidation();
 
     _syncService = SyncService(
       _client!,
