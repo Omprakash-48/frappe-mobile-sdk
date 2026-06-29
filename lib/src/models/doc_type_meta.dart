@@ -37,6 +37,15 @@ class DocTypeMeta {
     return v == 1 || v == true;
   }
 
+  /// True if this doctype's document titles should be translated when shown
+  /// (Frappe `translated_doctype`). Matches Frappe web, which translates a
+  /// Link / Table MultiSelect field's option titles only when the field's
+  /// *target* doctype has this flag set (see `link.js`, `formatters.js`).
+  bool get translatedDoctype {
+    final v = metaData?['translated_doctype'];
+    return v == 1 || v == true;
+  }
+
   DocTypeMeta({
     required this.name,
     this.label,
