@@ -300,6 +300,7 @@ class FrappeSDK {
       testResolver,
       testMetaFn,
       syncComplete$: _syncCompleteController?.stream,
+      translate: (s) => _translationService?.translate(s) ?? s,
     );
     _offlineTransitionService = OfflineTransitionService(
       database: _database!,
@@ -518,6 +519,10 @@ class FrappeSDK {
       resolver,
       metaFn,
       syncComplete$: _syncCompleteController?.stream,
+      // Translate Link / Table MultiSelect option titles whose target
+      // doctype is a translated_doctype (Frappe `__()` parity). Reads the
+      // field at call time so a post-logout reset / locale change is honored.
+      translate: (s) => _translationService?.translate(s) ?? s,
     );
 
     // Build the offline-transition service. It owns its own broadcast

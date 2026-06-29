@@ -19,6 +19,12 @@ class LinkOptionService {
   final MetaResolverFn? _metaResolver;
   final Stream<void>? _syncCompleteStream;
 
+  /// Optional translation hook (wired from `TranslationService.translate`).
+  /// Applied to option *display labels* — never to the stored `name` — and
+  /// only when the target doctype is a `translated_doctype`. Mirrors Frappe's
+  /// `__()` on link/select titles. Null in tests / when no host is bound.
+  final String Function(String)? _translate;
+
   /// Broadcasts after each closure-pull batch finishes. Wired from
   /// [FrappeSDK.syncComplete$]. Pickers and the [LinkFieldCoordinator]
   /// listen to this to invalidate stale empty caches and re-fetch
@@ -30,9 +36,11 @@ class LinkOptionService {
     UnifiedResolver resolver,
     MetaResolverFn metaResolver, {
     Stream<void>? syncComplete$,
+    String Function(String)? translate,
   }) : _resolver = resolver,
        _metaResolver = metaResolver,
-       _syncCompleteStream = syncComplete$;
+       _syncCompleteStream = syncComplete$,
+       _translate = translate;
 
   /// Converts Frappe-shaped filter rows to the 3-tuple `[field, op, value]`
   /// shape that [UnifiedResolver.resolve] consumes. Frappe APIs hand back
@@ -59,7 +67,8 @@ class LinkOptionService {
   LinkOptionService.withoutResolver()
     : _resolver = null,
       _metaResolver = null,
-      _syncCompleteStream = null;
+      _syncCompleteStream = null,
+      _translate = null;
 
   /// Fetches link options via the resolver (DB-first + background refresh when online).
   Future<List<LinkOptionEntity>> getLinkOptions(
@@ -84,15 +93,26 @@ class LinkOptionService {
       pageSize: 5000,
     );
 
-    return _rowsToEntities(result.rows, doctype, titleField);
+    return _rowsToEntities(
+      result.rows,
+      doctype,
+      titleField,
+      translateLabels: meta.translatedDoctype,
+    );
   }
 
   /// Converts resolver rows to [LinkOptionEntity] list.
+  ///
+  /// When [translateLabels] is true and a translate hook is bound, each
+  /// option's *display label* is translated while its `name` (the stored
+  /// value sent to the server) is left untouched — same contract as the
+  /// static Select field.
   List<LinkOptionEntity> _rowsToEntities(
     List<Map<String, Object?>> rows,
     String doctype,
-    String? titleField,
-  ) {
+    String? titleField, {
+    bool translateLabels = false,
+  }) {
     final now = DateTime.now().millisecondsSinceEpoch;
     final out = <LinkOptionEntity>[];
     for (final row in rows) {
@@ -126,6 +146,13 @@ class LinkOptionService {
         }
       }
       label ??= name;
+      // Translate the display label for translated_doctype targets (Frappe
+      // `__()` parity). `name` is intentionally left English — it is the
+      // value persisted and pushed to the server.
+      final translate = _translate;
+      if (translateLabels && translate != null) {
+        label = translate(label);
+      }
       // Offline-only rows (no server_name yet) carry their mobile_uuid as
       // the picker value; the form must mark `<field>__is_local: 1` so the
       // push pipeline rewrites the UUID after the target's INSERT lands.
@@ -356,6 +383,11 @@ class LinkOptionService {
       pageSize: pageSize,
     );
 
-    return _rowsToEntities(result.rows, doctype, titleField);
+    return _rowsToEntities(
+      result.rows,
+      doctype,
+      titleField,
+      translateLabels: meta.translatedDoctype,
+    );
   }
 }
