@@ -87,6 +87,7 @@ Major release: offline-first foundation, server-driven offline-mode toggle, and 
 - `extractErrorMessage` / `toUserFriendlyMessage` — shared helpers for error-string normalization across the SDK.
 - `LinkFieldPickerMode` enum (`inline` and `dialog` modes) to support alternative full-modal lookup dialogs for Link and Table MultiSelect fields, configurable globally via `FrappeFormStyle`.
 - `SearchableSelectDialog` widget rendering a modal dialog with a dedicated search filter, checkboxes for multi-select, and checkmarks for single-select.
+- `FrappeFormBuilder.cascadeProgrammaticChanges` (default `false`) — when enabled, a value written programmatically by `onFieldChange` (a computed value or `fetch_from` result) re-fires that field's own change pipeline, so dependent fields recompute. Mirrors Frappe Desk's `frm.set_value` → trigger behaviour. Loop-safe via value-equality plus a depth cap; the synchronous `patchValue` echo is suppressed so each handler fires once (no double-run for typed fields whose representation `FieldNormalizer` changes).
 
 **Translation pipeline (PR #76)**
 

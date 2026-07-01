@@ -12,6 +12,7 @@ import '../../services/link_option_service.dart';
 import '../../services/link_field_coordinator.dart';
 import '../../utils/depends_on_evaluator.dart';
 import '../../utils/field_normalizer.dart';
+import '../../utils/sdk_log.dart';
 import 'fields/field_factory.dart';
 import 'fields/base_field.dart';
 import 'default_form_style.dart';
@@ -227,6 +228,25 @@ class FrappeFormBuilder extends StatefulWidget {
   final LinkFilterBuilder? Function(String doctype, String fieldname)?
   getLinkFilterBuilder;
 
+  /// When true, a value set programmatically by [onFieldChange] (a computed
+  /// value, or a `fetch_from` result) re-fires the SAME change pipeline for
+  /// that field — its own `fetch_from`, [onFieldChange] and `depends_on` — so
+  /// dependent fields recompute. This mirrors Frappe Desk, where
+  /// `frm.set_value(field, value)` fires that field's change trigger even for a
+  /// programmatic set.
+  ///
+  /// Without this, a patched value does NOT chain: the patch writes the value
+  /// into form state and calls `patchValue`, but the re-entrant `onChanged`
+  /// sees `oldValue == value` (the value is already stored) and the pipeline's
+  /// own guard no-ops it — so a computed field that feeds another computed
+  /// field never triggers the second computation.
+  ///
+  /// Loop safety is value-equality (a field re-fires only when its value
+  /// actually changed, so the cascade converges to a fixpoint) plus a hard
+  /// depth cap ([_maxProgrammaticCascadeDepth]). Default `false` preserves the
+  /// legacy behaviour where programmatic patches never cascaded.
+  final bool cascadeProgrammaticChanges;
+
   const FrappeFormBuilder({
     super.key,
     required this.meta,
@@ -250,6 +270,7 @@ class FrappeFormBuilder extends StatefulWidget {
     this.onFieldChange,
     this.parentFormData,
     this.getLinkFilterBuilder,
+    this.cascadeProgrammaticChanges = false,
   });
 
   @override
@@ -284,6 +305,17 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
   bool _linkOptionsLoading = false;
   String? _linkOptionsLoadingMessage;
   final Map<String, dynamic> _formData = {};
+
+  /// > 0 while a programmatic-patch `patchValue` is being applied under
+  /// [FrappeFormBuilder.cascadeProgrammaticChanges]. The `patchValue` re-fires
+  /// this field's `onChanged` synchronously (didChange → onChanged); for typed
+  /// fields [FieldNormalizer] can change the value's representation, so that
+  /// echo would NOT self-guard and would double-run the pipeline alongside the
+  /// explicit cascade. This flag makes the echo a pure state-sync no-op so the
+  /// explicit [_scheduleProgrammaticCascade] is the single cascade path. Only
+  /// raised when the cascade flag is on, so legacy behaviour is unchanged.
+  int _programmaticEchoGuard = 0;
+
   late TabController _tabController;
   final List<_FormTab> _tabs = [];
   final Map<String, int> _fieldTabIndex = {};
@@ -628,6 +660,180 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
     }
   }
 
+  /// Hard cap on programmatic-cascade recursion depth (see
+  /// [FrappeFormBuilder.cascadeProgrammaticChanges]). Real chains are 2–4 deep;
+  /// this is a backstop against a non-converging [FrappeFormBuilder.onFieldChange],
+  /// not a limit on normal use.
+  static const int _maxProgrammaticCascadeDepth = 12;
+
+  /// Applies a field-value change through the full pipeline (dependent-link
+  /// clearing, `fetch_from`, [FrappeFormBuilder.onFieldChange], depends_on
+  /// rebuild). Extracted from the field `onChanged` callback so a value set
+  /// programmatically can re-enter the SAME pipeline — see
+  /// [_scheduleProgrammaticCascade].
+  ///
+  /// [cascadeDepth] > 0 marks a programmatic cascade re-fire: the field's value
+  /// is already in [_formData] (the parent patch set it), so `oldValue == value`
+  /// and the normal guard would no-op the pipeline. Forcing it here mirrors
+  /// Frappe Desk, where `frm.set_value` fires the change trigger for a
+  /// programmatic set too. Loop safety is enforced by
+  /// [_scheduleProgrammaticCascade] (value-equality) and
+  /// [_maxProgrammaticCascadeDepth].
+  void _onFieldValueChanged(
+    DocField field,
+    dynamic value, {
+    int cascadeDepth = 0,
+  }) {
+    // Echo from a programmatic `patchValue` (see [_programmaticEchoGuard]): the
+    // explicit cascade (cascadeDepth > 0, dispatched post-frame after the guard
+    // is released) is the sole re-fire path, so this synchronous echo only
+    // syncs form state and returns without re-running the pipeline.
+    if (_programmaticEchoGuard > 0 && cascadeDepth == 0) {
+      if (field.fieldname != null) {
+        if (value == null) {
+          _formData.remove(field.fieldname);
+        } else {
+          _formData[field.fieldname!] = value;
+        }
+      }
+      return;
+    }
+    setState(() {
+      final oldValue = _formData[field.fieldname];
+      // A programmatic re-fire (cascadeDepth > 0) forces the pipeline even
+      // though the value is already present in _formData.
+      final changed = oldValue != value || cascadeDepth > 0;
+      if (value == null) {
+        if (field.fieldname != null) {
+          _formData.remove(field.fieldname);
+        }
+      } else {
+        if (field.fieldname != null) {
+          _formData[field.fieldname!] = value;
+        }
+      }
+
+      // Sync FormBuilder internal state (needed for programmatic updates e.g. auto-select)
+      if (field.fieldname != null && oldValue != value) {
+        _formKey.currentState?.patchValue({
+          field.fieldname!: FieldNormalizer.normalize(field, value),
+        });
+      }
+
+      // If value changed, clear dependent link fields that depend on this field
+      if (changed && field.fieldname != null) {
+        for (final otherField in widget.meta.fields) {
+          if (otherField.fieldtype == 'Link' &&
+              otherField.linkFilters != null &&
+              // Check if other field's link filters depend on this field ignoring spaces
+              RegExp(
+                'eval\\s*:\\s*doc\\.${field.fieldname}',
+              ).hasMatch(otherField.linkFilters ?? "")) {
+            _formData.remove(otherField.fieldname);
+          }
+        }
+      }
+
+      // Fetch-from: when a Link (or source field) changes, fetch linked doc and patch form
+      if (changed &&
+          field.fieldname != null &&
+          value != null &&
+          value.toString().trim().isNotEmpty) {
+        _handleFetchFrom(field.fieldname!, value);
+      }
+
+      // Notify external listener. Pass a snapshot so handlers cannot
+      // accidentally mutate _formData; they must return patches instead.
+      if (changed && field.fieldname != null) {
+        final patches = widget.onFieldChange?.call(
+          field.fieldname!,
+          value,
+          Map<String, dynamic>.from(_formData),
+        );
+        if (patches != null && patches.isNotEmpty) {
+          // Snapshot prior values BEFORE applying, so the cascade can tell a
+          // real change from a no-op echo (the value-equality loop breaker).
+          final prior = <String, dynamic>{
+            for (final key in patches.keys) key: _formData[key],
+          };
+          _formData.addAll(patches);
+          final cascade = widget.cascadeProgrammaticChanges;
+          // Suppress the synchronous patchValue→onChanged echo so only the
+          // explicit cascade re-fires the pipeline (avoids a double-run for
+          // typed fields whose representation FieldNormalizer changes). Guard
+          // is raised only when cascading, so legacy behaviour is untouched.
+          if (cascade) _programmaticEchoGuard++;
+          try {
+            _formKey.currentState?.patchValue(_normalizePatchValues(patches));
+          } finally {
+            if (cascade) _programmaticEchoGuard--;
+          }
+          if (cascade) {
+            _scheduleProgrammaticCascade(patches, prior, cascadeDepth);
+          }
+        }
+      }
+
+      // Trigger rebuild to update dependent fields
+      if (changed) {
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (mounted) {
+            setState(() {});
+            _emitFormDataChanged();
+          }
+        });
+      }
+    });
+  }
+
+  /// Frappe `set_value` parity: for each field in [patches] just set
+  /// programmatically whose value ACTUALLY changed (value-equality vs [prior]),
+  /// re-fire the change pipeline on the next frame (deferred to avoid a nested
+  /// `setState`). A converged field re-emits its current value ⇒ equal ⇒ no
+  /// re-fire, so the cascade reaches a fixpoint; [_maxProgrammaticCascadeDepth]
+  /// is the backstop against a non-converging handler.
+  void _scheduleProgrammaticCascade(
+    Map<String, dynamic> patches,
+    Map<String, dynamic> prior,
+    int depth,
+  ) {
+    if (depth >= _maxProgrammaticCascadeDepth) {
+      sdkLog(
+        'FrappeFormBuilder: programmatic cascade depth cap '
+        '($_maxProgrammaticCascadeDepth) reached; stopping '
+        '(non-converging onFieldChange?)',
+      );
+      return;
+    }
+    for (final entry in patches.entries) {
+      final newValue = entry.value;
+      // Child-table payloads are patched wholesale, not treated as field edits.
+      if (newValue is List || newValue is Map) continue;
+      // Value-equality: skip fields whose value did not actually change.
+      if (_normForCascade(prior[entry.key]) == _normForCascade(newValue)) {
+        continue;
+      }
+      DocField? target;
+      for (final f in widget.meta.fields) {
+        if (f.fieldname == entry.key) {
+          target = f;
+          break;
+        }
+      }
+      if (target == null) continue;
+      final field = target;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) {
+          _onFieldValueChanged(field, newValue, cascadeDepth: depth + 1);
+        }
+      });
+    }
+  }
+
+  /// Normalise for cascade value-equality: trimmed string form, so `5`/`"5"`
+  /// compare equal and a null/absent value never spuriously "changes".
+  static String? _normForCascade(dynamic v) => v?.toString().trim();
+
   Widget _buildFieldWidget(DocField field) {
     if (!_shouldShowField(field)) {
       // Clear stale data for hidden fields so they don't submit old values
@@ -763,73 +969,7 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
                 )
           : null,
       onButtonPressed: widget.onButtonPressed,
-      onChanged: (value) {
-        setState(() {
-          final oldValue = _formData[field.fieldname];
-          if (value == null) {
-            if (field.fieldname != null) {
-              _formData.remove(field.fieldname);
-            }
-          } else {
-            if (field.fieldname != null) {
-              _formData[field.fieldname!] = value;
-            }
-          }
-
-          // Sync FormBuilder internal state (needed for programmatic updates e.g. auto-select)
-          if (field.fieldname != null && oldValue != value) {
-            _formKey.currentState?.patchValue({
-              field.fieldname!: FieldNormalizer.normalize(field, value),
-            });
-          }
-
-          // If value changed, clear dependent link fields that depend on this field
-          if (oldValue != value && field.fieldname != null) {
-            for (final otherField in widget.meta.fields) {
-              if (otherField.fieldtype == 'Link' &&
-                  otherField.linkFilters != null &&
-                  // Check if other field's link filters depend on this field ignoring spaces
-                  RegExp(
-                    'eval\\s*:\\s*doc\\.${field.fieldname}',
-                  ).hasMatch(otherField.linkFilters ?? "")) {
-                _formData.remove(otherField.fieldname);
-              }
-            }
-          }
-
-          // Fetch-from: when a Link (or source field) changes, fetch linked doc and patch form
-          if (oldValue != value &&
-              field.fieldname != null &&
-              value != null &&
-              value.toString().trim().isNotEmpty) {
-            _handleFetchFrom(field.fieldname!, value);
-          }
-
-          // Notify external listener. Pass a snapshot so handlers cannot
-          // accidentally mutate _formData; they must return patches instead.
-          if (oldValue != value && field.fieldname != null) {
-            final patches = widget.onFieldChange?.call(
-              field.fieldname!,
-              value,
-              Map<String, dynamic>.from(_formData),
-            );
-            if (patches != null && patches.isNotEmpty) {
-              _formData.addAll(patches);
-              _formKey.currentState?.patchValue(_normalizePatchValues(patches));
-            }
-          }
-
-          // Trigger rebuild to update dependent fields
-          if (oldValue != value) {
-            WidgetsBinding.instance.addPostFrameCallback((_) {
-              if (mounted) {
-                setState(() {});
-                _emitFormDataChanged();
-              }
-            });
-          }
-        });
-      },
+      onChanged: (value) => _onFieldValueChanged(field, value),
       enabled: !effectiveReadOnly,
       formData: Map<String, dynamic>.from(_formData),
       style: fieldStyle,
