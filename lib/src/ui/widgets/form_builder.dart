@@ -753,20 +753,57 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
         if (patches != null && patches.isNotEmpty) {
           // Snapshot prior values BEFORE applying, so the cascade can tell a
           // real change from a no-op echo (the value-equality loop breaker).
+          // Self-referential patch (handler patches THIS field): its own new
+          // value was already written into _formData above, so prior[self] is
+          // the just-set value, not the pre-edit one. Consequence: the self
+          // re-fire happens only when the handler actually REWROTE the value,
+          // and an idempotent rewrite converges on the next round (pinned in
+          // form_builder_cascade_test.dart).
           final prior = <String, dynamic>{
             for (final key in patches.keys) key: _formData[key],
           };
           _formData.addAll(patches);
           final cascade = widget.cascadeProgrammaticChanges;
+          // Self-key widget patch is DEFERRED one frame: patching the field
+          // that is currently dispatching its own change re-enters the text
+          // field's didChange/TextEditingController notification stack and,
+          // when the handler rewrote the value ('hi'→'HI'), the in-flight
+          // editing value keeps alternating with the patch — unbounded
+          // synchronous recursion (StackOverflowError). Pre-existing defect,
+          // independent of the cascade flag. _formData above already holds
+          // the value; only the widget sync waits for the next frame.
+          final selfKey =
+              field.fieldname != null && patches.containsKey(field.fieldname)
+              ? field.fieldname
+              : null;
+          final rest = selfKey == null
+              ? patches
+              : (Map<String, dynamic>.from(patches)..remove(selfKey));
           // Suppress the synchronous patchValue→onChanged echo so only the
           // explicit cascade re-fires the pipeline (avoids a double-run for
           // typed fields whose representation FieldNormalizer changes). Guard
           // is raised only when cascading, so legacy behaviour is untouched.
-          if (cascade) _programmaticEchoGuard++;
-          try {
-            _formKey.currentState?.patchValue(_normalizePatchValues(patches));
-          } finally {
-            if (cascade) _programmaticEchoGuard--;
+          if (rest.isNotEmpty) {
+            if (cascade) _programmaticEchoGuard++;
+            try {
+              _formKey.currentState?.patchValue(_normalizePatchValues(rest));
+            } finally {
+              if (cascade) _programmaticEchoGuard--;
+            }
+          }
+          if (selfKey != null) {
+            final selfValue = patches[selfKey];
+            WidgetsBinding.instance.addPostFrameCallback((_) {
+              if (!mounted) return;
+              if (cascade) _programmaticEchoGuard++;
+              try {
+                _formKey.currentState?.patchValue(
+                  _normalizePatchValues({selfKey: selfValue}),
+                );
+              } finally {
+                if (cascade) _programmaticEchoGuard--;
+              }
+            });
           }
           if (cascade) {
             _scheduleProgrammaticCascade(patches, prior, cascadeDepth);
@@ -904,8 +941,12 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
       showDescription: formStyle.showFieldDescription,
       inputFormatters: formStyle.inputFormatters?.call(field),
       linkFieldPickerMode: formStyle.linkFieldPickerMode,
-      getFirstDate: formStyle.getFirstDate != null ? (f) => formStyle.getFirstDate!(widget.meta.name, f) : null,
-      getLastDate: formStyle.getLastDate != null ? (f) => formStyle.getLastDate!(widget.meta.name, f) : null,
+      getFirstDate: formStyle.getFirstDate != null
+          ? (f) => formStyle.getFirstDate!(widget.meta.name, f)
+          : null,
+      getLastDate: formStyle.getLastDate != null
+          ? (f) => formStyle.getLastDate!(widget.meta.name, f)
+          : null,
     );
 
     final fieldWithEffectiveProps = DocField(
@@ -1282,7 +1323,8 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
       oldWidget.initialData,
       widget.initialData,
     );
-    final metaChanged = oldWidget.meta.name != widget.meta.name ||
+    final metaChanged =
+        oldWidget.meta.name != widget.meta.name ||
         _effectiveTabCount(oldWidget.meta) != _effectiveTabCount(widget.meta);
     if (initialDataChanged || metaChanged) {
       _progressSubscription?.cancel();

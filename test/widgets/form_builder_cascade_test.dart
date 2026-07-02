@@ -177,4 +177,105 @@ void main() {
     );
     expect(calls, greaterThan(1), reason: 'the cascade did fire at least once');
   });
+
+  testWidgets('cascade OFF: a SELF-referential rewrite must not recurse '
+      '(StackOverflow regression)', (tester) async {
+    // Regression: a handler that REWRITES its own field's value
+    // ('hi' → 'HI') used to be patched back into the widget synchronously,
+    // inside the text field's own didChange/controller dispatch — the
+    // in-flight editing value and the patch alternated in unbounded
+    // synchronous recursion (StackOverflowError), cascade flag irrelevant.
+    // The self-key widget patch is now deferred one frame. With the flag
+    // OFF the handler must fire exactly once (no cascade re-fire).
+    var aHandlerCalls = 0;
+    Map<String, dynamic>? emitted;
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: FrappeFormBuilder(
+            meta: DocTypeMeta(
+              name: 'TestDoctype',
+              fields: <DocField>[
+                DocField(fieldname: 'a', fieldtype: 'Data', label: 'A'),
+              ],
+            ),
+            // cascadeProgrammaticChanges defaults to false
+            onFieldChange: (name, value, data) {
+              if (name == 'a') {
+                aHandlerCalls++;
+                return {'a': value.toString().toUpperCase()};
+              }
+              return null;
+            },
+            onFormDataChanged: (d) => emitted = d,
+          ),
+        ),
+      ),
+    );
+
+    await tester.enterText(find.byKey(const ValueKey('data_a')), 'hi');
+    await tester.pumpAndSettle();
+
+    expect(emitted?['a'], 'HI', reason: 'self-rewrite must land in the doc');
+    expect(
+      aHandlerCalls,
+      1,
+      reason:
+          'flag OFF: user edit fires once, deferred self-patch echo '
+          'must not re-run the handler',
+    );
+  });
+
+  testWidgets(
+    'cascade ON: a SELF-referential patch (handler normalises its own field) '
+    'converges after exactly one re-fire',
+    (tester) async {
+      // Edge case: the handler patches the SAME field that is changing. The
+      // field's own new value is written into form state BEFORE the handler
+      // runs, so the cascade's `prior` for the self-key is the just-typed
+      // value — the re-fire happens because the handler REWROTE it
+      // ('hi' → 'HI'), and the idempotent rewrite ('HI' → 'HI') converges on
+      // the next round via value-equality. No depth-cap involvement.
+      var aHandlerCalls = 0;
+      Map<String, dynamic>? emitted;
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: FrappeFormBuilder(
+              meta: DocTypeMeta(
+                name: 'TestDoctype',
+                fields: <DocField>[
+                  DocField(fieldname: 'a', fieldtype: 'Data', label: 'A'),
+                  DocField(fieldname: 'b', fieldtype: 'Data', label: 'B'),
+                ],
+              ),
+              cascadeProgrammaticChanges: true,
+              onFieldChange: (name, value, data) {
+                if (name == 'a') {
+                  aHandlerCalls++;
+                  final normalized = value.toString().toUpperCase();
+                  return {'a': normalized, 'b': 'B:$normalized'};
+                }
+                return null;
+              },
+              onFormDataChanged: (d) => emitted = d,
+            ),
+          ),
+        ),
+      );
+
+      await tester.enterText(find.byKey(const ValueKey('data_a')), 'hi');
+      await tester.pumpAndSettle();
+
+      expect(emitted?['a'], 'HI', reason: 'self-patch must win over the edit');
+      expect(emitted?['b'], 'B:HI', reason: 'sibling patch applies alongside');
+      expect(
+        aHandlerCalls,
+        2,
+        reason:
+            'exactly the user edit + ONE self re-fire ("hi"→"HI" rewrite); '
+            'the idempotent second pass ("HI"→"HI") must not re-fire again',
+      );
+    },
+  );
 }
