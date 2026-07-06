@@ -634,7 +634,10 @@ class MetaService {
             );
           }
         }
-        await dao.upsertMetaJson(dt, jsonEncode(fresh.toJson()));
+        // Route through _upsertMetaJson (not the DAO) so onMetaRefreshed fires
+        // and downstream caches (OfflineRepository) are invalidated — a wired
+        // ensureUpToDate must not write fresh schema without evicting them.
+        await _upsertMetaJson(dt, fresh.toJson());
         await dao.setMetaWatermark(dt, newMark);
         final dg = DependencyGraphBuilder.buildOutgoing(fresh);
         await dao.setDepGraphJson(dt, jsonEncode(dg.toJson()));
