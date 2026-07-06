@@ -356,7 +356,17 @@ class _ChildTableSheetState extends State<_ChildTableSheet> {
                   const SizedBox(width: 8),
                   FilledButton.icon(
                     onPressed: _submitFn != null ? () => _submitFn!() : null,
-                    icon: const Icon(Icons.check, size: 20),
+                    icon: _submitFn != null
+                        ? const Icon(Icons.check, size: 20)
+                        : const SizedBox(
+                            width: 16,
+                            height: 16,
+                            child: CircularProgressIndicator(
+                              strokeWidth: 2,
+                              valueColor:
+                                  AlwaysStoppedAnimation<Color>(Colors.white),
+                            ),
+                          ),
                     label: const Text('Save'),
                   ),
                 ],
