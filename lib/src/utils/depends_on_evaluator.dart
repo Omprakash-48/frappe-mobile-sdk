@@ -180,7 +180,14 @@ class DependsOnEvaluator {
       expr = value.substring(5).trimLeft();
     }
     String fieldName = _extractFieldName(expr);
-    return expr == fieldName ? null : fieldName;
+    if (expr != fieldName) return fieldName;
+    // The whole expression isn't a bare `doc.field` reference (e.g. it's
+    // wrapped in a JS call like `(doc.x||'').replace(/.../, '')`). Fall back
+    // to finding the first `doc.<field>` reference anywhere in the string so
+    // dependent-field detection (used for the link field's "select X first"
+    // UX) still works for these more complex link_filters expressions.
+    final match = RegExp(r'doc\.([A-Za-z_][A-Za-z0-9_]*)').firstMatch(expr);
+    return match?.group(1);
   }
 
   static dynamic _extractValue(String expr) {
