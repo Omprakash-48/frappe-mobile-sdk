@@ -151,7 +151,20 @@ class LinkOptionService {
       // value persisted and pushed to the server.
       final translate = _translate;
       if (translateLabels && translate != null) {
-        label = translate(label);
+        // The translate hook runs host code (TranslationService.translateDelegate
+        // is a public, host-settable field) and can throw. A thrown hook must
+        // never propagate out of the picker — that would degrade the dropdown to
+        // empty instead of just showing the untranslated English label. Same
+        // "host hook failures never propagate" contract as [resolveFilters] /
+        // [safeHook]; on failure we keep the untranslated label.
+        try {
+          label = translate(label);
+        } catch (e, st) {
+          debugPrint(
+            'LinkOptionService._rowsToEntities: translate hook threw for '
+            '"$label" ($doctype) — using untranslated label. $e\n$st',
+          );
+        }
       }
       // Offline-only rows (no server_name yet) carry their mobile_uuid as
       // the picker value; the form must mark `<field>__is_local: 1` so the
