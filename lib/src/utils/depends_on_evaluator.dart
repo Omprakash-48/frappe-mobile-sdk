@@ -185,6 +185,12 @@ class DependsOnEvaluator {
 
   static dynamic _extractValue(String expr) {
     expr = expr.trim();
+    // Strip a trailing statement terminator — Frappe depends_on expressions
+    // are sometimes authored as `eval:doc.x == 1;` with a trailing semicolon,
+    // which otherwise breaks the numeric-literal regexes below.
+    if (expr.endsWith(';')) {
+      expr = expr.substring(0, expr.length - 1).trim();
+    }
     // Remove quotes if present
     if ((expr.startsWith('"') && expr.endsWith('"')) ||
         (expr.startsWith("'") && expr.endsWith("'"))) {
