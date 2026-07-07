@@ -1,6 +1,8 @@
 import 'dart:convert';
 
 import 'package:flutter_test/flutter_test.dart';
+import 'package:http/http.dart' as http;
+import 'package:http/testing.dart';
 import 'package:frappe_mobile_sdk/src/api/client.dart';
 import 'package:frappe_mobile_sdk/src/database/app_database.dart';
 import 'package:frappe_mobile_sdk/src/database/daos/doctype_meta_dao.dart';
@@ -670,6 +672,39 @@ void main() {
         final g = await svc.depGraphFor(dt);
         expect(g, isNotNull, reason: 'dep graph missing for $dt');
       }
+    });
+  });
+
+  group('MetaService.onMetaRefreshed', () {
+    test('fires when a doctype meta is (re)written from the server', () async {
+      final db = await AppDatabase.inMemoryDatabase();
+      final client = FrappeClient(
+        'https://fake.test',
+        httpClient: MockClient(
+          (_) async => http.Response(
+            jsonEncode({
+              'docs': [
+                {
+                  'name': 'Customer',
+                  'modified': '2026-06-24 10:00:00',
+                  'fields': [
+                    {'fieldname': 'title', 'fieldtype': 'Data'},
+                  ],
+                },
+              ],
+            }),
+            200,
+          ),
+        ),
+      );
+      final svc = MetaService(client, db);
+
+      final refreshed = <String>[];
+      svc.onMetaRefreshed = refreshed.add;
+
+      await svc.fetchAndStoreInDb('Customer');
+
+      expect(refreshed, ['Customer']);
     });
   });
 }

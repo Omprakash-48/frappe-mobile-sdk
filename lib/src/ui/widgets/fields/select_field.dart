@@ -101,7 +101,8 @@ class SelectField extends BaseField {
             style?.decoration ??
             InputDecoration(
               labelText:
-                  field.placeholder ?? sdkTr('Select {0}', [field.displayLabel]),
+                  field.placeholder ??
+                  sdkTr('Select {0}', [field.displayLabel]),
               border: const OutlineInputBorder(),
               filled: field.readOnly,
               fillColor: field.readOnly ? Colors.grey[200] : null,
@@ -141,14 +142,11 @@ class SelectField extends BaseField {
       });
     }
 
-    return FormBuilderDropdown<String>(
-      autovalidateMode: AutovalidateMode.onUserInteraction,
-      key: ValueKey('select_${field.fieldname}_${rawOptions.length}'),
-      name: field.fieldname ?? '',
-      initialValue: validInitialValue,
-      enabled: enabled && !field.readOnly,
-      decoration:
-          style?.decoration ??
+    // Move the decoration's horizontal padding into the dropdown's own
+    // (clickable) padding so the entire bordered box opens the menu, not just
+    // the area inside the content padding. See [dropdownFullTap].
+    final tap = dropdownFullTap(
+      style?.decoration ??
           InputDecoration(
             hintText:
                 field.placeholder ?? sdkTr('Select {0}', [field.displayLabel]),
@@ -156,6 +154,16 @@ class SelectField extends BaseField {
             filled: field.readOnly,
             fillColor: field.readOnly ? Colors.grey[200] : null,
           ),
+    );
+    return FormBuilderDropdown<String>(
+      autovalidateMode: AutovalidateMode.onUserInteraction,
+      key: ValueKey('select_${field.fieldname}_${rawOptions.length}'),
+      name: field.fieldname ?? '',
+      initialValue: validInitialValue,
+      enabled: enabled && !field.readOnly,
+      isExpanded: true,
+      decoration: tap.decoration,
+      padding: tap.padding,
       // value: raw English key (stored value); child: translated display label.
       items: rawOptions.asMap().entries.map((entry) {
         return DropdownMenuItem<String>(
