@@ -95,6 +95,12 @@ class FormScreen extends StatefulWidget {
   final LinkFilterBuilder? Function(String doctype, String fieldname)?
   getLinkFilterBuilder;
 
+  /// LEGACY mode only — forwarded to [FrappeFormBuilder.cascadeProgrammaticChanges].
+  /// When true, a value set by an [onFieldChange] handler's patch re-fires that
+  /// field's own change pipeline (Frappe `set_value` parity). Ignored in
+  /// [FormBuilderMode.reactive]. Default `false`.
+  final bool cascadeProgrammaticChanges;
+
   /// When true (default), use LinkFieldCoordinator for sequenced link option loading.
   final bool useLinkFieldCoordinator;
 
@@ -158,6 +164,7 @@ class FormScreen extends StatefulWidget {
     this.onFieldChange,
     this.validator,
     this.getLinkFilterBuilder,
+    this.cascadeProgrammaticChanges = false,
     this.useLinkFieldCoordinator = true,
     this.screenStyle,
     this.syncController,
@@ -1112,6 +1119,7 @@ class _FormScreenState extends State<FormScreen> with WidgetsBindingObserver {
                   translate: widget.translate,
                   onFieldChange: widget.onFieldChange,
                   getLinkFilterBuilder: widget.getLinkFilterBuilder,
+                  cascadeProgrammaticChanges: widget.cascadeProgrammaticChanges,
                 ),
               ),
             ],

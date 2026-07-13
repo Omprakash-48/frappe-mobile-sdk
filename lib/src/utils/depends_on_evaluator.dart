@@ -315,27 +315,40 @@ class DependsOnEvaluator {
         if (actual == expected) return false;
         return actual?.toString() != expected?.toString();
       case '>':
-        if (actual is num && expected is num) {
-          return actual > expected;
-        }
-        return false;
       case '<':
-        if (actual is num && expected is num) {
-          return actual < expected;
-        }
-        return false;
       case '>=':
-        if (actual is num && expected is num) {
-          return actual >= expected;
-        }
-        return false;
       case '<=':
-        if (actual is num && expected is num) {
-          return actual <= expected;
+        // Relational comparisons need numeric operands. Frappe form data often
+        // carries numeric field values as strings (e.g. a Float field read back
+        // as "10.0"), and JS `depends_on` coerces those before comparing. Mirror
+        // that by parsing both sides; if either isn't numeric, the comparison is
+        // undefined → false (same as the old num-only guard for non-numbers).
+        final a = _toNum(actual);
+        final b = _toNum(expected);
+        if (a == null || b == null) return false;
+        switch (operator) {
+          case '>':
+            return a > b;
+          case '<':
+            return a < b;
+          case '>=':
+            return a >= b;
+          case '<=':
+            return a <= b;
         }
         return false;
       default:
         return false;
     }
+  }
+
+  /// Coerce a value to [num] for relational comparisons: passes numbers
+  /// through, parses numeric strings (trimmed), and returns null for anything
+  /// non-numeric (null, bool, non-numeric text) so the caller treats it as an
+  /// unsatisfiable comparison rather than throwing.
+  static num? _toNum(dynamic v) {
+    if (v is num) return v;
+    if (v is String) return num.tryParse(v.trim());
+    return null;
   }
 }
