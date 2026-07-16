@@ -382,6 +382,10 @@ class OfflineRepository {
     for (final dt in doctypes) {
       final tableName = normalizeDoctypeTableName(dt);
       if (!await sqliteTableExists(db, tableName)) continue;
+      // Child/link `docs__*` tables never carry `sync_status` (only parent
+      // doctype tables do). Skip them silently instead of issuing a query that
+      // throws "no such column: sync_status" and spams the log every scan.
+      if (!await sqliteColumnExists(db, tableName, 'sync_status')) continue;
       try {
         final rows = await db.query(
           tableName,
