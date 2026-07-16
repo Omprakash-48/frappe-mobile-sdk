@@ -388,21 +388,50 @@ class SyncEngineBuilder {
       onDrainComplete: () => errorLogPoster.flush(errorLogCollector.drain()),
     );
 
-    // PullEngine is built but not auto-invoked. The list-http callback
-    // wraps client.doctype.list; PullPageFetcher uses it when the engine
-    // eventually runs.
+    // The list-http callback backs the closure PullEngine. A flat
+    // `frappe.client.get_list` returns PARENT scalar fields only — child-table
+    // arrays are dropped — so a parent that declares any Table / Table
+    // MultiSelect field must be fetched via `mobile_sync.get_docs_with_children`
+    // (listFullDocs) to embed its children. PullApply already writes embedded
+    // child arrays into docs__<child>; without this branch every child table
+    // stays empty offline (broken form prefill / not truly offline-first).
     Future<List<Map<String, dynamic>>> listHttp(
       String doctype,
       Map<String, Object?> params,
     ) async {
-      final result = await client.doctype.list(
-        doctype,
-        filters: (params['filters'] as List?)?.cast<List<dynamic>>(),
-        fields: (params['fields'] as List?)?.cast<String>(),
-        orderBy: params['order_by'] as String?,
-        limitPageLength: params['limit_page_length'] as int? ?? pullPageSize,
-        limitStart: params['limit_start'] as int? ?? 0,
-      );
+      final limitPageLength =
+          params['limit_page_length'] as int? ?? pullPageSize;
+      final limitStart = params['limit_start'] as int? ?? 0;
+      final filters = (params['filters'] as List?)?.cast<List<dynamic>>();
+      final orderBy = params['order_by'] as String?;
+
+      bool hasChildren = false;
+      try {
+        final meta = await metaResolver(doctype);
+        hasChildren = meta.fields.any(
+          (f) =>
+              f.fieldtype == 'Table' || f.fieldtype == 'Table MultiSelect',
+        );
+      } catch (_) {
+        hasChildren = false;
+      }
+
+      final List<dynamic> result = hasChildren
+          ? await client.doctype.listFullDocs(
+              doctype,
+              filters: filters,
+              limitStart: limitStart,
+              limitPageLength: limitPageLength,
+              orderBy: orderBy,
+            )
+          : await client.doctype.list(
+              doctype,
+              filters: filters,
+              fields: (params['fields'] as List?)?.cast<String>(),
+              orderBy: orderBy,
+              limitPageLength: limitPageLength,
+              limitStart: limitStart,
+            );
       return result
           .whereType<Map>()
           .map((e) => Map<String, dynamic>.from(e))

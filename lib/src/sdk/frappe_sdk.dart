@@ -1494,10 +1494,15 @@ class FrappeSDK {
     for (final doctype in closure.doctypes) {
       if (entryPointSet != null && entryPointSet.contains(doctype)) continue;
       if (closure.childDoctypes.contains(doctype)) continue;
-      if (_permissionService != null &&
-          !await _permissionService!.canRead(doctype)) {
-        continue;
-      }
+      // NOTE: do NOT gate the closure pull on client-side canRead. The closure
+      // is exactly the set of doctypes the mobile forms need offline (entry
+      // points + their Link/Table targets). The backend decouples the
+      // mobile-form list from the DocPerm list, so reference masters (Gender,
+      // Language, Country, …) can carry an explicit can_read=0 yet are required
+      // for link pickers — gating here left them empty offline. The server still
+      // enforces real read permission on each pull; a genuinely forbidden
+      // doctype simply returns empty/403 (caught per-doctype) instead of
+      // starving every offline picker.
       pullable.add(doctype);
     }
     return pullable;
