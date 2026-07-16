@@ -32,19 +32,18 @@ class DocTypeMeta {
   final String? autoname;
 
   /// True if this doctype supports submit/cancel workflow (Frappe is_submittable)
-  bool get isSubmittable {
-    final v = metaData?['is_submittable'];
-    return v == 1 || v == true;
-  }
+  ///
+  /// Uses [parseBool] so Frappe's inconsistent boolean encodings (int `1`,
+  /// bool `true`, or the string `"1"`) all resolve correctly.
+  bool get isSubmittable => parseBool(metaData?['is_submittable']);
 
   /// True if this doctype's document titles should be translated when shown
   /// (Frappe `translated_doctype`). Matches Frappe web, which translates a
   /// Link / Table MultiSelect field's option titles only when the field's
   /// *target* doctype has this flag set (see `link.js`, `formatters.js`).
-  bool get translatedDoctype {
-    final v = metaData?['translated_doctype'];
-    return v == 1 || v == true;
-  }
+  /// Uses [parseBool] so Frappe's inconsistent boolean encodings (int `1`,
+  /// bool `true`, or the string `"1"`) all resolve correctly.
+  bool get translatedDoctype => parseBool(metaData?['translated_doctype']);
 
   DocTypeMeta({
     required this.name,
@@ -115,7 +114,7 @@ class DocTypeMeta {
       if (label != null) 'label': label,
       'fields': fields.map((f) => f.toJson()).toList(),
       'istable': isTable ? 1 : 0,
-      if (metaData != null) ...metaData!,
+      ...?metaData,
       if (titleField != null) 'title_field': titleField,
       if (sortField != null) 'sort_field': sortField,
       if (sortOrder != null) 'sort_order': sortOrder,

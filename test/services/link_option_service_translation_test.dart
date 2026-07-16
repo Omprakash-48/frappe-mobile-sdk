@@ -60,7 +60,10 @@ void main() {
       await db.execute(s);
     }
     final m = metaWith(translated: true);
-    for (final s in buildParentSchemaDDL(m, tableName: 'docs__healthy_food_type')) {
+    for (final s in buildParentSchemaDDL(
+      m,
+      tableName: 'docs__healthy_food_type',
+    )) {
       await db.execute(s);
     }
     await db.insert('doctype_meta', {
@@ -135,16 +138,82 @@ void main() {
     expect(energy.label, 'Energy dense food');
   });
 
-  test('option with no translation entry falls back to English label', () async {
+  test(
+    'option with no translation entry falls back to English label',
+    () async {
+      final svc = LinkOptionService(
+        resolver,
+        (dt) async => metaWith(translated: true),
+        translate: _gu,
+      );
+      final out = await svc.getLinkOptions('Healthy Food Type');
+      // 'Food for strong bones' IS in the dict; assert an untranslated one
+      // stays as-is by checking the dict miss path via name equality.
+      final bones = out.firstWhere((e) => e.name == 'Food for strong bones');
+      expect(bones.label, 'હાડકા મજબુત કરે તેવો ખોરાક');
+    },
+  );
+
+  test('a throwing translate hook falls back to the English label', () async {
     final svc = LinkOptionService(
       resolver,
       (dt) async => metaWith(translated: true),
-      translate: _gu,
+      translate: (_) => throw StateError('host translator blew up'),
     );
+    // A thrown host hook must degrade to the untranslated label, not bubble
+    // out and leave the picker empty.
     final out = await svc.getLinkOptions('Healthy Food Type');
-    // 'Food for strong bones' IS in the dict; assert an untranslated one
-    // stays as-is by checking the dict miss path via name equality.
-    final bones = out.firstWhere((e) => e.name == 'Food for strong bones');
-    expect(bones.label, 'હાડકા મજબુત કરે તેવો ખોરાક');
+    expect(out, isNotEmpty);
+    final energy = out.firstWhere((e) => e.name == 'Energy dense food');
+    expect(energy.label, 'Energy dense food');
   });
+
+  // getLinkOptionsOffline shares _rowsToEntities with getLinkOptions, but the
+  // two entry points are separate — cover the offline path explicitly so a
+  // future divergence can't silently regress translation there.
+  test(
+    'offline path: translated target → label translated, name English',
+    () async {
+      final svc = LinkOptionService(
+        resolver,
+        (dt) async => metaWith(translated: true),
+        translate: _gu,
+      );
+      final out = await svc.getLinkOptionsOffline(doctype: 'Healthy Food Type');
+      final energy = out.firstWhere((e) => e.name == 'Energy dense food');
+      expect(energy.name, 'Energy dense food');
+      expect(energy.label, 'શક્તિથી ભરપુર ખોરાક');
+    },
+  );
+
+  test(
+    'offline path: target NOT translated → label left untranslated',
+    () async {
+      final svc = LinkOptionService(
+        resolver,
+        (dt) async => metaWith(translated: false),
+        translate: _gu,
+      );
+      final out = await svc.getLinkOptionsOffline(doctype: 'Healthy Food Type');
+      final energy = out.firstWhere((e) => e.name == 'Energy dense food');
+      expect(energy.label, 'Energy dense food');
+    },
+  );
+
+  test(
+    'offline path: a throwing translate hook falls back to English',
+    () async {
+      final svc = LinkOptionService(
+        resolver,
+        (dt) async => metaWith(translated: true),
+        translate: (_) => throw StateError('host translator blew up'),
+      );
+      // A thrown host hook must degrade to the untranslated label, not bubble
+      // out and leave the picker empty.
+      final out = await svc.getLinkOptionsOffline(doctype: 'Healthy Food Type');
+      expect(out, isNotEmpty);
+      final energy = out.firstWhere((e) => e.name == 'Energy dense food');
+      expect(energy.label, 'Energy dense food');
+    },
+  );
 }
