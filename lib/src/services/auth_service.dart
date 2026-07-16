@@ -165,6 +165,48 @@ class AuthService {
     }
   }
 
+  /// Persist a login response obtained OUTSIDE the SDK (e.g. a custom SSO /
+  /// `mobile_login` endpoint) into the SDK session exactly like [login] does
+  /// after its own network call: writes the token to the SQLite `auth_tokens`
+  /// table, sets the bearer, records `mobile_form_names`, and marks the client
+  /// authenticated. This lets [restoreSession] rehydrate the session on the
+  /// next cold start with no forced re-login.
+  ///
+  /// Tolerates a missing `refresh_token` (custom endpoints may omit it).
+  Future<void> persistExternalLoginResponse(
+    Map<String, dynamic> response,
+  ) async {
+    if (_client == null) {
+      throw Exception('AuthService not initialized. Call initialize() first.');
+    }
+    if (_database == null) {
+      throw Exception(
+        'Database not set. Call initialize(baseUrl, database: db) first.',
+      );
+    }
+    final accessToken = response['access_token'] as String?;
+    if (accessToken == null || accessToken.isEmpty) {
+      throw Exception('External login response missing access_token');
+    }
+    final user = response['user'] as String?;
+    if (user == null || user.isEmpty) {
+      throw Exception('External login response missing user');
+    }
+    final refreshToken = (response['refresh_token'] as String?) ?? '';
+    final fullName = response['full_name'] as String?;
+    final mobileFormNamesJson = response['mobile_form_names'] as List<dynamic>?;
+    _roles = _parseRoles(response['roles']);
+    _language = response['language'] as String?;
+    await _processLoginResponse(
+      response,
+      accessToken,
+      refreshToken,
+      user,
+      fullName,
+      mobileFormNamesJson,
+    );
+  }
+
   /// Sends OTP to mobile number for login. Returns response containing tmp_id.
   /// Call [verifyLoginOtp] with tmp_id and user-entered OTP to complete login.
   Future<Map<String, dynamic>> sendLoginOtp(String mobileNo) async {

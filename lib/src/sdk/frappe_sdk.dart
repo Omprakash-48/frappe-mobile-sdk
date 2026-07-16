@@ -742,6 +742,29 @@ class FrappeSDK {
     return response;
   }
 
+  /// Persist a login response obtained OUTSIDE the SDK (a custom SSO /
+  /// `mobile_login` endpoint) into a full SDK session — token -> `auth_tokens`,
+  /// [SessionUser] -> `sdk_meta`, `offline_enabled`, permissions, locale.
+  /// Use this when the host authenticates through a non-standard endpoint but
+  /// still wants a real SDK session, so [initialize] with `autoRestoreAndSync`
+  /// rehydrates it on cold start (no re-login). Mirrors [login]'s post-response
+  /// bookkeeping but does NOT kick the initial sync — the caller drives that
+  /// (typically an awaited, progress-reporting sync right after this).
+  Future<Map<String, dynamic>> persistExternalLogin(
+    Map<String, dynamic> response,
+  ) async {
+    if (!_initialized) await initialize();
+    await _authService!.persistExternalLoginResponse(response);
+    await _permissionService!.saveFromLoginResponse(response['permissions']);
+    final lang = response['language'] as String?;
+    if (lang != null && lang.isNotEmpty) {
+      await _translationService?.setLocale(lang);
+    }
+    _setSessionUserFromLoginResponse(response);
+    await _persistOfflineFlagFromLogin(response);
+    return response;
+  }
+
   /// Login with API key
   Future<bool> loginWithApiKey(String apiKey, String apiSecret) async {
     if (!_initialized) await initialize();
