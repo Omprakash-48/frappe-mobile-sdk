@@ -360,16 +360,23 @@ class OfflineRepository {
   Future<List<Document>> getDirtyDocuments({String? doctype}) async {
     if (!offlineMode.enabled) return const [];
     final db = _database.rawDatabase;
-    final List<String> doctypes;
+
+    // Candidate doctype -> table_name. A single doctype is one entry; a full
+    // scan takes the enrolled set from doctype_meta.
+    final tableByDoctype = <String, String>{};
     if (doctype != null) {
-      doctypes = [doctype];
+      tableByDoctype[doctype] = normalizeDoctypeTableName(doctype);
     } else {
       try {
         final rows = await db.rawQuery(
-          "SELECT doctype FROM doctype_meta "
+          "SELECT doctype, table_name FROM doctype_meta "
           "WHERE table_name IS NOT NULL AND table_name != ''",
         );
-        doctypes = rows.map((r) => r['doctype'] as String).toList();
+        for (final r in rows) {
+          final dt = r['doctype'] as String?;
+          final tbl = (r['table_name'] as String?) ?? '';
+          if (dt != null && tbl.isNotEmpty) tableByDoctype[dt] = tbl;
+        }
       } on DatabaseException catch (e, st) {
         sdkLog(
           'OfflineRepository.getDirtyDocuments: doctype_meta scan failed '
@@ -378,19 +385,47 @@ class OfflineRepository {
         return const [];
       }
     }
+    if (tableByDoctype.isEmpty) return const [];
+
+    // ONE metadata round-trip: every table's name + CREATE DDL. B43 — this
+    // replaces the old per-doctype `sqliteTableExists` + `sqliteColumnExists`
+    // probes (two sequential DB round-trips EACH, O(N) on the main isolate —
+    // the "Sync Data page slow" cause). Existence is membership in this map;
+    // `sync_status` presence is read straight from the CREATE DDL, so child /
+    // link `docs__*` tables (which lack the column) are skipped WITHOUT ever
+    // issuing a throwing query against them. Uses only `sqlite_master`, so it
+    // stays portable across every SQLite version the app ships on.
+    final ddlByTable = <String, String>{};
+    try {
+      final tables = await db.rawQuery(
+        "SELECT name, sql FROM sqlite_master WHERE type = 'table'",
+      );
+      for (final t in tables) {
+        final name = t['name'] as String?;
+        if (name != null) ddlByTable[name] = (t['sql'] as String?) ?? '';
+      }
+    } on DatabaseException catch (e, st) {
+      sdkLog(
+        'OfflineRepository.getDirtyDocuments: sqlite_master scan failed '
+        '— $e\n$st',
+      );
+      return const [];
+    }
+
+    // `\b` guards against false positives on a hypothetical `*_sync_status*`
+    // column (`_` is a word char, so no boundary there).
+    final syncStatusColumn = RegExp(r'\bsync_status\b');
     final out = <Document>[];
-    for (final dt in doctypes) {
-      final tableName = normalizeDoctypeTableName(dt);
-      if (!await sqliteTableExists(db, tableName)) continue;
-      // Child/link `docs__*` tables never carry `sync_status` (only parent
-      // doctype tables do). Skip them silently instead of issuing a query that
-      // throws "no such column: sync_status" and spams the log every scan.
-      if (!await sqliteColumnExists(db, tableName, 'sync_status')) continue;
+    for (final entry in tableByDoctype.entries) {
+      final dt = entry.key;
+      final tableName = entry.value;
+      final ddl = ddlByTable[tableName];
+      if (ddl == null) continue; // table absent
+      if (!syncStatusColumn.hasMatch(ddl)) continue; // no sync_status column
       try {
         final rows = await db.query(
           tableName,
-          where:
-              "sync_status IN "
+          where: "sync_status IN "
               "('dirty', 'deleted', 'sync_error', 'sync_blocked')",
         );
         for (final r in rows) {
