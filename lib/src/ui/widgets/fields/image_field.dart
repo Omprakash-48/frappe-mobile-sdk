@@ -8,6 +8,76 @@ import 'package:image_picker/image_picker.dart';
 import 'base_field.dart';
 import 'field_helpers.dart';
 
+/// Shows [image] full-screen in a zoomable, dismissible viewer with a dark
+/// scrim and a close (X) button. Pinch-zoom / pan via [InteractiveViewer];
+/// never crops (BoxFit.contain). Shared by ImageField (thumbnail tap) and
+/// AttachField (image attachments).
+void showFullScreenImageProvider(BuildContext context, ImageProvider image) {
+  showDialog<void>(
+    context: context,
+    barrierColor: Colors.black,
+    builder: (dialogContext) {
+      return Dialog(
+        insetPadding: EdgeInsets.zero,
+        backgroundColor: Colors.transparent,
+        child: Stack(
+          children: [
+            Positioned.fill(
+              child: InteractiveViewer(
+                minScale: 0.8,
+                maxScale: 4.0,
+                child: Image(
+                  image: image,
+                  fit: BoxFit.contain,
+                  errorBuilder: (context, error, stackTrace) {
+                    return const Center(
+                      child: Icon(
+                        Icons.broken_image,
+                        color: Colors.white70,
+                        size: 64,
+                      ),
+                    );
+                  },
+                  loadingBuilder: (context, child, loadingProgress) {
+                    if (loadingProgress == null) return child;
+                    return const Center(
+                      child: CircularProgressIndicator(color: Colors.white),
+                    );
+                  },
+                ),
+              ),
+            ),
+            Positioned(
+              top: 40,
+              right: 16,
+              child: Material(
+                color: Colors.black54,
+                shape: const CircleBorder(),
+                child: IconButton(
+                  icon: const Icon(Icons.close, color: Colors.white),
+                  tooltip: 'Close',
+                  onPressed: () => Navigator.of(dialogContext).pop(),
+                ),
+              ),
+            ),
+          ],
+        ),
+      );
+    },
+  );
+}
+
+/// Shows a network image full-screen with optional auth [headers]. Shared entry
+/// point used by ImageField and AttachField so private Frappe files load with
+/// the same auth as inline previews.
+void showFullScreenImage(
+  BuildContext context,
+  String url,
+  Map<String, String>? headers,
+) {
+  showFullScreenImageProvider(context, NetworkImage(url, headers: headers));
+}
+
 /// Widget for Image/Attach Image field type.
 /// When [uploadFile] is set, picks upload to server first and store file_url; otherwise stores local path.
 /// For /private/files/ and /files/, uses Frappe download_file API and [imageHeaders] for auth.
@@ -128,44 +198,82 @@ class ImageField extends BaseField {
             if (currentValue != null && currentValue.isNotEmpty)
               Padding(
                 padding: const EdgeInsets.only(bottom: 8.0),
-                child: ClipRRect(
-                  borderRadius: BorderRadius.circular(8),
-                  child: _isFullUrl(displayUrl)
-                      ? Image.network(
-                          displayUrl!,
-                          height: 150,
-                          width: double.infinity,
-                          fit: BoxFit.cover,
-                          headers: imageHeaders,
-                          errorBuilder: (context, error, stackTrace) {
-                            return Container(
-                              height: 150,
-                              color: Colors.grey[300],
-                              child: const Icon(Icons.broken_image),
-                            );
-                          },
-                        )
-                      : !isUrl
-                      ? Image.file(
-                          File(currentValue),
-                          height: 150,
-                          width: double.infinity,
-                          fit: BoxFit.cover,
-                          errorBuilder: (context, error, stackTrace) {
-                            return Container(
-                              height: 150,
-                              color: Colors.grey[300],
-                              child: const Icon(Icons.broken_image),
-                            );
-                          },
-                        )
-                      : Container(
-                          height: 150,
-                          color: Colors.grey[300],
-                          child: const Center(
-                            child: Icon(Icons.broken_image, size: 48),
+                child: GestureDetector(
+                  // Viewing is always allowed — even when the field is
+                  // read-only/disabled the user can still open the full-screen
+                  // viewer (QA #11).
+                  onTap: () {
+                    if (_isFullUrl(displayUrl)) {
+                      showFullScreenImage(context, displayUrl!, imageHeaders);
+                    } else if (!isUrl) {
+                      showFullScreenImageProvider(
+                        context,
+                        FileImage(File(currentValue)),
+                      );
+                    }
+                  },
+                  child: Stack(
+                    children: [
+                      ClipRRect(
+                        borderRadius: BorderRadius.circular(8),
+                        child: _isFullUrl(displayUrl)
+                            ? Image.network(
+                                displayUrl!,
+                                height: 150,
+                                width: double.infinity,
+                                fit: BoxFit.cover,
+                                headers: imageHeaders,
+                                errorBuilder: (context, error, stackTrace) {
+                                  return Container(
+                                    height: 150,
+                                    color: Colors.grey[300],
+                                    child: const Icon(Icons.broken_image),
+                                  );
+                                },
+                              )
+                            : !isUrl
+                            ? Image.file(
+                                File(currentValue),
+                                height: 150,
+                                width: double.infinity,
+                                fit: BoxFit.cover,
+                                errorBuilder: (context, error, stackTrace) {
+                                  return Container(
+                                    height: 150,
+                                    color: Colors.grey[300],
+                                    child: const Icon(Icons.broken_image),
+                                  );
+                                },
+                              )
+                            : Container(
+                                height: 150,
+                                color: Colors.grey[300],
+                                child: const Center(
+                                  child: Icon(Icons.broken_image, size: 48),
+                                ),
+                              ),
+                      ),
+                      // 'Tap to view' affordance — only shown when the image is
+                      // actually viewable full-screen.
+                      if (_isFullUrl(displayUrl) || !isUrl)
+                        Positioned(
+                          right: 8,
+                          bottom: 8,
+                          child: Container(
+                            padding: const EdgeInsets.all(4),
+                            decoration: BoxDecoration(
+                              color: Colors.black54,
+                              borderRadius: BorderRadius.circular(6),
+                            ),
+                            child: const Icon(
+                              Icons.fullscreen,
+                              color: Colors.white,
+                              size: 20,
+                            ),
                           ),
                         ),
+                    ],
+                  ),
                 ),
               ),
             Row(

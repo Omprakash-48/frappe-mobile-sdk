@@ -263,6 +263,8 @@ class FieldFactory {
           enabled: enabled,
           style: fieldStyle,
           uploadFile: uploadFile,
+          fileUrlBase: fileUrlBase,
+          imageHeaders: imageHeaders,
         );
 
       case FieldTypes.attachImage:

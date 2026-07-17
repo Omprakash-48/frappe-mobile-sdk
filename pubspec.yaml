@@ -64,6 +64,9 @@ dependencies:
   # Image picker for image fields
   image_picker: ^1.1.2
 
+  # Open downloaded attachments (PDF/doc/etc.) in the device's default app
+  open_filex: ^4.7.0
+
   # HTML rendering for HTML field type
   flutter_widget_from_html: ^0.17.2
 
