@@ -1048,13 +1048,16 @@ class OfflineRepository {
   ///
   /// Used when opening a document in offline mode, where the resolver's flat
   /// row does not embed child arrays.
+  ///
+  /// The DB fetch (this method) and the merge ([mergeChildRowsIntoData]) are
+  /// split so the merge can be unit-tested with plain maps, no database.
   Future<Document> attachChildRows(
     String doctype,
     Document doc,
     DocTypeMeta meta,
   ) async {
     final db = _database.rawDatabase;
-    final enriched = Map<String, dynamic>.from(doc.data);
+    final childRowsByField = <String, List<Map<String, dynamic>>>{};
     for (final field in meta.fields) {
       final fname = field.fieldname;
       final ftype = field.fieldtype;
@@ -1070,15 +1073,64 @@ class OfflineRepository {
         whereArgs: [doc.localId],
         orderBy: 'idx ASC',
       );
-      enriched[fname] = rows.map((r) {
-        final m = Map<String, dynamic>.from(r);
-        // Map server_name → name so field values align with Frappe convention.
-        if (!m.containsKey('name') && m.containsKey('server_name')) {
-          m['name'] = m['server_name'];
-        }
-        return m;
-      }).toList();
+      childRowsByField[fname] = rows
+          .map((r) => Map<String, dynamic>.from(r))
+          .toList();
     }
-    return doc.copyWith(data: enriched);
+    if (childRowsByField.isEmpty) return doc;
+    return doc.copyWith(
+      data: mergeChildRowsIntoData(doc.data, meta, childRowsByField),
+    );
   }
+}
+
+/// Pure merge step behind [OfflineRepository.attachChildRows]: no I/O, no
+/// database — takes the parent document's data map plus already-fetched
+/// child rows (keyed by the parent Table/Table MultiSelect fieldname) and
+/// returns the data map with those fields populated.
+///
+/// For every field in [meta] with `fieldtype` `Table` or `Table MultiSelect`
+/// that has a matching entry in [childRowsByField], each row is copied and
+/// `server_name` is aliased to `name` when `name` is absent — matching the
+/// shape the form builder receives from the live API — so `enriched[fname]`
+/// ends up identical whether the document was read online or offline.
+/// Fields absent from [childRowsByField] (no matching child table, or no
+/// rows found) are left untouched in [parentData].
+///
+/// Extracted so this merge can be unit-tested with plain maps/fixtures,
+/// independent of the SQLite fetch in [OfflineRepository.attachChildRows].
+Map<String, dynamic> mergeChildRowsIntoData(
+  Map<String, dynamic> parentData,
+  DocTypeMeta meta,
+  Map<String, List<Map<String, dynamic>>> childRowsByField,
+) {
+  final enriched = Map<String, dynamic>.from(parentData);
+  for (final field in meta.fields) {
+    final fname = field.fieldname;
+    final ftype = field.fieldtype;
+    if (fname == null) continue;
+    if (ftype != 'Table' && ftype != 'Table MultiSelect') continue;
+    final rows = childRowsByField[fname];
+    if (rows == null) continue;
+    enriched[fname] = rows.map((r) {
+      final m = Map<String, dynamic>.from(r);
+      // Map server_name → name so field values align with Frappe convention.
+      if (!m.containsKey('name') && m.containsKey('server_name')) {
+        m['name'] = m['server_name'];
+      }
+      return m;
+    }).toList();
+  }
+  return enriched;
+}
+
+/// Returns true if [meta] declares at least one `Table` / `Table MultiSelect`
+/// field — i.e. [OfflineRepository.attachChildRows] would have something to
+/// hydrate for this doctype. Pure (no I/O); lets callers skip the child-row
+/// fetch entirely for doctypes with no children instead of running a no-op
+/// loop over every mobile-form meta on every detail read.
+bool metaHasChildTableFields(DocTypeMeta meta) {
+  return meta.fields.any(
+    (f) => f.fieldtype == 'Table' || f.fieldtype == 'Table MultiSelect',
+  );
 }
