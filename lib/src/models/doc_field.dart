@@ -164,8 +164,24 @@ class DocField {
         fieldtype != 'Heading';
   }
 
-  /// Get display label
+  /// Get display label.
+  ///
+  /// A label that is null, blank, or made only of zero-width/invisible
+  /// characters (hosts blank labels to `'​'` to suppress duplicate
+  /// rendering) falls back to a humanized fieldname — otherwise validation
+  /// messages degrade to a bare "is required".
   String get displayLabel {
-    return label ?? fieldname ?? '';
+    final l = label;
+    if (l != null &&
+        l.replaceAll(RegExp('[\\u200B\\u200C\\u200D\\uFEFF]'), '').trim().isNotEmpty) {
+      return l;
+    }
+    final f = fieldname;
+    if (f == null || f.isEmpty) return '';
+    return f
+        .split('_')
+        .where((w) => w.isNotEmpty)
+        .map((w) => w[0].toUpperCase() + w.substring(1))
+        .join(' ');
   }
 }
