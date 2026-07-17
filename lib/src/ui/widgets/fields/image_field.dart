@@ -37,6 +37,14 @@ class ImageField extends BaseField {
     final p = path.trim();
     if (p.startsWith('http://') || p.startsWith('https://')) return true;
     if (p.startsWith('/files/') || p.startsWith('/private/files/')) return true;
+    // multi_cloud_storage (and any Frappe method-served file) returns a
+    // RELATIVE proxy URL, e.g.
+    //   /api/method/multi_cloud_storage.controller.generate_file?key=...
+    // Without this, such values fail the check below, get mistaken for a local
+    // path, and render via Image.file (broken). Treat method endpoints as
+    // server URLs so _fullImageUrl prepends the base and the preview loads via
+    // Image.network(base + path) with auth headers. (Cloud-backed private files.)
+    if (p.startsWith('/api/method/')) return true;
     return false;
   }
 
