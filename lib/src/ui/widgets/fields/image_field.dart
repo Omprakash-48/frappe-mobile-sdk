@@ -298,6 +298,26 @@ class ImageField extends BaseField {
                   onPressed: enabled && !field.readOnly
                       ? () async {
                           final picker = ImagePicker();
+                          // Android can kill the host activity mid-capture
+                          // and stash the result; without recovering it the
+                          // FIRST capture is silently dropped and users must
+                          // shoot twice ("camera-twice" bug). Recover any
+                          // stashed result before launching a fresh capture.
+                          try {
+                            final lost = await picker.retrieveLostData();
+                            final lostFile = lost.file;
+                            if (!lost.isEmpty && lostFile != null) {
+                              await _onImagePicked(
+                                fieldState,
+                                File(lostFile.path),
+                              );
+                              return;
+                            }
+                          } catch (_) {
+                            // Recovery is best-effort (iOS throws
+                            // UnimplementedError) — fall through to a
+                            // normal capture.
+                          }
                           final result = await picker.pickImage(
                             source: ImageSource.camera,
                           );
