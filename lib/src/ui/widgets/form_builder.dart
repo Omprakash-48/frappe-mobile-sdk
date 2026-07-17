@@ -13,6 +13,7 @@ import '../../services/link_field_coordinator.dart';
 import '../../utils/depends_on_evaluator.dart';
 import '../../utils/field_normalizer.dart';
 import '../../utils/sdk_log.dart';
+import '../../utils/translate.dart';
 import 'fields/field_factory.dart';
 import 'fields/base_field.dart';
 import 'default_form_style.dart';
@@ -1752,6 +1753,60 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
       if (field.dependsOn == null || field.dependsOn!.isEmpty) return false;
       return !DependsOnEvaluator.evaluate(field.dependsOn, dataForDepends);
     });
+
+    // Frappe-parity mandatory sweep over the COMPLETE payload.
+    // `saveAndValidate()` above only covers fields whose widgets are currently
+    // MOUNTED — TabBarView builds tab pages lazily, so a reqd field on any
+    // other tab (and Table fields, which are not FormBuilderFields) slips
+    // through, saves locally, and bounces back as a server 417 at sync time.
+    // Mirrors FormController._validateField: visible + effectively-required,
+    // missing when null / blank string / empty list (0 and false are "set").
+    final missingMandatory = <DocField>[];
+    for (final field in widget.meta.fields) {
+      final name = field.fieldname;
+      if (name == null || name.isEmpty) continue;
+      if (field.hidden || !field.isDataField) continue;
+      // Absent from the payload = hidden by its own or a container depends_on.
+      if (!completeFormData.containsKey(name)) continue;
+      final required =
+          field.reqd ||
+          (field.mandatoryDependsOn != null &&
+              field.mandatoryDependsOn!.isNotEmpty &&
+              DependsOnEvaluator.evaluate(
+                field.mandatoryDependsOn,
+                dataForDepends,
+              ));
+      if (!required) continue;
+      final v = completeFormData[name];
+      final missing =
+          v == null ||
+          (v is String && v.trim().isEmpty) ||
+          (v is List && v.isEmpty);
+      if (missing) missingMandatory.add(field);
+    }
+    if (missingMandatory.isNotEmpty) {
+      final tabIndex = _fieldTabIndex[missingMandatory.first.fieldname];
+      if (tabIndex != null &&
+          _tabs.length > 1 &&
+          _tabController.index != tabIndex) {
+        setState(() {
+          _tabController.index = tabIndex;
+        });
+      }
+      // Surface inline errors once the target tab's fields have mounted
+      // (same delay the invalid-field scroll above uses for tab settling).
+      Future.delayed(const Duration(milliseconds: 150), () {
+        if (!mounted) return;
+        final st = _formKey.currentState;
+        for (final f in missingMandatory) {
+          st?.fields[f.fieldname]?.invalidate(
+            sdkTr('{0} is required', [f.displayLabel]),
+          );
+        }
+      });
+      widget.onValidationFailed?.call();
+      return;
+    }
 
     widget.onSubmit?.call(completeFormData);
   }
