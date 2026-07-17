@@ -108,6 +108,7 @@ export 'src/ui/widgets/fields/button_field.dart';
 export 'src/ui/widgets/fields/numeric_field.dart';
 export 'src/ui/widgets/fields/link_field.dart';
 export 'src/ui/widgets/fields/phone_field.dart';
+export 'src/ui/widgets/fields/geolocation_field.dart';
 export 'src/ui/widgets/fields/link_field_picker_mode.dart';
 export 'src/ui/widgets/fields/child_table_field.dart'
     show ChildTableFormBuilder;
