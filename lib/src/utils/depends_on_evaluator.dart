@@ -41,8 +41,46 @@ class DependsOnEvaluator {
     bool defaultWhenEmpty,
   ) => (expr == null || expr.isEmpty) ? defaultWhenEmpty : evaluate(expr, data);
 
+  /// Comparison / boolean operators, longest first so `===`/`!==`/`>=`/`<=`
+  /// are matched before their shorter substrings tear them apart.
+  static final RegExp _opPattern = RegExp(
+    r'===|!==|==|!=|>=|<=|&&|\|\||>|<',
+  );
+
+  /// Frappe admins write `doc.x==1&&doc.y!=2` as often as the spaced form,
+  /// but every comparison branch below splits on SPACED operators only —
+  /// unspaced expressions silently fell through to the truthy fallback and
+  /// mis-gated visibility / mandatory / read-only everywhere. Normalize
+  /// spacing once up front; quoted values keep their contents untouched.
+  static String _normalizeOperatorSpacing(String expr) {
+    final buf = StringBuffer();
+    String? quote;
+    for (var i = 0; i < expr.length; i++) {
+      final ch = expr[i];
+      if (quote != null) {
+        buf.write(ch);
+        if (ch == quote) quote = null;
+        continue;
+      }
+      if (ch == '"' || ch == "'") {
+        quote = ch;
+        buf.write(ch);
+        continue;
+      }
+      final m = _opPattern.matchAsPrefix(expr, i);
+      if (m != null) {
+        buf.write(' ${m.group(0)} ');
+        i += m.group(0)!.length - 1;
+        continue;
+      }
+      buf.write(ch);
+    }
+    return buf.toString().replaceAll(RegExp(r' {2,}'), ' ').trim();
+  }
+
   /// Evaluate depends_on expression
   /// Supports: eval:doc.field == value, eval:doc.field != value, etc.
+  /// Operator spacing is normalized, so `doc.field==value` works too.
   static bool evaluate(String? expression, Map<String, dynamic> formData) {
     if (expression == null || expression.isEmpty) return true;
 
@@ -56,6 +94,7 @@ class DependsOnEvaluator {
     // arrives wrapped in its own parens and would otherwise leak `(`/`)`
     // into _extractFieldName / _extractValue.
     expr = _stripOuterParens(expr);
+    expr = _normalizeOperatorSpacing(expr);
 
     // Simple evaluation for common patterns
     // eval:doc.field == value
@@ -245,18 +284,25 @@ class DependsOnEvaluator {
   }
 
   /// Split [expr] by [delimiter], but only at top level — i.e. not inside
-  /// `[...]` array literals or `(...)` grouped subexpressions. Without paren
-  /// awareness, a Frappe expression like `(A && B) || (C && D)` would split
-  /// on the inner `&&`s first and produce fragments with unmatched parens.
+  /// `[...]` array literals, `(...)` grouped subexpressions, or quoted
+  /// strings. Without paren awareness, a Frappe expression like
+  /// `(A && B) || (C && D)` would split on the inner `&&`s first and produce
+  /// fragments with unmatched parens; without quote awareness, a literal
+  /// like `"A && B"` would be torn apart mid-string.
   static List<String> _splitOutsideBrackets(String expr, String delimiter) {
     final parts = <String>[];
     int bracketDepth = 0;
     int parenDepth = 0;
     int lastSplit = 0;
+    String? quote;
 
     for (int i = 0; i < expr.length; i++) {
       final ch = expr[i];
-      if (ch == '[') {
+      if (quote != null) {
+        if (ch == quote) quote = null;
+      } else if (ch == '"' || ch == "'") {
+        quote = ch;
+      } else if (ch == '[') {
         bracketDepth++;
       } else if (ch == ']') {
         bracketDepth--;
