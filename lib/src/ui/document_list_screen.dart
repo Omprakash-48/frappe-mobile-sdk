@@ -221,12 +221,18 @@ class _DocumentListScreenState extends State<DocumentListScreen> {
     return widget.translate != null ? widget.translate!(raw) : raw;
   }
 
+  /// Resolved Link-title cache for row titles, keyed `targetDoctype::value`.
+  /// Populated asynchronously by [_titleViaLink]; rows upgrade in place.
+  final Map<String, String> _linkTitleCache = {};
+  final Set<String> _linkTitleInFlight = {};
+
   String _docTitle(Document doc) {
     final titleFieldName = widget.meta.titleField;
     if (titleFieldName != null &&
         titleFieldName.isNotEmpty &&
         doc.data[titleFieldName] != null) {
-      return doc.data[titleFieldName].toString().trim();
+      final raw = doc.data[titleFieldName].toString().trim();
+      return _titleViaLink(titleFieldName, raw);
     }
     final t =
         doc.data['title']?.toString() ?? doc.data['name']?.toString() ?? '';
@@ -239,9 +245,50 @@ class _DocumentListScreenState extends State<DocumentListScreen> {
       'item_code',
     ]) {
       final v = doc.data[fn]?.toString();
-      if (v != null && v.isNotEmpty) return v;
+      if (v != null && v.isNotEmpty) return _titleViaLink(fn, v);
     }
     return doc.serverId ?? doc.localId;
+  }
+
+  /// When the title-source [fieldname] is a Link, a row's raw value is the
+  /// linked document's ID — which is what made DF lists show uuid/EP ids
+  /// instead of the entrepreneur's name (#121; Frappe web resolves link
+  /// titles in list views). Render the cached linked-doc title when we have
+  /// it; otherwise show the raw value and kick off an offline-first lookup
+  /// that upgrades the row in place when it lands. Lookups are deduped via
+  /// [_linkTitleInFlight]; unresolved values stay retryable so titles
+  /// appear once the target doctype finishes pulling.
+  String _titleViaLink(String fieldname, String raw) {
+    if (raw.isEmpty) return raw;
+    final field = widget.meta.getField(fieldname);
+    final target = field?.options;
+    if (field == null ||
+        field.fieldtype != 'Link' ||
+        target == null ||
+        target.isEmpty) {
+      return raw;
+    }
+    final key = '$target::$raw';
+    final cached = _linkTitleCache[key];
+    if (cached != null) return cached;
+    final svc = widget.linkOptionService;
+    if (svc == null) return raw;
+    if (_linkTitleInFlight.add(key)) {
+      svc
+          .getLinkTitle(target, raw)
+          .then((title) {
+            _linkTitleInFlight.remove(key);
+            if (!mounted || title == null || title.isEmpty || title == raw) {
+              return;
+            }
+            setState(() => _linkTitleCache[key] = title);
+          })
+          .catchError((Object e) {
+            _linkTitleInFlight.remove(key);
+            sdkLog('DocumentListScreen: link-title lookup failed — $e');
+          });
+    }
+    return raw;
   }
 
   List<Document> _filteredAndSortedDocs() {
