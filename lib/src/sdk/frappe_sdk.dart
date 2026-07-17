@@ -494,11 +494,16 @@ class FrappeSDK {
     // `_cachedOnline` immediately. Downstream callers (resolver,
     // `_initialMetaAndDataSync`) read `_cachedOnline` instead of probing
     // again, keeping the hot path to a single field read.
+    // The same probe/edge also publishes onto the SyncStateNotifier —
+    // it is the ONLY publisher of SyncState.isOnline, which otherwise
+    // stays at its initial `false` and pins SyncStatusBar on "Offline".
     final watcher = await ConnectivityWatcher.production();
     _connectivityWatcher = watcher;
     _cachedOnline = watcher.isOnline;
+    _syncStateNotifier?.updateOnline(watcher.isOnline);
     _connectivitySub = watcher.onChange.listen((online) {
       _cachedOnline = online;
+      _syncStateNotifier?.updateOnline(online);
     });
     final syncSvc = _syncService!;
     final resolver = UnifiedResolver(
