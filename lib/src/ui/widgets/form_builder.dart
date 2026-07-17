@@ -702,11 +702,50 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
   /// future change to `DependsOnEvaluator.evaluate` (e.g. adding a parent
   /// context parameter) applies to all three guards at once.
   /// Data source for depends_on evaluation: the controller's values in reactive
-  /// mode (single source of truth), else the legacy _formData map.
-  Map<String, dynamic> get _evalData =>
-      (widget.mode == FormBuilderMode.reactive && _controller != null)
-      ? _controller!.values
-      : _formData;
+  /// mode (single source of truth), else the legacy _formData map — overlaid
+  /// with programmatic READ-ONLY values from the live [FrappeFormBuilder.initialData].
+  ///
+  /// Why the overlay: a read-only field (e.g. a computed `qty_variance`) never
+  /// flows through this widget's own `onChanged`, so a value a caller sets
+  /// programmatically (an onFieldChange handler patching the shared, in-place
+  /// mutated `initialData` map) never reaches `_formData`. Without this, a
+  /// depends_on gate keyed on that field — e.g. a rejection child table shown
+  /// when `qty_variance > 0` — would never re-evaluate as true on a rebuild.
+  /// Only READ-ONLY fields are overlaid and the live `initialData` value wins
+  /// for them; editable fields keep `_formData` (so user edits/clears still win,
+  /// and immutable callers are unaffected since `_formData` is seeded from
+  /// `initialData` at init).
+  Map<String, dynamic> get _evalData {
+    if (widget.mode == FormBuilderMode.reactive && _controller != null) {
+      return _controller!.values;
+    }
+    final init = widget.initialData;
+    final ro = _readOnlyFieldNames;
+    if (init == null || init.isEmpty || ro.isEmpty) return _formData;
+    final merged = Map<String, dynamic>.from(_formData);
+    for (final n in ro) {
+      if (init.containsKey(n)) merged[n] = init[n];
+    }
+    return merged;
+  }
+
+  DocTypeMeta? _readOnlyNamesMeta;
+  Set<String>? _readOnlyNamesCache;
+
+  /// Cached set of read-only fieldnames, rebuilt when the [DocTypeMeta] changes.
+  /// Used by [_evalData] to overlay programmatic read-only values (see there).
+  Set<String> get _readOnlyFieldNames {
+    if (!identical(_readOnlyNamesMeta, widget.meta) ||
+        _readOnlyNamesCache == null) {
+      _readOnlyNamesMeta = widget.meta;
+      _readOnlyNamesCache = {
+        for (final f in widget.meta.fields)
+          if (f.fieldname != null && f.fieldname!.isNotEmpty && f.readOnly)
+            f.fieldname!,
+      };
+    }
+    return _readOnlyNamesCache!;
+  }
 
   bool _evaluateDepends(String? expr, bool defaultValue) {
     if (expr == null || expr.isEmpty) return defaultValue;
@@ -997,9 +1036,7 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
           field.fieldname!,
           value,
           Map<String, dynamic>.from(_formData),
-          source: cascadeDepth > 0
-              ? ChangeSource.reaction
-              : ChangeSource.user,
+          source: cascadeDepth > 0 ? ChangeSource.reaction : ChangeSource.user,
         );
         if (patches != null && patches.isNotEmpty) {
           // Snapshot prior values BEFORE applying so a cascade can tell a real
