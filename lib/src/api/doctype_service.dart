@@ -197,14 +197,55 @@ class DoctypeService {
     ];
   }
 
+  /// Server-side per-request doctype cap (`mobile_control` `sync_details`
+  /// `MAX_DOCTYPES`). A request listing more than this many doctypes is
+  /// rejected with HTTP 417. Kept in sync with the server constant.
+  static const int _syncDetailsMaxDoctypes = 100;
+
   /// Pre-flight manifest (#49). Posts the INCREMENTAL doctypes about to be
   /// pulled, each with its own `since` watermark, and returns per-doctype
   /// change info. Returns null on ANY failure (network, 404, missing endpoint,
   /// malformed body) so the caller falls back to a full pull.
+  ///
+  /// The server caps a single request at [_syncDetailsMaxDoctypes] doctypes
+  /// (HTTP 417 above it). To stay transparent to EVERY SDK consumer, a request
+  /// at or below the cap is sent as a SINGLE call — byte-for-byte the original
+  /// behaviour, so no existing/legacy app is affected. Only a larger request is
+  /// transparently split into cap-sized chunks and merged. If ANY chunk fails,
+  /// the whole call returns null (the same all-or-nothing full-pull contract as
+  /// before), so a partial manifest can never cause an incorrect skip.
   Future<SyncDetailsResponse?> getSyncDetails(
     List<Map<String, String>> doctypeSince,
   ) async {
     if (doctypeSince.isEmpty) return null;
+
+    // Fast path: at/under the cap — identical to the pre-chunking behaviour.
+    if (doctypeSince.length <= _syncDetailsMaxDoctypes) {
+      return _postSyncDetailsChunk(doctypeSince);
+    }
+
+    // Over the cap: split into cap-sized chunks, post each, merge the results.
+    final merged = <String, SyncDetailsEntry>{};
+    var deleteSignals = 0;
+    for (var i = 0; i < doctypeSince.length; i += _syncDetailsMaxDoctypes) {
+      final end = (i + _syncDetailsMaxDoctypes < doctypeSince.length)
+          ? i + _syncDetailsMaxDoctypes
+          : doctypeSince.length;
+      final res = await _postSyncDetailsChunk(doctypeSince.sublist(i, end));
+      // Preserve the all-or-nothing contract: any failed chunk => full pull.
+      if (res == null) return null;
+      merged.addAll(res.entries);
+      deleteSignals += res.deleteSignals;
+    }
+    return SyncDetailsResponse(entries: merged, deleteSignals: deleteSignals);
+  }
+
+  /// Single POST to `mobile_sync.sync_details` for [doctypeSince] (caller
+  /// guarantees length <= [_syncDetailsMaxDoctypes]). Returns null on any
+  /// failure — identical to the original [getSyncDetails] body.
+  Future<SyncDetailsResponse?> _postSyncDetailsChunk(
+    List<Map<String, String>> doctypeSince,
+  ) async {
     try {
       final response = await _restHelper.post(
         '/api/method/mobile_sync.sync_details',
