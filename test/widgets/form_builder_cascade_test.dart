@@ -278,4 +278,71 @@ void main() {
       );
     },
   );
+
+  testWidgets(
+    'cascade OFF: a self-referential handler on a TYPED field must not loop '
+    '(deferred self-key echo hang regression)',
+    (tester) async {
+      // Regression: the deferred self-key echo used to raise
+      // [_programmaticEchoGuard] only when the cascade flag was ON. With it
+      // OFF and a TYPED field, the handler patch lands in _formData in one
+      // representation (bool `true`) while the Check widget's onChanged echoes
+      // another (int `1`), so `oldValue != value` stays true, the handler
+      // re-fires every post-frame, and the ONLY loop breaker — the depth cap
+      // in _scheduleProgrammaticCascade — never runs because it is
+      // cascade-gated. That is an uncapped infinite hang (pre-fix a
+      // synchronous StackOverflow). The self-key echo guard is now
+      // unconditional, so the echo is a pure state-sync no-op and the handler
+      // fires exactly once. The throw-after-N counter turns a would-be hang
+      // into a fast, deterministic failure instead of a pumpAndSettle timeout.
+      var flagHandlerCalls = 0;
+      Map<String, dynamic>? emitted;
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: FrappeFormBuilder(
+              meta: DocTypeMeta(
+                name: 'TestDoctype',
+                fields: <DocField>[
+                  DocField(fieldname: 'flag', fieldtype: 'Check', label: 'F'),
+                ],
+              ),
+              // cascadeProgrammaticChanges defaults to false
+              onFieldChange: (name, value, data) {
+                if (name == 'flag') {
+                  flagHandlerCalls++;
+                  if (flagHandlerCalls > 5) {
+                    throw StateError(
+                      'self-key echo looped ($flagHandlerCalls calls) — the '
+                      'deferred echo must be guarded regardless of the cascade '
+                      'flag',
+                    );
+                  }
+                  // Return bool while the widget echoes int: idempotent in
+                  // intent, but a representation the widget never converges to.
+                  return {'flag': true};
+                }
+                return null;
+              },
+              onFormDataChanged: (d) => emitted = d,
+            ),
+          ),
+        ),
+      );
+
+      await tester.tap(find.byKey(const ValueKey('check_flag')));
+      await tester.pumpAndSettle();
+
+      expect(
+        flagHandlerCalls,
+        lessThanOrEqualTo(5),
+        reason: 'the deferred self-key echo must not re-fire the handler',
+      );
+      expect(
+        emitted?['flag'],
+        anyOf(true, 1),
+        reason: 'the self-patch value must land in the doc',
+      );
+    },
+  );
 }

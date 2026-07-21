@@ -312,8 +312,13 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
   /// fields [FieldNormalizer] can change the value's representation, so that
   /// echo would NOT self-guard and would double-run the pipeline alongside the
   /// explicit cascade. This flag makes the echo a pure state-sync no-op so the
-  /// explicit [_scheduleProgrammaticCascade] is the single cascade path. Only
-  /// raised when the cascade flag is on, so legacy behaviour is unchanged.
+  /// explicit [_scheduleProgrammaticCascade] is the single cascade path. Raised
+  /// for the synchronous cross-field (`rest`) echo only when the cascade flag
+  /// is on (legacy behaviour otherwise), but ALWAYS for the deferred self-key
+  /// echo — an unguarded self-key echo on a typed field re-fires the pipeline
+  /// every frame with no depth cap (the cap is cascade-gated), so a
+  /// self-referential handler would hang. See the self-key echo in
+  /// [_onFieldValueChanged].
   int _programmaticEchoGuard = 0;
 
   late TabController _tabController;
@@ -795,13 +800,25 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
             final selfValue = patches[selfKey];
             WidgetsBinding.instance.addPostFrameCallback((_) {
               if (!mounted) return;
-              if (cascade) _programmaticEchoGuard++;
+              // The self-key echo guard is raised UNCONDITIONALLY (not just
+              // when cascading). The deferred patchValue re-fires this field's
+              // onChanged; for a typed field (Check/Date/Rating) FieldNormalizer
+              // changes the value's representation, so the echoed value never
+              // equals the doc-space value in _formData, `changed` stays true,
+              // and a self-referential handler re-fires forever across
+              // postFrameCallbacks — an uncapped infinite hang, because the
+              // depth cap lives only in the cascade-gated
+              // [_scheduleProgrammaticCascade]. Making the echo a pure
+              // state-sync no-op here bounds it regardless of the flag; no
+              // finite cascade-off case relies on this echo re-running the
+              // pipeline (see form_builder_cascade_test.dart).
+              _programmaticEchoGuard++;
               try {
                 _formKey.currentState?.patchValue(
                   _normalizePatchValues({selfKey: selfValue}),
                 );
               } finally {
-                if (cascade) _programmaticEchoGuard--;
+                _programmaticEchoGuard--;
               }
             });
           }
