@@ -345,4 +345,50 @@ void main() {
       );
     },
   );
+
+  testWidgets(
+    'cascade ON: numeric value-equality skips a representation-only re-fire '
+    '(10 vs "10.0")',
+    (tester) async {
+      // b starts at int 10. The handler for `a` patches b to the string
+      // "10.0" — numerically identical. The cascade value-equality must treat
+      // 10 == "10.0" and NOT re-fire b's handler. Pre-fix the trimmed-string
+      // compare ("10" != "10.0") let a representation-only change through as a
+      // harmless-but-avoidable extra self-terminating re-fire.
+      var bHandlerCalls = 0;
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: FrappeFormBuilder(
+              meta: DocTypeMeta(
+                name: 'TestDoctype',
+                fields: <DocField>[
+                  DocField(fieldname: 'a', fieldtype: 'Data', label: 'A'),
+                  DocField(fieldname: 'b', fieldtype: 'Float', label: 'B'),
+                ],
+              ),
+              initialData: const {'b': 10},
+              cascadeProgrammaticChanges: true,
+              onFieldChange: (name, value, data) {
+                if (name == 'a') return {'b': '10.0'};
+                if (name == 'b') bHandlerCalls++;
+                return null;
+              },
+            ),
+          ),
+        ),
+      );
+
+      await tester.enterText(find.byKey(const ValueKey('data_a')), 'go');
+      await tester.pumpAndSettle();
+
+      expect(
+        bHandlerCalls,
+        0,
+        reason:
+            'a numerically-equal patch (10 vs "10.0") must not re-fire b\'s '
+            'handler',
+      );
+    },
+  );
 }

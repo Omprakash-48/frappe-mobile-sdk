@@ -864,7 +864,7 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
       // Child-table payloads are patched wholesale, not treated as field edits.
       if (newValue is List || newValue is Map) continue;
       // Value-equality: skip fields whose value did not actually change.
-      if (_normForCascade(prior[entry.key]) == _normForCascade(newValue)) {
+      if (_cascadeValuesEqual(prior[entry.key], newValue)) {
         continue;
       }
       DocField? target;
@@ -884,9 +884,26 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
     }
   }
 
-  /// Normalise for cascade value-equality: trimmed string form, so `5`/`"5"`
-  /// compare equal and a null/absent value never spuriously "changes".
-  static String? _normForCascade(dynamic v) => v?.toString().trim();
+  /// Cascade value-equality. When BOTH operands parse as numbers they are
+  /// compared numerically, so `10`/`"10"`/`"10.0"`/`10.0` are all equal and a
+  /// representation change (e.g. a Float field re-emitting `"10.0"` for `10`)
+  /// does not trigger a spurious self-terminating re-fire. Otherwise falls back
+  /// to trimmed-string equality, so a null/absent value never spuriously
+  /// "changes" and non-numeric values (Link ids, Select text) compare as-is.
+  static bool _cascadeValuesEqual(dynamic a, dynamic b) {
+    final na = _asNum(a);
+    final nb = _asNum(b);
+    if (na != null && nb != null) return na == nb;
+    return a?.toString().trim() == b?.toString().trim();
+  }
+
+  /// Parse [v] to a [num] (int or double), or null if it is not numeric.
+  static num? _asNum(dynamic v) {
+    if (v is num) return v;
+    final s = v?.toString().trim();
+    if (s == null || s.isEmpty) return null;
+    return num.tryParse(s);
+  }
 
   Widget _buildFieldWidget(DocField field) {
     if (!_shouldShowField(field)) {
