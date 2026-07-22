@@ -474,6 +474,16 @@ class FrappeSDK {
     };
     _wireMetaRefreshInvalidation();
 
+    // This server's `frappe.client.get_list` rejects a wildcard `fields:['*']`
+    // ("Field not permitted in query: *"). Expand '*' to the doctype's real
+    // columns via the meta cache (~free after first load). Covers foreground
+    // reads, generic list screens (query_builder / .doc().get()), and the
+    // flat-doctype pull engine — all route through DoctypeService.list.
+    _client!.doctype.starFieldsResolver = (doctype) async {
+      final m = await _metaService!.getMeta(doctype);
+      return listableFieldnamesForStar(m);
+    };
+
     _syncService = SyncService(
       _client!,
       _repository!,
@@ -1673,4 +1683,39 @@ class FrappeSDK {
 
     _initialized = false;
   }
+}
+
+/// Concrete, `get_list`-safe column fieldnames for [meta] — used to expand a
+/// wildcard `['*']` request, which this server rejects. Skips layout-only and
+/// child-table field types (not real DB columns) and always includes the
+/// standard document columns. `workflow_state` / `status` are included
+/// automatically when present in the doctype's fields (workflow doctypes).
+List<String> listableFieldnamesForStar(DocTypeMeta meta) {
+  const skip = <String>{
+    'Section Break',
+    'Column Break',
+    'Tab Break',
+    'HTML',
+    'Button',
+    'Table',
+    'Table MultiSelect',
+    'Fold',
+    'Heading',
+  };
+  final out = <String>{
+    'name',
+    'owner',
+    'creation',
+    'modified',
+    'modified_by',
+    'docstatus',
+    'idx',
+  };
+  for (final f in meta.fields) {
+    final fn = f.fieldname;
+    if (fn == null || fn.isEmpty) continue;
+    if (skip.contains(f.fieldtype)) continue;
+    out.add(fn);
+  }
+  return out.toList();
 }

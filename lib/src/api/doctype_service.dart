@@ -16,6 +16,12 @@ class DoctypeService {
   final int listFullDocsPageSize;
   final int listDefaultPageSize;
 
+  /// Wired by [FrappeSDK] once [MetaService] exists. Expands a wildcard
+  /// `fields: ['*']` into the doctype's concrete column fieldnames, because
+  /// this server's `frappe.client.get_list` rejects `*` with
+  /// "Field not permitted in query: *". Null before wiring / in tests.
+  Future<List<String>> Function(String doctype)? starFieldsResolver;
+
   DoctypeService(
     this._restHelper, {
     this.listChildDocsPageSize = 1000,
@@ -81,7 +87,31 @@ class DoctypeService {
       'limit_page_length': resolvedLimit,
     };
 
-    if (fields != null) methodParams['fields'] = jsonEncode(fields);
+    // This server's `frappe.client.get_list` rejects the `*` wildcard
+    // ("Field not permitted in query: *"). When the caller asked for '*',
+    // expand it to the doctype's concrete column fieldnames via the wired
+    // [starFieldsResolver]; fall back to the original fields on any failure.
+    List<String>? effectiveFields = fields;
+    final resolver = starFieldsResolver;
+    if (fields != null && fields.contains('*') && resolver != null) {
+      try {
+        final expanded = await resolver(doctype);
+        if (expanded.isNotEmpty) {
+          effectiveFields = <String>{
+            ...expanded,
+            ...fields.where((f) => f != '*'),
+          }.toList();
+        }
+      } catch (e, st) {
+        sdkLog(
+          'DoctypeService.list: star-field expansion failed for '
+          '$doctype — $e\n$st',
+        );
+      }
+    }
+    if (effectiveFields != null) {
+      methodParams['fields'] = jsonEncode(effectiveFields);
+    }
     if (filters != null) methodParams['filters'] = jsonEncode(filters);
     if (orFilters != null && orFilters.isNotEmpty) {
       methodParams['or_filters'] = jsonEncode(orFilters);
