@@ -296,84 +296,98 @@ class _ChildTableSheetState extends State<_ChildTableSheet> {
 
   @override
   Widget build(BuildContext context) {
-    final height = MediaQuery.of(context).size.height * 0.85;
-    return SizedBox(
-      height: height,
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          Padding(
-            padding: const EdgeInsets.fromLTRB(16, 12, 16, 8),
-            child: Row(
-              children: [
-                Expanded(
-                  child: Text(
-                    widget.title,
-                    style: Theme.of(context).textTheme.titleLarge,
-                  ),
-                ),
-                IconButton(
-                  icon: const Icon(Icons.close),
-                  onPressed: () => Navigator.pop(context),
-                ),
-              ],
-            ),
-          ),
-          const Divider(height: 1),
-          Expanded(
-            child: widget.formBuilder(
-              widget.childMeta,
-              widget.initialData,
-              (data) => widget.onSubmit(data),
-              registerSubmit: (fn) {
-                _submitFn = fn;
-                WidgetsBinding.instance.addPostFrameCallback((_) {
-                  if (mounted) setState(() {});
-                });
-              },
-            ),
-          ),
-          const Divider(height: 1),
-          SafeArea(
-            child: Padding(
-              padding: const EdgeInsets.fromLTRB(16, 8, 16, 16),
+    final mq = MediaQuery.of(context);
+    final bottomInset = mq.viewInsets.bottom;
+    // Cap the sheet at 85% of the screen, but never taller than the space
+    // left once the on-screen keyboard is shown, so the focused field and
+    // the Save/Cancel footer stay visible instead of hiding behind it.
+    final maxHeight = mq.size.height * 0.85;
+    final available = mq.size.height - bottomInset;
+    final height = available < maxHeight ? available : maxHeight;
+    return Padding(
+      // Lift the sheet above the keyboard (viewInsets grows with it).
+      padding: EdgeInsets.only(bottom: bottomInset),
+      child: SizedBox(
+        height: height,
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 12, 16, 8),
               child: Row(
                 children: [
-                  if (widget.isEdit && widget.onRemove != null)
-                    TextButton.icon(
-                      onPressed: () => widget.onRemove!(),
-                      icon: const Icon(Icons.delete_outline, size: 20),
-                      label: const Text('Remove'),
-                      style: TextButton.styleFrom(foregroundColor: Colors.red),
+                  Expanded(
+                    child: Text(
+                      widget.title,
+                      style: Theme.of(context).textTheme.titleLarge,
                     ),
-                  if (widget.isEdit && widget.onRemove != null)
-                    const SizedBox(width: 8),
-                  const Spacer(),
-                  TextButton(
-                    onPressed: () => Navigator.pop(context),
-                    child: const Text('Cancel'),
                   ),
-                  const SizedBox(width: 8),
-                  FilledButton.icon(
-                    onPressed: _submitFn != null ? () => _submitFn!() : null,
-                    icon: _submitFn != null
-                        ? const Icon(Icons.check, size: 20)
-                        : const SizedBox(
-                            width: 16,
-                            height: 16,
-                            child: CircularProgressIndicator(
-                              strokeWidth: 2,
-                              valueColor:
-                                  AlwaysStoppedAnimation<Color>(Colors.white),
-                            ),
-                          ),
-                    label: const Text('Save'),
+                  IconButton(
+                    icon: const Icon(Icons.close),
+                    onPressed: () => Navigator.pop(context),
                   ),
                 ],
               ),
             ),
-          ),
-        ],
+            const Divider(height: 1),
+            Expanded(
+              child: widget.formBuilder(
+                widget.childMeta,
+                widget.initialData,
+                (data) => widget.onSubmit(data),
+                registerSubmit: (fn) {
+                  _submitFn = fn;
+                  WidgetsBinding.instance.addPostFrameCallback((_) {
+                    if (mounted) setState(() {});
+                  });
+                },
+              ),
+            ),
+            const Divider(height: 1),
+            SafeArea(
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(16, 8, 16, 16),
+                child: Row(
+                  children: [
+                    if (widget.isEdit && widget.onRemove != null)
+                      TextButton.icon(
+                        onPressed: () => widget.onRemove!(),
+                        icon: const Icon(Icons.delete_outline, size: 20),
+                        label: const Text('Remove'),
+                        style: TextButton.styleFrom(
+                          foregroundColor: Colors.red,
+                        ),
+                      ),
+                    if (widget.isEdit && widget.onRemove != null)
+                      const SizedBox(width: 8),
+                    const Spacer(),
+                    TextButton(
+                      onPressed: () => Navigator.pop(context),
+                      child: const Text('Cancel'),
+                    ),
+                    const SizedBox(width: 8),
+                    FilledButton.icon(
+                      onPressed: _submitFn != null ? () => _submitFn!() : null,
+                      icon: _submitFn != null
+                          ? const Icon(Icons.check, size: 20)
+                          : const SizedBox(
+                              width: 16,
+                              height: 16,
+                              child: CircularProgressIndicator(
+                                strokeWidth: 2,
+                                valueColor: AlwaysStoppedAnimation<Color>(
+                                  Colors.white,
+                                ),
+                              ),
+                            ),
+                      label: const Text('Save'),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }
