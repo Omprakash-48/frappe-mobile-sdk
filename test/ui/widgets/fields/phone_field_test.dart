@@ -64,6 +64,25 @@ void main() {
       expect(find.text('9876543210'), findsOneWidget);
     });
 
+    testWidgets('inner field wires a digits-only inputFormatter', (
+      tester,
+    ) async {
+      await _pumpPhone(
+        tester,
+        field: DocField(fieldname: 'phone', fieldtype: 'Phone', label: 'Phone'),
+      );
+      final tf = tester.widget<TextField>(find.byType(TextField));
+      expect(tf.inputFormatters, isNotNull);
+      var value = const TextEditingValue(
+        text: 'a1b2',
+        selection: TextSelection.collapsed(offset: 4),
+      );
+      for (final f in tf.inputFormatters!) {
+        value = f.formatEditUpdate(const TextEditingValue(), value);
+      }
+      expect(value.text, '12');
+    });
+
     testWidgets('onChanged stores back as +91-prefixed value', (tester) async {
       String? emitted;
       await _pumpPhone(
