@@ -143,6 +143,13 @@ class FormScreen extends StatefulWidget {
   /// supply an app-specific [FieldFactory] subclass to override field types.
   final FieldFactory? customFieldFactory;
 
+  /// Synchronous last-known connectivity, forwarded to Attach/Image fields.
+  /// When it returns false, an offline pick is stored as a durable local path
+  /// and queued at save instead of being uploaded inline. When null, fields
+  /// attempt the upload and fall back to the local path if it fails — so
+  /// correctness holds even if the host does not supply this.
+  final bool Function()? isOnline;
+
   const FormScreen({
     super.key,
     required this.meta,
@@ -178,6 +185,7 @@ class FormScreen extends StatefulWidget {
     this.controller,
     this.onControllerReady,
     this.customFieldFactory,
+    this.isOnline,
   });
 
   @override
@@ -199,6 +207,13 @@ class _FormScreenState extends State<FormScreen> with WidgetsBindingObserver {
   /// repo in [initState] / [didUpdateWidget] and refreshed on lifecycle
   /// resume + after a Retry tap so the banner reflects the latest state.
   List<OutboxRow> _syncErrorRows = const [];
+
+  /// `pending_attachments.id` → durable local path for this document, so
+  /// Attach/Image fields can preview a `pending:<id>` value (offline pick not
+  /// yet uploaded) from its local copy. Reloaded wherever the document
+  /// (re)loads — initState / didUpdateWidget / resume / after save — so it
+  /// never goes stale against the field markers.
+  Map<int, String> _pendingAttachmentPaths = const {};
 
   /// Baseline form data for dirty check. When current form data differs, show Save.
   Map<String, dynamic>? _baselineFormData;
@@ -284,6 +299,7 @@ class _FormScreenState extends State<FormScreen> with WidgetsBindingObserver {
     _baselineFormData = Map<String, dynamic>.from(_currentDocData);
     _loadWorkflowTransitions();
     _loadSyncErrors();
+    _loadPendingAttachmentPaths();
     widget.onFormDirtyChanged?.call(false);
 
     if (widget.mode == FormBuilderMode.reactive) {
@@ -344,6 +360,7 @@ class _FormScreenState extends State<FormScreen> with WidgetsBindingObserver {
     final route = _route;
     if (route != null && !route.isCurrent) return;
     _loadSyncErrors();
+    _loadPendingAttachmentPaths();
   }
 
   @override
@@ -363,6 +380,7 @@ class _FormScreenState extends State<FormScreen> with WidgetsBindingObserver {
       widget.onFormDirtyChanged?.call(false);
       _loadWorkflowTransitions();
       _loadSyncErrors();
+      _loadPendingAttachmentPaths();
     }
   }
 
@@ -385,6 +403,42 @@ class _FormScreenState extends State<FormScreen> with WidgetsBindingObserver {
       // Banner is best-effort; a query failure should never block the
       // form from rendering.
       sdkLog('FormScreen: _loadSyncErrors failed — $e\n$st');
+    }
+  }
+
+  Future<void> _loadPendingAttachmentPaths() async {
+    final localId = widget.document?.localId;
+    if (localId == null || localId.isEmpty) {
+      if (_pendingAttachmentPaths.isNotEmpty && mounted) {
+        setState(() => _pendingAttachmentPaths = const {});
+      }
+      return;
+    }
+    // Skip the DB round-trip for forms that can hold no attachment — either
+    // directly (Attach/Attach Image/Image) or inside a child table. Avoids a
+    // needless query (and any pending markers) on plain forms.
+    final canHoldAttachment = widget.meta.fields.any((f) {
+      final t = f.fieldtype;
+      return t == 'Attach' ||
+          t == 'Attach Image' ||
+          t == 'Image' ||
+          t == 'Table' ||
+          t == 'Table MultiSelect';
+    });
+    if (!canHoldAttachment) {
+      if (_pendingAttachmentPaths.isNotEmpty && mounted) {
+        setState(() => _pendingAttachmentPaths = const {});
+      }
+      return;
+    }
+    try {
+      final map = await widget.repository.pendingAttachmentLocalPaths(localId);
+      if (!mounted) return;
+      setState(() => _pendingAttachmentPaths = map);
+    } catch (e, st) {
+      // Preview resolution is best-effort; a lookup failure just falls back to
+      // the broken-image placeholder — never blocks the form.
+      sdkLog('FormScreen: _loadPendingAttachmentPaths failed — $e\n$st');
     }
   }
 
@@ -879,6 +933,9 @@ class _FormScreenState extends State<FormScreen> with WidgetsBindingObserver {
           _baselineFormData = savedData;
         });
         _isFormDirty.value = false;
+        // A save may have queued freshly-picked attachments; refresh the
+        // id→local-path map so any `pending:<id>` markers resolve in-place.
+        _loadPendingAttachmentPaths();
         showStatusSnackBar(
           context,
           sdkTr('Document saved successfully'),
@@ -1100,6 +1157,8 @@ class _FormScreenState extends State<FormScreen> with WidgetsBindingObserver {
                       : null,
                   fileUrlBase: widget.api?.baseUrl,
                   imageHeaders: widget.api?.requestHeaders,
+                  isOnline: widget.isOnline,
+                  pendingAttachmentPaths: _pendingAttachmentPaths,
                   fetchLinkedDocument: _fetchLinkedDocument,
                   getMeta: widget.metaService != null
                       ? (doctype) => widget.metaService!.getMeta(doctype)

@@ -8,6 +8,8 @@ import 'package:file_picker/file_picker.dart';
 import 'package:http/http.dart' as http;
 import 'package:path_provider/path_provider.dart';
 import 'package:open_filex/open_filex.dart';
+import '../../../utils/attachment_paths.dart';
+import '../../../utils/attachment_pick.dart';
 import 'base_field.dart';
 import 'field_helpers.dart';
 // Reuse the shared full-screen zoomable image viewer (showFullScreenImage /
@@ -33,6 +35,16 @@ class AttachField extends BaseField {
   /// can be fetched. Optional for backward-compat.
   final Map<String, String>? imageHeaders;
 
+  /// Synchronous last-known connectivity. When it returns false (offline) the
+  /// picked file is kept as a durable local path for save-time queueing instead
+  /// of being uploaded inline. Null → treated as online (upload attempted).
+  final bool Function()? isOnline;
+
+  /// Map of `pending_attachments.id` → durable local file path, used to resolve
+  /// a `pending:<id>` field value (an offline-picked file not yet uploaded)
+  /// for the filename label and View/Open action. Display-only.
+  final Map<int, String>? pendingAttachmentPaths;
+
   const AttachField({
     super.key,
     required super.field,
@@ -43,6 +55,8 @@ class AttachField extends BaseField {
     this.uploadFile,
     this.fileUrlBase,
     this.imageHeaders,
+    this.isOnline,
+    this.pendingAttachmentPaths,
   });
 
   static const Set<String> _imageExtensions = {
@@ -119,8 +133,25 @@ class AttachField extends BaseField {
         // consistency with text/numeric/etc field widgets.
         final current = (fieldState.value ?? filePath)?.trim();
         final hasValue = current != null && current.isNotEmpty;
-        final isServer = hasValue && _isServerUrl(current);
-        final isImage = hasValue && _isImage(current);
+        // Resolve a `pending:<id>` marker to its durable local file (display
+        // only; stored value stays the marker). Server URLs / local paths pass
+        // through. Null => an offline pick whose file isn't resolvable yet.
+        final displaySource = attachmentDisplaySource(
+          current,
+          pendingAttachmentPaths,
+        );
+        final isPendingUnresolved = hasValue &&
+            parsePendingMarkerId(current) != null &&
+            displaySource == null;
+        final isServer = displaySource != null && _isServerUrl(displaySource);
+        final isLocalFile = displaySource != null && !isServer;
+        final isImage = displaySource != null && _isImage(displaySource);
+        final hasViewable = isServer || isLocalFile;
+        final label = !hasValue
+            ? 'Select file'
+            : (displaySource != null
+                ? _getFileName(displaySource)
+                : (isPendingUnresolved ? 'Pending upload…' : _getFileName(current)));
         return Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
@@ -133,48 +164,40 @@ class AttachField extends BaseField {
                             final result = await FilePicker.pickFiles();
                             if (result != null &&
                                 result.files.single.path != null) {
-                              final path = result.files.single.path!;
-                              final file = File(path);
-                              if (uploadFile != null) {
-                                try {
-                                  final url = await uploadFile!(file);
-                                  if (url != null && url.isNotEmpty) {
-                                    fieldState.didChange(url);
-                                    onChanged?.call(url);
-                                  }
-                                  // On failure do not store local path (server expects file_url)
-                                } catch (e, st) {
-                                  debugPrint(
-                                    'AttachField: uploadFile failed — $e\n$st',
-                                  );
-                                }
-                              } else {
-                                fieldState.didChange(path);
-                                onChanged?.call(path);
+                              final picked = File(result.files.single.path!);
+                              // Durable-copy-first; upload inline when online,
+                              // else keep the local path for save-time queueing.
+                              final stored = await resolvePickedAttachment(
+                                picked: picked,
+                                online: isOnline?.call() ?? true,
+                                uploadFile: uploadFile,
+                              );
+                              if (stored != null && stored.isNotEmpty) {
+                                fieldState.didChange(stored);
+                                onChanged?.call(stored);
                               }
                             }
                           }
                         : null,
                     icon: const Icon(Icons.attach_file),
-                    label: Text(
-                      hasValue ? _getFileName(current) : 'Select file',
-                    ),
+                    label: Text(label),
                   ),
                 ),
                 // View/Open affordance — available even when the field is
                 // read-only/disabled so users can always view an attachment
-                // (QA #11).
-                if (hasValue)
+                // (QA #11). Hidden for an unresolved pending pick (nothing to
+                // open yet).
+                if (hasViewable)
                   _AttachViewButton(
                     // Images open in the shared full-screen viewer; other files
                     // are downloaded then opened externally.
                     url: isServer
-                        ? (_fullFileUrl(current) ?? current)
-                        : current,
-                    isLocal: !isServer,
+                        ? (_fullFileUrl(displaySource) ?? displaySource)
+                        : displaySource,
+                    isLocal: isLocalFile,
                     isImage: isImage,
                     headers: imageHeaders,
-                    fileName: _getFileName(current),
+                    fileName: _getFileName(displaySource),
                   ),
               ],
             ),
@@ -182,7 +205,9 @@ class AttachField extends BaseField {
               Padding(
                 padding: const EdgeInsets.only(top: 4.0),
                 child: Text(
-                  current,
+                  isPendingUnresolved
+                      ? 'Attached — pending upload'
+                      : (displaySource ?? current),
                   style: TextStyle(fontSize: 12, color: Colors.grey[600]),
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,

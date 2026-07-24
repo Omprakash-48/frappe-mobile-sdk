@@ -5,11 +5,17 @@ import '../database/field_type_mapping.dart';
 import '../database/normalize_for_search.dart';
 import '../database/schema/system_columns.dart';
 import '../database/sqlite_utils.dart';
+import '../database/daos/pending_attachment_dao.dart';
 import '../database/table_name.dart';
 import '../models/doc_type_meta.dart';
 import '../models/meta_resolver.dart';
 import '../sync/child_table_info.dart';
+import '../utils/attachment_paths.dart';
 import '../utils/sdk_log.dart';
+
+/// Docfield types whose value is a single file reference that the offline
+/// producer must copy + queue for upload.
+const Set<String> kAttachmentFieldTypes = {'Attach', 'Attach Image', 'Image'};
 
 /// Writes a form-save payload to the per-doctype `docs__<doctype>` parent
 /// table and `docs__<child_doctype>` child tables in a single transaction.
@@ -129,6 +135,41 @@ class LocalWriter {
     if (!await sqliteTableExists(txn, parentTable)) return;
     final nowMs = DateTime.now().toUtc().millisecondsSinceEpoch;
 
+    // Offline attachment producer: any attach-field value that is still a
+    // local file path is copied-at-pick already, so here we only queue it
+    // (with its exact parent/child coordinates) and replace the stored value
+    // with a `pending:<id>` marker the push pipeline resolves to a file_url.
+    final attachDao = PendingAttachmentDao(txn);
+    Future<Object?> queueIfLocalAttachment({
+      required Object? value,
+      required String fieldType,
+      required String rowUuid,
+      required String rowDoctype,
+      required String fieldname,
+    }) async {
+      if (!kAttachmentFieldTypes.contains(fieldType)) return value;
+      if (!isLocalAttachmentPath(value)) return value;
+      final path = (value as String).trim();
+      // Idempotency: the (parent_uuid, parent_fieldname) index is not UNIQUE,
+      // so a re-pick/re-save would otherwise stack duplicate rows. Drop any
+      // prior queue row for this exact field before inserting the fresh one.
+      await txn.delete(
+        'pending_attachments',
+        where: 'parent_uuid = ? AND parent_fieldname = ?',
+        whereArgs: [rowUuid, fieldname],
+      );
+      final id = await attachDao.enqueue(
+        parentDoctype: rowDoctype,
+        parentUuid: rowUuid,
+        parentFieldname: fieldname,
+        topParentUuid: mobileUuid,
+        topParentDoctype: parentDoctype,
+        localPath: path,
+        fileName: path.split('/').last,
+      );
+      return 'pending:$id';
+    }
+
     final childInfos = <String, ChildTableInfo>{};
     for (final f in parentMeta.fields) {
       final ft = f.fieldtype;
@@ -177,7 +218,14 @@ class LocalWriter {
       if (_systemParentColumns.contains(name)) continue;
       if (!data.containsKey(name)) continue;
 
-      final v = _coerce(data[name], sqlType);
+      var v = _coerce(data[name], sqlType);
+      v = await queueIfLocalAttachment(
+        value: v,
+        fieldType: type,
+        rowUuid: mobileUuid,
+        rowDoctype: parentDoctype,
+        fieldname: name,
+      );
       parentRow[name] = v;
 
       if (isLinkFieldType(type)) {
@@ -243,7 +291,14 @@ class LocalWriter {
           if (_systemChildColumns.contains(cn)) continue;
           if (!cr.containsKey(cn)) continue;
 
-          final v = _coerce(cr[cn], cSqlType);
+          var v = _coerce(cr[cn], cSqlType);
+          v = await queueIfLocalAttachment(
+            value: v,
+            fieldType: ct,
+            rowUuid: childUuid,
+            rowDoctype: childInfo.doctype,
+            fieldname: cn,
+          );
           childRow[cn] = v;
           if (isLinkFieldType(ct)) {
             childRow['${cn}__is_local'] =

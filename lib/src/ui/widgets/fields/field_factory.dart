@@ -77,6 +77,8 @@ class FieldFactory {
     LinkFilterBuilder? Function(String doctype, String fieldname)?
     getLinkFilterBuilder,
     ValueChanged<bool>? onIsLocalChanged,
+    bool Function()? isOnline,
+    Map<int, String>? pendingAttachmentPaths,
   }) {
     if (field.hidden) {
       return null;
@@ -265,6 +267,8 @@ class FieldFactory {
           uploadFile: uploadFile,
           fileUrlBase: fileUrlBase,
           imageHeaders: imageHeaders,
+          isOnline: isOnline,
+          pendingAttachmentPaths: pendingAttachmentPaths,
         );
 
       case FieldTypes.attachImage:
@@ -278,6 +282,8 @@ class FieldFactory {
           uploadFile: uploadFile,
           fileUrlBase: fileUrlBase,
           imageHeaders: imageHeaders,
+          isOnline: isOnline,
+          pendingAttachmentPaths: pendingAttachmentPaths,
         );
 
       case FieldTypes.html:

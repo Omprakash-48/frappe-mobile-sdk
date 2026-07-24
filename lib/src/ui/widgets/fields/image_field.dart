@@ -5,6 +5,8 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter_form_builder/flutter_form_builder.dart';
 import 'package:image_picker/image_picker.dart';
+import '../../../utils/attachment_paths.dart';
+import '../../../utils/attachment_pick.dart';
 import 'base_field.dart';
 import 'field_helpers.dart';
 
@@ -88,6 +90,17 @@ class ImageField extends BaseField {
   /// Auth headers (e.g. from [FrappeClient.requestHeaders]) so private file URLs load.
   final Map<String, String>? imageHeaders;
 
+  /// Synchronous last-known connectivity. Offline → the captured image is kept
+  /// as a durable local path for save-time queueing instead of inline upload.
+  /// Null → treated as online.
+  final bool Function()? isOnline;
+
+  /// Map of `pending_attachments.id` → durable local file path, used to render
+  /// a preview for a `pending:<id>` field value (an offline-picked image not
+  /// yet uploaded). Loaded from the document; display-only — never alters the
+  /// stored marker value.
+  final Map<int, String>? pendingAttachmentPaths;
+
   const ImageField({
     super.key,
     required super.field,
@@ -98,6 +111,8 @@ class ImageField extends BaseField {
     this.uploadFile,
     this.fileUrlBase,
     this.imageHeaders,
+    this.isOnline,
+    this.pendingAttachmentPaths,
   });
 
   /// Only Frappe server file paths or full URLs are treated as server URLs.
@@ -151,21 +166,16 @@ class ImageField extends BaseField {
     FormFieldState<String> fieldState,
     File file,
   ) async {
-    if (uploadFile != null) {
-      try {
-        final url = await uploadFile!(file);
-        if (url != null && url.isNotEmpty) {
-          fieldState.didChange(url);
-          onChanged?.call(url);
-        }
-        // On upload failure or empty response, do not store local path (server expects file_url)
-      } catch (e, st) {
-        // Do not fall back to local path; leave field unchanged so wrong URL is never sent
-        debugPrint('ImageField: uploadFile failed — $e\n$st');
-      }
-    } else {
-      fieldState.didChange(file.path);
-      onChanged?.call(file.path);
+    // Durable-copy-first (survives camera-process kill / cache reclaim); upload
+    // inline when online, else keep the local path for save-time queueing.
+    final stored = await resolvePickedAttachment(
+      picked: file,
+      online: isOnline?.call() ?? true,
+      uploadFile: uploadFile,
+    );
+    if (stored != null && stored.isNotEmpty) {
+      fieldState.didChange(stored);
+      onChanged?.call(stored);
     }
   }
 
@@ -186,8 +196,17 @@ class ImageField extends BaseField {
       builder: (FormFieldState<String> fieldState) {
         final raw = fieldState.value ?? imagePath;
         final currentValue = raw?.toString().trim();
-        final isUrl = _isServerUrl(currentValue);
-        final displayUrl = isUrl ? _fullImageUrl(currentValue) : null;
+        // Resolve a `pending:<id>` marker to its durable local file for the
+        // preview ONLY; the stored value stays `currentValue`. Server URLs and
+        // plain local paths pass through unchanged. Null => not yet resolvable
+        // (file gone / map stale) => broken-image placeholder, value kept.
+        final displaySource = attachmentDisplaySource(
+          currentValue,
+          pendingAttachmentPaths,
+        );
+        final isUrl = _isServerUrl(displaySource);
+        final isLocalFile = !isUrl && displaySource != null;
+        final displayUrl = isUrl ? _fullImageUrl(displaySource) : null;
 
         // BaseField.build (the enclosing widget) already renders the
         // external label with required-asterisk; the inline label that
@@ -205,10 +224,10 @@ class ImageField extends BaseField {
                   onTap: () {
                     if (_isFullUrl(displayUrl)) {
                       showFullScreenImage(context, displayUrl!, imageHeaders);
-                    } else if (!isUrl) {
+                    } else if (isLocalFile) {
                       showFullScreenImageProvider(
                         context,
-                        FileImage(File(currentValue)),
+                        FileImage(File(displaySource)),
                       );
                     }
                   },
@@ -231,9 +250,9 @@ class ImageField extends BaseField {
                                   );
                                 },
                               )
-                            : !isUrl
+                            : isLocalFile
                             ? Image.file(
-                                File(currentValue),
+                                File(displaySource),
                                 height: 150,
                                 width: double.infinity,
                                 fit: BoxFit.cover,
@@ -255,7 +274,7 @@ class ImageField extends BaseField {
                       ),
                       // 'Tap to view' affordance — only shown when the image is
                       // actually viewable full-screen.
-                      if (_isFullUrl(displayUrl) || !isUrl)
+                      if (_isFullUrl(displayUrl) || isLocalFile)
                         Positioned(
                           right: 8,
                           bottom: 8,

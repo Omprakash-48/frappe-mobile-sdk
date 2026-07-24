@@ -4,6 +4,7 @@ import 'package:flutter/foundation.dart';
 
 import '../database/daos/pending_attachment_dao.dart';
 import '../models/pending_attachment.dart';
+import '../utils/attachment_storage.dart';
 import 'push_error.dart';
 
 typedef AttachmentUploadFn =
@@ -124,6 +125,10 @@ class AttachmentPipeline {
           serverFileName: fileName ?? fileUrl,
           serverFileUrl: fileUrl,
         );
+        // The durable local copy has served its purpose — reclaim the disk.
+        // Best-effort; a leftover file is harmless (re-upload is guarded by
+        // the recorded server_file_url above).
+        await deleteAttachmentCopy(p.localPath);
         return AttachmentUploadResult(fileName: fileName ?? fileUrl, fileUrl: fileUrl);
       } catch (e, st) {
         debugPrint(

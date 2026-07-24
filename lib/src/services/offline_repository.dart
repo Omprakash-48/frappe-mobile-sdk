@@ -1086,6 +1086,32 @@ class OfflineRepository {
   ///
   /// The DB fetch (this method) and the merge ([mergeChildRowsIntoData]) are
   /// split so the merge can be unit-tested with plain maps, no database.
+  /// Returns `pending_attachments.id` → durable `local_path` for every queued
+  /// attachment under [topParentUuid] (parent + child rows). The UI uses this
+  /// to preview an offline-picked file whose field still holds a `pending:<id>`
+  /// marker, rendering it from the local copy until the push pipeline uploads
+  /// it and rewrites the field to a server `file_url`. Empty when the table is
+  /// absent or nothing is queued.
+  Future<Map<int, String>> pendingAttachmentLocalPaths(
+    String topParentUuid,
+  ) async {
+    final db = _database.rawDatabase;
+    if (!await sqliteTableExists(db, 'pending_attachments')) return {};
+    final rows = await db.query(
+      'pending_attachments',
+      columns: ['id', 'local_path'],
+      where: 'top_parent_uuid = ?',
+      whereArgs: [topParentUuid],
+    );
+    final out = <int, String>{};
+    for (final r in rows) {
+      final id = r['id'] as int?;
+      final path = r['local_path'] as String?;
+      if (id != null && path != null && path.isNotEmpty) out[id] = path;
+    }
+    return out;
+  }
+
   Future<Document> attachChildRows(
     String doctype,
     Document doc,
