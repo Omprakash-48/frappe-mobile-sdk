@@ -144,7 +144,25 @@ class PullEngine {
       return;
     }
 
-    final meta = await metaResolver(doctype);
+    final DocTypeMeta meta;
+    try {
+      meta = await metaResolver(doctype);
+    } catch (e, st) {
+      // A doctype whose meta can't be resolved — e.g. a server 500 from a
+      // doctype missing its controller module, or a permission failure — must
+      // be SKIPPED, never abort the whole closure pull. Without this the throw
+      // escapes _runDoctype, the pool task fails, Future.wait rethrows and
+      // run() aborts, stranding every OTHER doctype ("core data did not
+      // download"; retry re-hits the same failure and stalls).
+      sdkLog(
+        'PullEngine._runDoctype($doctype): meta resolve failed, skipping — $e\n$st',
+      );
+      notifier.value = notifier.value.updatePerDoctype(
+        doctype,
+        DoctypeSyncState(note: 'failed (meta): $e'),
+      );
+      return;
+    }
 
     // Reconcile the on-disk schema against THIS meta snapshot before
     // applying any pages. Closes the SNF/SDK race where the table was
@@ -184,7 +202,22 @@ class PullEngine {
       for (final edge in graph.outgoing.where(
         (e) => e.kind == DepEdgeKind.child,
       )) {
-        final childMeta = await metaResolver(edge.targetDoctype);
+        final DocTypeMeta childMeta;
+        try {
+          childMeta = await metaResolver(edge.targetDoctype);
+        } catch (e, st) {
+          // Can't apply a parent's pages without its child schema — skip the
+          // parent doctype rather than aborting the entire pull.
+          sdkLog(
+            'PullEngine._runDoctype($doctype): child meta '
+            '${edge.targetDoctype} resolve failed, skipping — $e\n$st',
+          );
+          notifier.value = notifier.value.updatePerDoctype(
+            doctype,
+            DoctypeSyncState(note: 'failed (child meta): $e'),
+          );
+          return;
+        }
         childInfo[edge.field] = PullApplyChildInfo(
           edge.targetDoctype,
           childMeta,

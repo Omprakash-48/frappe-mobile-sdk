@@ -362,6 +362,85 @@ void main() {
     expect(await metaDao.getLastOkCursor('Lead'), isNotNull);
   });
 
+  test(
+    'a doctype whose meta cannot be resolved is skipped, not fatal to the pull',
+    () async {
+      // Regression: a getDocTypeMeta 500 (e.g. a doctype missing its server
+      // controller module) previously escaped _runDoctype -> Future.wait
+      // rethrew -> run() aborted, stranding every OTHER doctype. It must now
+      // skip the bad doctype and still pull the rest.
+      var custCalls = 0;
+      final fetcher = PullPageFetcher(
+        listHttp: (doctype, params) async {
+          if (doctype == 'Customer') {
+            custCalls++;
+            return custCalls == 1
+                ? [
+                    {
+                      'name': 'C-1',
+                      'modified': '2026-01-01',
+                      'customer_name': 'X',
+                    },
+                  ]
+                : const <Map<String, dynamic>>[];
+          }
+          return const <Map<String, dynamic>>[];
+        },
+      );
+      final closure = const ClosureResult(
+        doctypes: ['Machinery Flow', 'Customer'],
+        graph: {
+          'Machinery Flow': DepGraph(
+            doctype: 'Machinery Flow',
+            tier: 0,
+            outgoing: [],
+            incoming: [],
+          ),
+          'Customer': DepGraph(
+            doctype: 'Customer',
+            tier: 0,
+            outgoing: [],
+            incoming: [],
+          ),
+        },
+        childDoctypes: {},
+        warnings: [],
+      );
+      final notifier = SyncStateNotifier();
+      final engine = PullEngine(
+        db: db,
+        metaDao: metaDao,
+        outboxDao: OutboxDao(db),
+        pool: ConcurrencyPool(maxConcurrent: 2),
+        fetcher: fetcher,
+        pageSize: 500,
+        notifier: notifier,
+        metaResolver: (dt) async {
+          if (dt == 'Machinery Flow') {
+            throw Exception(
+              "No module named 'prime_rural...machinery_flow' (Status: 500)",
+            );
+          }
+          return DocTypeMeta(name: dt, fields: [f('customer_name', 'Data')]);
+        },
+      );
+
+      // Must NOT throw despite Machinery Flow's meta failure.
+      await engine.run(closure);
+
+      // The healthy doctype still pulled fully.
+      expect((await db.query('docs__customer')).length, 1);
+      expect(await metaDao.getLastOkCursor('Customer'), isNotNull);
+      expect(notifier.value.perDoctype['Customer']!.completedAt, isNotNull);
+
+      // The failing doctype was skipped: recorded as failed, never completed.
+      final mf = notifier.value.perDoctype['Machinery Flow'];
+      expect(mf, isNotNull);
+      expect(mf!.note, contains('failed (meta)'));
+      expect(mf.completedAt, isNull);
+    },
+  );
+
   test('WriteQueue is engaged when writeQueueResolver is provided', () async {
     var calls = 0;
     final fetcher = PullPageFetcher(
