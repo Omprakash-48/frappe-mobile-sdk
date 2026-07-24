@@ -85,4 +85,39 @@ void main() {
       throwsA(isA<FilterParseError>()),
     );
   });
+
+  test('absent standard audit column (owner) is dropped, not thrown', () {
+    final meta = DocTypeMeta(name: 'X', fields: [f('a', 'Data')]);
+    // `owner` is a Frappe framework field not materialized offline; a server
+    // link_filter on it must be silently dropped, never throw.
+    final pq = FilterParser.toSql(
+      meta: meta,
+      tableName: 'docs__x',
+      filters: [
+        ['owner', '=', 'someone@example.com'],
+        ['a', '=', 'keep'],
+      ],
+      page: 0,
+      pageSize: 10,
+    );
+    expect(pq.params, contains('keep'));
+    expect(pq.params, isNot(contains('someone@example.com')));
+    expect(pq.sql, isNot(contains('owner')));
+  });
+
+  test('genuinely-unknown column still throws (not silently dropped)', () {
+    final meta = DocTypeMeta(name: 'X', fields: [f('a', 'Data')]);
+    expect(
+      () => FilterParser.toSql(
+        meta: meta,
+        tableName: 'docs__x',
+        filters: [
+          ['nonexistent_field', '=', 'x'],
+        ],
+        page: 0,
+        pageSize: 10,
+      ),
+      throwsA(isA<FilterParseError>()),
+    );
+  });
 }

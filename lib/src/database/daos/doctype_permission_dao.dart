@@ -38,6 +38,27 @@ class DoctypePermissionDao {
     await batch.commit(noResult: true);
   }
 
+  /// Full-replace the permission cache in a single transaction: clears every
+  /// row then inserts [entities]. Use for an AUTHORITATIVE refresh (the full
+  /// `mobile_auth.permissions` set) so doctypes revoked server-side are pruned.
+  /// No-ops on an empty list so a transient/empty server response can never
+  /// wipe a good cache.
+  Future<void> replaceAll(List<DoctypePermissionEntity> entities) async {
+    if (entities.isEmpty) return;
+    await _database.transaction((txn) async {
+      await txn.delete('doctype_permission');
+      final batch = txn.batch();
+      for (final e in entities) {
+        batch.insert(
+          'doctype_permission',
+          e.toDb(),
+          conflictAlgorithm: ConflictAlgorithm.replace,
+        );
+      }
+      await batch.commit(noResult: true);
+    });
+  }
+
   Future<void> deleteAll() async {
     await _database.delete('doctype_permission');
   }

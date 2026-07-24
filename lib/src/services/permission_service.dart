@@ -15,23 +15,11 @@ class PermissionService {
   /// - List: [ { "doctype": "X", "read": true, "write": false, ... }, ... ]
   /// - Map (legacy): { "roles": [...], "permissions": { "DocType": { "read": true, ... } } }
   Future<void> saveFromLoginResponse(dynamic permissions) async {
-    if (permissions == null) return;
-    if (permissions is List) {
-      final map = <String, Map<String, dynamic>>{};
-      for (final item in permissions) {
-        if (item is Map<String, dynamic>) {
-          final doctype = item['doctype']?.toString();
-          if (doctype != null && doctype.isNotEmpty) {
-            map[doctype] = item;
-          }
-        }
-      }
-      if (map.isNotEmpty) await _savePermissionMap(map);
-      return;
-    }
-    if (permissions is Map<String, dynamic>) {
-      final map = permissions['permissions'] as Map<String, dynamic>?;
-      if (map != null) await _savePermissionMap(map);
+    final entities = _parsePermissions(permissions);
+    if (entities.isNotEmpty) {
+      // Login payloads may be a SUBSET (e.g. an SSO endpoint returning only
+      // role-matched doctypes), so upsert — never wipe the fuller cached set.
+      await _database.doctypePermissionDao.upsertAll(entities);
     }
   }
 
@@ -50,22 +38,48 @@ class PermissionService {
     );
     if (result is! Map<String, dynamic>) return null;
     final data = result['data'] as Map<String, dynamic>? ?? result;
-    await saveFromLoginResponse(data['permissions']);
+    // Authoritative full set → full-replace so doctypes revoked server-side are
+    // pruned. `replaceAll` no-ops on empty, so a transient server error (which
+    // returns an empty permissions list) can never wipe a good cache.
+    final entities = _parsePermissions(data['permissions']);
+    await _database.doctypePermissionDao.replaceAll(entities);
     return data;
   }
 
-  Future<void> _savePermissionMap(Map<String, dynamic> map) async {
+  /// Parse a login / permissions payload into entities. Accepts both shapes the
+  /// backend can emit:
+  /// - List (current): `[{ "doctype": "X", "read": true|1|"1", ... }]`
+  /// - Map (legacy): `{ "permissions": { "X": { "read": ... } } }`
+  /// Flag coercion (bool / int / string) lives in [DoctypePermissionEntity.fromApiMap].
+  List<DoctypePermissionEntity> _parsePermissions(dynamic permissions) {
     final entities = <DoctypePermissionEntity>[];
-    for (final entry in map.entries) {
-      final doctype = entry.key.toString();
-      final value = entry.value;
-      if (value is Map<String, dynamic>) {
-        entities.add(DoctypePermissionEntity.fromApiMap(doctype, value));
+    if (permissions == null) return entities;
+    if (permissions is List) {
+      for (final item in permissions) {
+        if (item is Map) {
+          final m = Map<String, dynamic>.from(item);
+          final doctype = m['doctype']?.toString();
+          if (doctype != null && doctype.isNotEmpty) {
+            entities.add(DoctypePermissionEntity.fromApiMap(doctype, m));
+          }
+        }
+      }
+    } else if (permissions is Map) {
+      final inner = permissions['permissions'];
+      if (inner is Map) {
+        inner.forEach((key, value) {
+          if (value is Map) {
+            entities.add(
+              DoctypePermissionEntity.fromApiMap(
+                key.toString(),
+                Map<String, dynamic>.from(value),
+              ),
+            );
+          }
+        });
       }
     }
-    if (entities.isNotEmpty) {
-      await _database.doctypePermissionDao.upsertAll(entities);
-    }
+    return entities;
   }
 
   Future<DoctypePermissionEntity?> getDoctypePermission(String doctype) async {

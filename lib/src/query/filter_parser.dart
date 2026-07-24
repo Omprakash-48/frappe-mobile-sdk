@@ -59,6 +59,18 @@ class FilterParser {
     'idx': 'INTEGER',
   };
 
+  /// Frappe framework audit fields that the offline schema never materializes
+  /// (see `parent_schema.dart` / `system_columns.dart`). A server link_filter
+  /// may reference them (e.g. the entrepreneur link_filters use `owner`);
+  /// OFFLINE we DROP such a clause instead of throwing, because the local
+  /// cache is already server-permission-scoped so the clause is effectively
+  /// pre-applied. Genuinely-unknown columns (typos, real fields) still error.
+  static const Set<String> _skippableAbsentColumns = {
+    'owner',
+    'creation',
+    'modified_by',
+  };
+
   static ParsedQuery toSql({
     required DocTypeMeta meta,
     required String tableName,
@@ -150,6 +162,14 @@ class FilterParser {
       }
       if (f.length != 3) {
         throw FilterParseError(malformedMessage(f));
+      }
+      final col0 = f[0];
+      if (col0 is String &&
+          _skippableAbsentColumns.contains(col0) &&
+          !colTypes.containsKey(col0)) {
+        // Standard audit field not materialized offline — drop the clause
+        // rather than throwing (see [_skippableAbsentColumns]).
+        continue;
       }
       final parsed = _parseOne(f, colTypes, normFields);
       sqlParts.add(parsed.sql);

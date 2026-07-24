@@ -43,7 +43,17 @@ class AuthService {
         .toList();
   }
 
-  bool _isRefreshingToken = false;
+  /// In-flight refresh, shared so concurrent 401s (e.g. the parallel closure
+  /// meta fetches) await the SAME refresh instead of each starting their own
+  /// or bailing out.
+  Future<bool>? _refreshInFlight;
+
+  /// Mirrors mobile-control's ACCESS_TOKEN_TTL_SECONDS (24h). Used ONLY to
+  /// proactively refresh an aged Bearer on restore; the reactive 401->refresh
+  /// path is the safety net for any backend whose TTL differs, so this is an
+  /// optimization, not a hard assumption.
+  static const Duration _mobileAccessTokenTtl = Duration(hours: 24);
+  static const Duration _tokenRefreshSkew = Duration(minutes: 5);
   AppDatabase? _database;
   List<String> _roles = [];
   String? _language;
@@ -430,6 +440,31 @@ class AuthService {
       try {
         final token = await _database!.authTokenDao.getCurrentToken();
         if (token != null && token.accessToken.isNotEmpty) {
+          final ageMs =
+              DateTime.now().millisecondsSinceEpoch - token.createdAt;
+          if (ageMs >=
+              _mobileAccessTokenTtl.inMilliseconds -
+                  _tokenRefreshSkew.inMilliseconds) {
+            // Aged token: refresh BEFORE any sync fires so the boot pull never
+            // starts with an about-to-expire Bearer (which would 401 the first
+            // call and, under the concurrent closure pull, cascade to guest
+            // 403s). _tryRefreshMobileAuthToken reads the refresh token from
+            // the DAO and hits the guest endpoint, so no Bearer is needed.
+            final refreshed = await _tryRefreshMobileAuthToken();
+            if (refreshed) {
+              _isAuthenticated = true;
+              _cachedUserInfo = (
+                email: token.user,
+                fullName: token.fullName ?? token.user,
+              );
+              return true;
+            }
+            // Could not refresh (e.g. an external/SSO refresh token that
+            // mobile_auth.refresh_token cannot redeem): do NOT install a
+            // known-expiring Bearer — require re-login instead of guest-403ing
+            // the entire boot sync.
+            return false;
+          }
           _client!.rest.setBearerToken(token.accessToken);
           _isAuthenticated = true;
           _cachedUserInfo = (
@@ -705,73 +740,75 @@ class AuthService {
     }
   }
 
-  Future<bool> _tryRefreshMobileAuthToken() async {
-    if (_isRefreshingToken) {
-      return false;
-    }
-    _isRefreshingToken = true;
-    // Try mobile auth refresh first
-    try {
-      if (_database != null) {
-        try {
-          final token = await _database!.authTokenDao.getCurrentToken();
-          if (token != null && token.refreshToken.isNotEmpty) {
-            final baseUrl = await getBaseUrl();
-            if (baseUrl != null) {
-              // Ensure refresh call is not sent with an expired Bearer token
-              _client?.rest.setBearerToken(null);
-              // Call mobile_auth.refresh_token endpoint
-              try {
-                final result = await _client!.rest.call(
-                  'mobile_auth.refresh_token',
-                  args: {'refresh_token': token.refreshToken},
-                );
-                final response = result is Map<String, dynamic>
-                    ? result
-                    : <String, dynamic>{};
-                final newAccessToken = response['access_token'] as String?;
-                final newRefreshToken =
-                    response['refresh_token'] as String? ?? token.refreshToken;
+  /// Single-flight wrapper: concurrent 401s share ONE in-flight refresh and
+  /// its result, instead of each firing a competing refresh or bailing with
+  /// `false` (which previously left the sibling closure fetches unretried).
+  Future<bool> _tryRefreshMobileAuthToken() {
+    return _refreshInFlight ??= _doRefreshMobileAuthToken().whenComplete(() {
+      _refreshInFlight = null;
+    });
+  }
 
-                if (newAccessToken != null && newAccessToken.isNotEmpty) {
-                  final updatedToken = AuthTokenEntity(
-                    accessToken: newAccessToken,
-                    refreshToken: newRefreshToken,
-                    user: token.user,
-                    fullName: token.fullName,
-                    createdAt: token.createdAt,
-                  );
-                  await _database!.authTokenDao.updateToken(updatedToken);
-                  _client?.rest.setBearerToken(newAccessToken);
-                  _isAuthenticated = true;
-                  return true;
-                }
-              } catch (e, st) {
-                dev.log(
-                  '_tryRefreshMobileAuthToken: refresh call failed, clearing tokens — $e\n$st',
-                  name: 'Auth',
+  Future<bool> _doRefreshMobileAuthToken() async {
+    // Try mobile auth refresh first.
+    if (_database != null) {
+      try {
+        final token = await _database!.authTokenDao.getCurrentToken();
+        if (token != null && token.refreshToken.isNotEmpty) {
+          final baseUrl = await getBaseUrl();
+          if (baseUrl != null) {
+            try {
+              // mobile_auth.refresh_token is allow_guest — send it
+              // UNAUTHENTICATED (callPublic) so it never touches the shared
+              // Bearer. Nulling the Bearer here would race the in-flight
+              // concurrent requests, dropping them to Guest -> 403.
+              final result = await _client!.rest.callPublic(
+                'mobile_auth.refresh_token',
+                args: {'refresh_token': token.refreshToken},
+              );
+              final response = result is Map<String, dynamic>
+                  ? result
+                  : <String, dynamic>{};
+              final newAccessToken = response['access_token'] as String?;
+              final newRefreshToken =
+                  response['refresh_token'] as String? ?? token.refreshToken;
+
+              if (newAccessToken != null && newAccessToken.isNotEmpty) {
+                final updatedToken = AuthTokenEntity(
+                  accessToken: newAccessToken,
+                  refreshToken: newRefreshToken,
+                  user: token.user,
+                  fullName: token.fullName,
+                  createdAt: DateTime.now().millisecondsSinceEpoch,
                 );
-                await _database!.authTokenDao.deleteAll();
+                await _database!.authTokenDao.updateToken(updatedToken);
+                _client?.rest.setBearerToken(newAccessToken);
+                _isAuthenticated = true;
+                return true;
               }
+            } catch (e, st) {
+              dev.log(
+                '_doRefreshMobileAuthToken: refresh call failed, clearing tokens — $e\n$st',
+                name: 'Auth',
+              );
+              await _database!.authTokenDao.deleteAll();
             }
           }
-        } catch (e, st) {
-          dev.log(
-            '_tryRefreshMobileAuthToken: token DAO read failed, falling back to OAuth — $e\n$st',
-            name: 'Auth',
-          );
         }
+      } catch (e, st) {
+        dev.log(
+          '_doRefreshMobileAuthToken: token DAO read failed, falling back to OAuth — $e\n$st',
+          name: 'Auth',
+        );
       }
-
-      // Fallback to OAuth refresh
-      final refreshed = await _tryRefreshOAuthToken();
-      if (!refreshed) {
-        _isAuthenticated = false;
-      }
-      return refreshed;
-    } finally {
-      _isRefreshingToken = false;
     }
+
+    // Fallback to OAuth refresh.
+    final refreshed = await _tryRefreshOAuthToken();
+    if (!refreshed) {
+      _isAuthenticated = false;
+    }
+    return refreshed;
   }
 
   Future<bool> _tryRefreshOAuthToken() async {

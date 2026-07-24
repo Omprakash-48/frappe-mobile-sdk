@@ -777,7 +777,29 @@ class FrappeSDK {
     }
     _setSessionUserFromLoginResponse(response);
     await _persistOfflineFlagFromLogin(response);
+    // Belt-and-suspenders: pull the AUTHORITATIVE full permission set
+    // (mobile_auth.permissions) so an external/SSO login that carried only a
+    // subset — or a quirky Check-flag shape — is normalised right after login.
+    // Online-gated + non-fatal; the login-response permissions are already
+    // persisted (and correctly coerced) above.
+    await _refreshPermissionsBestEffort();
     return response;
+  }
+
+  /// Best-effort authoritative permission refresh: pulls the full set from
+  /// `mobile_auth.permissions` and full-replaces the local cache. Online-gated
+  /// and non-fatal — a failure never blocks login or pull-to-refresh, since the
+  /// login-response permissions are already persisted by [saveFromLoginResponse].
+  Future<void> _refreshPermissionsBestEffort() async {
+    final ps = _permissionService;
+    if (ps == null) return;
+    try {
+      final onlineCheck = _isOnlineOverrideForTesting ?? _syncService?.isOnline;
+      if (onlineCheck == null || !await onlineCheck()) return;
+      await ps.syncFromApi(timeout: const Duration(seconds: 10));
+    } catch (e, st) {
+      sdkLog('FrappeSDK: best-effort permission refresh failed — $e\n$st');
+    }
   }
 
   /// Login with API key
@@ -1563,6 +1585,9 @@ class FrappeSDK {
       return;
     }
     try {
+      // Force pull (pull-to-refresh) always reconciles permissions against the
+      // authoritative endpoint. Best-effort: never blocks the data pull.
+      await _refreshPermissionsBestEffort();
       final entryPoints = await _metaService!.getMobileFormDoctypeNames();
       final closure = await _metaService!.closure(entryPoints);
       final pullable = await _buildPullableDoctypes(
