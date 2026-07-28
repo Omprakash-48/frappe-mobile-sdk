@@ -117,18 +117,31 @@ class ChildTableField extends StatelessWidget {
 
   Future<String> _rowTitle(Map<String, dynamic> row) async {
     final meta = await getMeta?.call(field.options!);
-    // Use the doctype's configured title_field first
+    // Configured title_field first.
     if (meta != null &&
         meta.titleField != null &&
         meta.titleField!.isNotEmpty) {
       final v = row[meta.titleField!];
       if (v != null && v.toString().isNotEmpty) return v.toString();
     }
-    // Common name fields (excluding 'name' which is a raw server ID)
-    final prefer = ['item_name', 'item_code', 'bank_name', 'name'];
+    // Common name fields ('name' is a raw server id — deliberately excluded).
+    const prefer = ['item_name', 'item_code', 'bank_name'];
     for (final k in prefer) {
       if (row[k] != null && row[k].toString().isNotEmpty) {
         return row[k].toString();
+      }
+    }
+    // Walk the child doctype's own field order for the first real data field
+    // (web grid parity) so a row never titles from an SDK bookkeeping column
+    // like server_name / mobile_uuid.
+    if (meta != null) {
+      for (final f in meta.fields) {
+        final fn = f.fieldname;
+        if (fn == null || fn.isEmpty) continue;
+        if (!f.isDataField || f.hidden) continue;
+        if (_isSystemKey(fn)) continue;
+        final v = row[fn];
+        if (v != null && v.toString().isNotEmpty) return '$fn: $v';
       }
     }
     for (final e in row.entries) {
@@ -150,15 +163,16 @@ class ChildTableField extends StatelessWidget {
   }
 
   bool _isSystemKey(String key) {
-    return [
-      'name',
-      'owner',
-      'creation',
-      'modified',
-      'docstatus',
-      'idx',
-      'doctype',
-    ].contains(key);
+    const sys = {
+      'name', 'server_name', 'owner', 'creation', 'modified', 'modified_by',
+      'docstatus', 'idx', 'doctype', 'parent', 'parentfield', 'parenttype',
+      'parent_doctype', 'mobile_uuid', 'parent_uuid', 'sync_status', 'sync_op',
+      'local_modified', 'push_base_payload',
+    };
+    return sys.contains(key) ||
+        key.endsWith('__is_local') ||
+        key.endsWith('__norm') ||
+        key.endsWith('__display');
   }
 
   Future<void> _showAddRowDialog(

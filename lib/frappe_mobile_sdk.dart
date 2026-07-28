@@ -117,6 +117,9 @@ export 'src/ui/widgets/fields/child_table_field.dart'
 export 'src/constants/field_types.dart';
 export 'src/constants/oauth_constants.dart';
 
+// Utilities (Frappe expression parity)
+export 'src/utils/depends_on_evaluator.dart' show DependsOnEvaluator;
+
 // Query (UnifiedResolver + FilterParser) — Spec §6
 export 'src/query/filter_errors.dart'
     show FilterParseError, UnsupportedFilterError;

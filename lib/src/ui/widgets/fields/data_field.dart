@@ -50,9 +50,20 @@ class DataField extends BaseField {
                 : null,
             helperMaxLines: 2,
           ),
+      // Frappe `Data` columns are varchar(140) by default (the limit is
+      // implicit when DocField.length is unset). Cap on-device so free-text
+      // can't overflow and fail server-side with a 417 (CharacterLength
+      // ExceededError) only at sync. Counter hidden to match web (silent cap).
       maxLength: (field.length != null && field.length! > 0)
           ? field.length
-          : null,
+          : 140,
+      buildCounter: (
+        BuildContext context, {
+        required int currentLength,
+        required bool isFocused,
+        int? maxLength,
+      }) =>
+          null,
       validator: field.reqd
           ? (value) {
               final required = requiredValidator(value, field.displayLabel);

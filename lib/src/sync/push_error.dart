@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'package:flutter/foundation.dart';
 
 import '../models/outbox_row.dart';
+import '../api/utils.dart' show extractErrorMessage;
 
 /// Common base for every error the push pipeline can raise. Each maps to
 /// an [ErrorCode] so the engine can branch on it and write the right
@@ -156,7 +157,20 @@ class ServerRejection extends PushError {
   ServerRejection({required this.status, required this.rawBody});
 
   @override
-  String get message => 'ServerRejection status=$status';
+  String get message {
+    // Surface the server's real validation text (e.g. "…required fields are
+    // empty: District, Block…") instead of a bare "status=417". The SDK's
+    // extractErrorMessage() unwraps Frappe's `_server_messages`; this getter is
+    // what markPaused/markFailed persist into outbox.error_message, so the Sync
+    // Errors list and the home banner show an actionable reason, not a code.
+    try {
+      final human = extractErrorMessage(jsonDecode(rawBody));
+      if (human.isNotEmpty && human != 'Unknown Error') return human;
+    } catch (_) {
+      // Malformed/empty body — fall back to the generic label below.
+    }
+    return 'ServerRejection status=$status';
+  }
 
   @override
   ErrorCode toErrorCode() {
