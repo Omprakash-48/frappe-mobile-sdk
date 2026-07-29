@@ -61,6 +61,24 @@ void main() {
     expect(unk.toErrorCode(), ErrorCode.UNKNOWN);
   });
 
+  test('ServerRejection.message surfaces server text AND keeps the HTTP status '
+      'discoverable (host substring-classification bridge)', () {
+    final r = ServerRejection(
+      status: 417,
+      rawBody: '{"message":"District is required"}',
+    );
+    expect(r.message, contains('District is required'));
+    expect(r.message, contains('417'));
+  });
+
+  test(
+    'ServerRejection.message on a malformed body still carries the status',
+    () {
+      final r = ServerRejection(status: 417, rawBody: 'not-json');
+      expect(r.message, contains('417'));
+    },
+  );
+
   test('TimeoutError maps to ErrorCode.TIMEOUT', () {
     final e = TimeoutError(message: 'connection timed out');
     expect(e.toErrorCode(), ErrorCode.TIMEOUT);

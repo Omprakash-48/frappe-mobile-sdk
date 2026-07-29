@@ -1,6 +1,7 @@
 import '../database/field_type_mapping.dart';
 import '../database/normalize_for_search.dart';
 import '../models/doc_type_meta.dart';
+import '../utils/sdk_log.dart';
 import 'filter_errors.dart';
 import 'frappe_timespan.dart';
 import 'parsed_query.dart';
@@ -65,6 +66,12 @@ class FilterParser {
   /// OFFLINE we DROP such a clause instead of throwing, because the local
   /// cache is already server-permission-scoped so the clause is effectively
   /// pre-applied. Genuinely-unknown columns (typos, real fields) still error.
+  ///
+  /// CAVEAT: dropping an AND clause makes the offline result a SUPERSET of the
+  /// online query — safe only for doctypes whose local cache is already scoped
+  /// to the user's own rows. The drop is logged (debug) via [sdkLog] so it is
+  /// not silent; a fuller fix would materialize these columns offline. Do NOT
+  /// add non-audit business fields here.
   static const Set<String> _skippableAbsentColumns = {
     'owner',
     'creation',
@@ -102,6 +109,7 @@ class FilterParser {
       malformedMessage: (f) =>
           'Malformed filter: $f (expected [col, op, value])',
       length4Message: length4,
+      doctype: meta.name,
     );
 
     final orParts = <String>[];
@@ -114,6 +122,7 @@ class FilterParser {
       malformedMessage: (f) =>
           'Malformed or_filter: $f (expected [col, op, value])',
       length4Message: length4,
+      doctype: meta.name,
     );
 
     final where = <String>[];
@@ -155,6 +164,7 @@ class FilterParser {
     required List<Object?> params,
     required String Function(List<dynamic>) malformedMessage,
     required String length4Message,
+    required String doctype,
   }) {
     for (final f in inputs) {
       if (f.length == 4) {
@@ -168,7 +178,12 @@ class FilterParser {
           _skippableAbsentColumns.contains(col0) &&
           !colTypes.containsKey(col0)) {
         // Standard audit field not materialized offline — drop the clause
-        // rather than throwing (see [_skippableAbsentColumns]).
+        // rather than throwing (see [_skippableAbsentColumns]). Logged so the
+        // offline/online divergence is diagnosable rather than silent.
+        sdkLog(
+          'FilterParser: dropped offline-unmaterialized audit clause $f on '
+          '"$doctype" — offline results may be a SUPERSET of the server query.',
+        );
         continue;
       }
       final parsed = _parseOne(f, colTypes, normFields);

@@ -77,6 +77,8 @@ class FieldFactory {
     LinkFilterBuilder? Function(String doctype, String fieldname)?
     getLinkFilterBuilder,
     ValueChanged<bool>? onIsLocalChanged,
+    String? errorText,
+    bool capDataLength = true,
   }) {
     if (field.hidden) {
       return null;
@@ -92,6 +94,7 @@ class FieldFactory {
           onChanged: onChanged,
           enabled: enabled,
           style: fieldStyle,
+          capLength: capDataLength,
         );
 
       case FieldTypes.phone:
@@ -217,6 +220,7 @@ class FieldFactory {
           getMeta: getMeta,
           formBuilder: childTableFormBuilder,
           style: fieldStyle,
+          errorText: errorText,
         );
 
       case 'Duration':
@@ -325,6 +329,7 @@ class _TableFieldBase extends BaseField {
   final List<dynamic> value;
   final Future<DocTypeMeta> Function(String doctype) getMeta;
   final ChildTableFormBuilder formBuilder;
+  final String? errorText;
 
   const _TableFieldBase({
     required super.field,
@@ -334,6 +339,7 @@ class _TableFieldBase extends BaseField {
     required this.getMeta,
     required this.formBuilder,
     super.style,
+    this.errorText,
   });
 
   @override
@@ -348,6 +354,7 @@ class _TableFieldBase extends BaseField {
       enabled: enabled,
       getMeta: getMeta,
       formBuilder: formBuilder,
+      errorText: errorText,
     );
   }
 

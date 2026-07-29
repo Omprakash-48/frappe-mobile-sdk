@@ -157,9 +157,16 @@ class PullEngine {
       sdkLog(
         'PullEngine._runDoctype($doctype): meta resolve failed, skipping — $e\n$st',
       );
+      // Record on the release-visible, host-observable channel
+      // (SyncState.failedMetaSyncs). The debug-only sdkLog above compiles out
+      // in release and the per-doctype `note` is read by no progress UI.
+      notifier.recordMetaSyncFailure(doctype, 'meta: $e');
       notifier.value = notifier.value.updatePerDoctype(
         doctype,
-        DoctypeSyncState(note: 'failed (meta): $e'),
+        // deferred:true so the progress screen (which reads deferred +
+        // completedAt only) shows this as deferred, not perpetually
+        // in-progress.
+        DoctypeSyncState(deferred: true, note: 'failed (meta): $e'),
       );
       return;
     }
@@ -212,11 +219,16 @@ class PullEngine {
             'PullEngine._runDoctype($doctype): child meta '
             '${edge.targetDoctype} resolve failed, skipping — $e\n$st',
           );
-          notifier.value = notifier.value.updatePerDoctype(
-            doctype,
-            DoctypeSyncState(note: 'failed (child meta): $e'),
+          // Record the CHILD doctype's failure observably, then SKIP ONLY this
+          // child edge (continue) rather than aborting the whole parent
+          // (return): the parent's own scalar fields and its other child
+          // tables still pull. Dropping the entire parent for one broken child
+          // table silently zeroes what may be an entry-point form doctype.
+          notifier.recordMetaSyncFailure(
+            edge.targetDoctype,
+            'child meta (parent $doctype): $e',
           );
-          return;
+          continue;
         }
         childInfo[edge.field] = PullApplyChildInfo(
           edge.targetDoctype,

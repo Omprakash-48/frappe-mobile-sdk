@@ -371,6 +371,12 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
   final List<_FormTab> _tabs = [];
   final Map<String, int> _fieldTabIndex = {};
 
+  /// Per-fieldname inline error for child-table (Table / Table MultiSelect)
+  /// fields, which are NOT FormBuilderFields — so `_formKey…invalidate()`
+  /// cannot surface their required-empty error. The mandatory sweep writes
+  /// here and [ChildTableField] renders it; cleared on the next edit.
+  final Map<String, String> _tableFieldErrors = {};
+
   // Reactive mode (FormBuilderMode.reactive): app-ownable controller.
   FormController? _controller;
   bool _ownsController = false;
@@ -972,6 +978,9 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
     }
 
     setState(() {
+      // A user edit (e.g. adding a child-table row) clears any pending
+      // required-empty-table error surfaced by the mandatory sweep.
+      _tableFieldErrors.remove(field.fieldname);
       final oldValue = _formData[field.fieldname];
       // A programmatic re-fire (cascadeDepth > 0) forces the pipeline even
       // though the value is already present in _formData.
@@ -1198,6 +1207,7 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
     final fieldWidget = _fieldFactory.createField(
       field: fieldWithEffectiveProps,
       value: initialValue,
+      capDataLength: !widget.meta.isSingle,
       uploadFile: widget.uploadFile,
       fileUrlBase: widget.fileUrlBase,
       imageHeaders: widget.imageHeaders,
@@ -1227,6 +1237,7 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
                 )
           : null,
       onButtonPressed: widget.onButtonPressed,
+      errorText: _tableFieldErrors[field.fieldname],
       onChanged: (value) => _onFieldValueChanged(field, value),
       enabled: !effectiveReadOnly,
       formData: Map<String, dynamic>.from(_formData),
@@ -1830,12 +1841,36 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
           _tabController.index = tabIndex;
         });
       }
+      // A required-empty child table ('Table' -> ChildTableField) is NOT a
+      // FormBuilderField, so the `invalidate()` path below is a no-op for it.
+      // Route its error into `_tableFieldErrors` (rendered inline by
+      // ChildTableField). Every other field type keeps the invalidate path
+      // unchanged (incl. Table MultiSelect, whose widget renders no inline
+      // error either — pre-existing, out of this finding's scope).
+      final tableErrors = <String, String>{};
+      for (final f in missingMandatory) {
+        final name = f.fieldname;
+        if (name == null) continue;
+        if (f.fieldtype == 'Table') {
+          tableErrors[name] = sdkTr('{0} is required', [f.displayLabel]);
+        }
+      }
+      if (tableErrors.isNotEmpty) {
+        setState(() {
+          _tableFieldErrors
+            ..clear()
+            ..addAll(tableErrors);
+        });
+      }
       // Surface inline errors once the target tab's fields have mounted
       // (same delay the invalid-field scroll above uses for tab settling).
       Future.delayed(const Duration(milliseconds: 150), () {
         if (!mounted) return;
         final st = _formKey.currentState;
         for (final f in missingMandatory) {
+          if (f.fieldtype == 'Table') {
+            continue; // surfaced via _tableFieldErrors above
+          }
           st?.fields[f.fieldname]?.invalidate(
             sdkTr('{0} is required', [f.displayLabel]),
           );
@@ -1969,6 +2004,7 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
         final w = _fieldFactory.createField(
           field: effective,
           value: value,
+          capDataLength: !widget.meta.isSingle,
           enabled: !effectiveReadOnly,
           onChanged: (v) => c.setValue(name, v, source: ChangeSource.user),
           formData: c.values,

@@ -585,7 +585,12 @@ class FrappeSDK {
     _initialized = true;
 
     if (autoRestoreAndSync) {
-      final restored = await _authService!.restoreSession();
+      // Pass the connectivity signal so restoreSession never fires a proactive
+      // token refresh while offline (which would wipe the token on the
+      // guaranteed NetworkException and strand an offline user at login).
+      final restored = await _authService!.restoreSession(
+        isOnline: _cachedOnline,
+      );
       if (restored) {
         // Kick off the offline → online transition in the background
         // (do NOT await). Reasoning: initialize() runs before runApp()
@@ -763,8 +768,14 @@ class FrappeSDK {
   /// Use this when the host authenticates through a non-standard endpoint but
   /// still wants a real SDK session, so [initialize] with `autoRestoreAndSync`
   /// rehydrates it on cold start (no re-login). Mirrors [login]'s post-response
-  /// bookkeeping but does NOT kick the initial sync — the caller drives that
-  /// (typically an awaited, progress-reporting sync right after this).
+  /// bookkeeping but does NOT kick the initial sync — the caller MUST drive it,
+  /// otherwise the closure/upgrade pull is suppressed here (see
+  /// [_persistOfflineFlagFromLogin]) and never fires, leaving `docs__*` helper
+  /// tables empty until the next `autoRestoreAndSync` cold start. Drive it by
+  /// awaiting [retryInitialMetaAndDataSync] (which runs the full meta+data sync
+  /// AND the upgrade closure pull after hydrating mobile-form metas). Do NOT use
+  /// [forcePullAll] as a substitute — it excludes entry-point doctypes, so it
+  /// reports success while the form-entry data was never pulled.
   Future<Map<String, dynamic>> persistExternalLogin(
     Map<String, dynamic> response,
   ) async {
@@ -1726,6 +1737,11 @@ List<String> listableFieldnamesForStar(DocTypeMeta meta) {
     'Table MultiSelect',
     'Fold',
     'Heading',
+    // 'Image' is one of Frappe's no_value_fields and is absent from
+    // data_fieldtypes, so no DB column is ever generated for it. Emitting it in
+    // a ['*'] expansion sends a nonexistent column to frappe.client.get_list
+    // (the exact unknown-column failure this expansion exists to avoid).
+    'Image',
   };
   final out = <String>{
     'name',

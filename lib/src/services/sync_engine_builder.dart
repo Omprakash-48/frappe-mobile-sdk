@@ -25,6 +25,7 @@ import '../sync/mobile_error_poster.dart';
 import '../sync/mobile_error_record.dart' show excTypeFromBody;
 import '../sync/sync_state_notifier.dart';
 import 'error_capture.dart';
+import 'offline_repository.dart';
 import 'session_user_service.dart';
 import 'sync_controller.dart';
 import '../utils/sdk_log.dart';
@@ -408,12 +409,20 @@ class SyncEngineBuilder {
       bool hasChildren = false;
       try {
         final meta = await metaResolver(doctype);
-        hasChildren = meta.fields.any(
-          (f) =>
-              f.fieldtype == 'Table' || f.fieldtype == 'Table MultiSelect',
+        hasChildren = metaHasChildTableFields(meta);
+      } catch (e, st) {
+        // Do NOT silently degrade to the flat list() path — that reintroduces
+        // the empty-child-table bug this branch exists to prevent (a form
+        // prefilled with blank child tables is worse than a visible failure).
+        // Log and fail this doctype's pull; PullEngine's mid-pull catch records
+        // it and retries next cycle without aborting the other doctypes.
+        // (PullEngine resolves the same meta just before calling this, so
+        // reaching here means a transient resolve failure.)
+        sdkLog(
+          'SyncEngineBuilder.listHttp($doctype): meta resolve failed — failing '
+          'the pull rather than fetching without children — $e\n$st',
         );
-      } catch (_) {
-        hasChildren = false;
+        rethrow;
       }
 
       final List<dynamic> result = hasChildren

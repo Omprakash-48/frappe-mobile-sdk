@@ -70,59 +70,6 @@ class LinkOptionService {
       _syncCompleteStream = null,
       _translate = null;
 
-  /// Cache for [getLinkTitle], keyed `doctype::name`. Only successful
-  /// resolutions are cached — a miss may just mean the target doctype
-  /// hasn't pulled yet, and must stay retryable.
-  final Map<String, String> _titleCache = {};
-
-  /// Resolves a single Link VALUE (`name`) of [doctype] to its display
-  /// title, offline-first. Returns null when the value is empty or the
-  /// target row isn't available locally. Successful lookups are cached.
-  ///
-  /// This is what list surfaces use to render a Link-typed title field as
-  /// the linked document's title instead of its raw id (bug: DF lists
-  /// showing uuid/EP ids where the entrepreneur's name belongs).
-  Future<String?> getLinkTitle(String doctype, String name) async {
-    if (name.isEmpty) return null;
-    final key = '$doctype::$name';
-    final cached = _titleCache[key];
-    if (cached != null) return cached;
-
-    final resolver = _resolver;
-    final metaResolver = _metaResolver;
-    if (resolver == null || metaResolver == null) return null;
-
-    final meta = await metaResolver(doctype);
-    // A Link VALUE is the target's Frappe `name` — locally that is
-    // `server_name` for synced rows or `mobile_uuid` for rows created on
-    // this device that haven't pushed yet. `name` itself is not a local
-    // column, so filter on both identity columns.
-    final result = await resolver.resolve(
-      doctype: doctype,
-      orFilters: [
-        ['server_name', '=', name],
-        ['mobile_uuid', '=', name],
-      ],
-      page: 0,
-      pageSize: 1,
-    );
-    final entities = _rowsToEntities(
-      result.rows,
-      doctype,
-      meta.titleField,
-      translateLabels: meta.translatedDoctype,
-    );
-    if (entities.isEmpty) return null;
-    final label = entities.first.label;
-    if (label == null || label.isEmpty || label == name) {
-      // No distinct title available — don't cache; the target doctype may
-      // still be mid-pull and produce a real title later.
-      return label;
-    }
-    _titleCache[key] = label;
-    return label;
-  }
-
   /// Fetches link options via the resolver (DB-first + background refresh when online).
   Future<List<LinkOptionEntity>> getLinkOptions(
     String doctype, {

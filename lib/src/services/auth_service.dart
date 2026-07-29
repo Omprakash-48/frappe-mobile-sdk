@@ -1,6 +1,7 @@
 import 'dart:developer' as dev;
 
 import '../api/client.dart';
+import '../api/exceptions.dart';
 import '../api/oauth2_helper.dart';
 import '../database/app_database.dart';
 import '../database/entities/auth_token_entity.dart';
@@ -427,7 +428,7 @@ class AuthService {
   ///
   /// Tries mobile auth tokens (from DB) first, then OAuth tokens, then API key.
   /// Returns true if a valid session was restored.
-  Future<bool> restoreSession() async {
+  Future<bool> restoreSession({bool isOnline = true}) async {
     final baseUrl = await getBaseUrl();
     if (baseUrl == null) return false;
 
@@ -440,29 +441,44 @@ class AuthService {
       try {
         final token = await _database!.authTokenDao.getCurrentToken();
         if (token != null && token.accessToken.isNotEmpty) {
-          final ageMs =
-              DateTime.now().millisecondsSinceEpoch - token.createdAt;
+          final ageMs = DateTime.now().millisecondsSinceEpoch - token.createdAt;
           if (ageMs >=
               _mobileAccessTokenTtl.inMilliseconds -
                   _tokenRefreshSkew.inMilliseconds) {
-            // Aged token: refresh BEFORE any sync fires so the boot pull never
-            // starts with an about-to-expire Bearer (which would 401 the first
-            // call and, under the concurrent closure pull, cascade to guest
-            // 403s). _tryRefreshMobileAuthToken reads the refresh token from
-            // the DAO and hits the guest endpoint, so no Bearer is needed.
-            final refreshed = await _tryRefreshMobileAuthToken();
-            if (refreshed) {
+            // Aged token. Proactively refreshing BEFORE the boot sync only
+            // makes sense ONLINE: offline, callPublic throws NetworkException
+            // and the refresh catch would (previously) wipe the token,
+            // stranding an offline user — with their cached masters + queued
+            // outbox — behind a login screen they cannot pass. So refresh only
+            // when online; otherwise fall through to the cached Bearer and let
+            // the reactive 401 -> refresh path handle real expiry once
+            // connectivity returns.
+            if (isOnline) {
+              final refreshed = await _tryRefreshMobileAuthToken();
+              if (refreshed) {
+                _isAuthenticated = true;
+                _cachedUserInfo = (
+                  email: token.user,
+                  fullName: token.fullName ?? token.user,
+                );
+                return true;
+              }
+            }
+            // Offline, or the refresh could not be redeemed (empty/SSO refresh
+            // token, or a transport failure). A DEFINITIVE server rejection
+            // (401/403) already deleted the token inside the refresh; if a
+            // token row still survives it is our best credential, so install it
+            // rather than forcing a re-login the offline user cannot complete.
+            final surviving = await _database!.authTokenDao.getCurrentToken();
+            if (surviving != null && surviving.accessToken.isNotEmpty) {
+              _client!.rest.setBearerToken(surviving.accessToken);
               _isAuthenticated = true;
               _cachedUserInfo = (
-                email: token.user,
-                fullName: token.fullName ?? token.user,
+                email: surviving.user,
+                fullName: surviving.fullName ?? surviving.user,
               );
               return true;
             }
-            // Could not refresh (e.g. an external/SSO refresh token that
-            // mobile_auth.refresh_token cannot redeem): do NOT install a
-            // known-expiring Bearer — require re-login instead of guest-403ing
-            // the entire boot sync.
             return false;
           }
           _client!.rest.setBearerToken(token.accessToken);
@@ -787,11 +803,26 @@ class AuthService {
                 return true;
               }
             } catch (e, st) {
-              dev.log(
-                '_doRefreshMobileAuthToken: refresh call failed, clearing tokens — $e\n$st',
-                name: 'Auth',
-              );
-              await _database!.authTokenDao.deleteAll();
+              // Only a DEFINITIVE server rejection (HTTP 401/403) means the
+              // refresh token is dead and must be cleared. A transport failure
+              // (NetworkException/timeout) or any other error must NOT wipe the
+              // token — the user may simply be offline, and wiping strands
+              // their cached masters + queued outbox behind the login screen
+              // (see restoreSession's online gate).
+              if (isDefinitiveAuthRejection(e)) {
+                dev.log(
+                  '_doRefreshMobileAuthToken: refresh rejected '
+                  '(${e is FrappeException ? e.statusCode : '?'}), clearing tokens — $e\n$st',
+                  name: 'Auth',
+                );
+                await _database!.authTokenDao.deleteAll();
+              } else {
+                dev.log(
+                  '_doRefreshMobileAuthToken: refresh failed '
+                  '(transport/other), keeping token — $e\n$st',
+                  name: 'Auth',
+                );
+              }
             }
           }
         }
@@ -881,3 +912,13 @@ class AuthService {
     await _storage.delete(key: _keyOAuthClientSecret);
   }
 }
+
+/// True only for a DEFINITIVE server rejection of a credential — HTTP 401/403 —
+/// which means the stored token is dead and should be cleared so the user
+/// re-authenticates. Transport failures ([NetworkException]/timeout) and other
+/// statuses (e.g. 417 validation, 5xx) return false so an offline or
+/// transiently-failing client never has its token wiped. Used by [AuthService]
+/// token refresh; unit-tested in auth_service_refresh_test.dart.
+bool isDefinitiveAuthRejection(Object error) =>
+    error is AuthException &&
+    (error.statusCode == 401 || error.statusCode == 403);

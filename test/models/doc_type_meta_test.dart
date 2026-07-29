@@ -341,4 +341,29 @@ void main() {
       expect(m.translatedDoctype, isFalse);
     });
   });
+
+  group('DocTypeMeta.isSingle', () {
+    test('issingle=1 (int) → true', () {
+      final m = DocTypeMeta.fromJson({
+        'name': 'X',
+        'fields': [],
+        'issingle': 1,
+      });
+      expect(m.isSingle, isTrue);
+    });
+
+    test('issingle=true (bool) → true', () {
+      final m = DocTypeMeta.fromJson({
+        'name': 'X',
+        'fields': [],
+        'issingle': true,
+      });
+      expect(m.isSingle, isTrue);
+    });
+
+    test('issingle absent → false', () {
+      final m = DocTypeMeta.fromJson({'name': 'X', 'fields': []});
+      expect(m.isSingle, isFalse);
+    });
+  });
 }

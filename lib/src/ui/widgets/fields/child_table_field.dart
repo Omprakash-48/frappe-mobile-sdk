@@ -22,6 +22,7 @@ class ChildTableField extends StatelessWidget {
   final bool enabled;
   final Future<DocTypeMeta> Function(String doctype)? getMeta;
   final ChildTableFormBuilder? formBuilder;
+  final String? errorText;
 
   const ChildTableField({
     super.key,
@@ -31,6 +32,7 @@ class ChildTableField extends StatelessWidget {
     this.enabled = true,
     this.getMeta,
     this.formBuilder,
+    this.errorText,
   });
 
   @override
@@ -111,6 +113,17 @@ class ChildTableField extends StatelessWidget {
               );
             },
           ),
+        if (errorText != null && errorText!.isNotEmpty)
+          Padding(
+            padding: const EdgeInsets.only(top: 8),
+            child: Text(
+              errorText!,
+              style: TextStyle(
+                color: Theme.of(context).colorScheme.error,
+                fontSize: 12,
+              ),
+            ),
+          ),
       ],
     );
   }
@@ -141,7 +154,9 @@ class ChildTableField extends StatelessWidget {
         if (!f.isDataField || f.hidden) continue;
         if (_isSystemKey(fn)) continue;
         final v = row[fn];
-        if (v != null && v.toString().isNotEmpty) return '$fn: $v';
+        if (v != null && v.toString().isNotEmpty) {
+          return '${f.displayLabel}: $v';
+        }
       }
     }
     for (final e in row.entries) {
@@ -164,10 +179,25 @@ class ChildTableField extends StatelessWidget {
 
   bool _isSystemKey(String key) {
     const sys = {
-      'name', 'server_name', 'owner', 'creation', 'modified', 'modified_by',
-      'docstatus', 'idx', 'doctype', 'parent', 'parentfield', 'parenttype',
-      'parent_doctype', 'mobile_uuid', 'parent_uuid', 'sync_status', 'sync_op',
-      'local_modified', 'push_base_payload',
+      'name',
+      'server_name',
+      'owner',
+      'creation',
+      'modified',
+      'modified_by',
+      'docstatus',
+      'idx',
+      'doctype',
+      'parent',
+      'parentfield',
+      'parenttype',
+      'parent_doctype',
+      'mobile_uuid',
+      'parent_uuid',
+      'sync_status',
+      'sync_op',
+      'local_modified',
+      'push_base_payload',
     };
     return sys.contains(key) ||
         key.endsWith('__is_local') ||

@@ -165,7 +165,14 @@ class ServerRejection extends PushError {
     // Errors list and the home banner show an actionable reason, not a code.
     try {
       final human = extractErrorMessage(jsonDecode(rawBody));
-      if (human.isNotEmpty && human != 'Unknown Error') return human;
+      if (human.isNotEmpty && human != 'Unknown Error') {
+        // Bridge: keep the HTTP status discoverable in the persisted text so
+        // hosts still classifying by substring (e.g. `errorMessage.contains
+        // ('417')`) keep working while they migrate to the typed contract —
+        // `error_code` (the ErrorCode enum name, e.g. 'VALIDATION') or the
+        // status here. See toErrorCode() for the code mapping.
+        return '$human (HTTP $status)';
+      }
     } catch (_) {
       // Malformed/empty body — fall back to the generic label below.
     }

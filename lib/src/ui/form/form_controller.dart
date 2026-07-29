@@ -445,7 +445,11 @@ class FormController extends ChangeNotifier {
     }
     final v = _rawValues[field];
     final ui = uiStateOf(field).value;
-    if ((f.reqd || ui.required) && (v == null || v.toString().isEmpty)) {
+    final missing =
+        v == null ||
+        (v is List && v.isEmpty) ||
+        (v is! List && v.toString().isEmpty);
+    if ((f.reqd || ui.required) && missing) {
       return '${f.label ?? field} is required';
     }
     for (final validator in _fieldValidators[field] ?? const []) {

@@ -438,6 +438,12 @@ void main() {
       expect(mf, isNotNull);
       expect(mf!.note, contains('failed (meta)'));
       expect(mf.completedAt, isNull);
+      // Observable in RELEASE too: recorded on SyncState.failedMetaSyncs, not
+      // just the debug-only sdkLog / the unread per-doctype `note`.
+      expect(notifier.value.failedMetaSyncs, contains('Machinery Flow'));
+      // Marked deferred so the progress UI doesn't render it as perpetually
+      // in-progress (it reads deferred + completedAt only).
+      expect(mf.deferred, isTrue);
     },
   );
 
@@ -608,6 +614,93 @@ void main() {
       expect(children.length, 2);
       expect(children[0]['item_code'], 'A');
       expect(children[1]['item_code'], 'B');
+    },
+  );
+
+  test(
+    'a child doctype whose meta fails skips only that child edge — the parent '
+    'still pulls its own scalar row (not aborted)',
+    () async {
+      final orderMeta = DocTypeMeta(
+        name: 'Order',
+        fields: [f('items', 'Table', options: 'Order Item')],
+      );
+      for (final s in buildParentSchemaDDL(
+        orderMeta,
+        tableName: 'docs__order',
+      )) {
+        await db.execute(s);
+      }
+      await db.insert('doctype_meta', {
+        'doctype': 'Order',
+        'metaJson': '{}',
+        'isMobileForm': 0,
+        'table_name': 'docs__order',
+      });
+      var orderCalls = 0;
+      final fetcher = PullPageFetcher(
+        listHttp: (doctype, params) async {
+          if (doctype == 'Order') {
+            orderCalls++;
+            return orderCalls == 1
+                ? const [
+                    {'name': 'O-1', 'modified': '2026-01-01'},
+                  ]
+                : const <Map<String, dynamic>>[];
+          }
+          return const <Map<String, dynamic>>[];
+        },
+      );
+      const closure = ClosureResult(
+        doctypes: ['Order', 'Order Item'],
+        graph: {
+          'Order': DepGraph(
+            doctype: 'Order',
+            tier: 0,
+            outgoing: [
+              DepEdge(
+                field: 'items',
+                targetDoctype: 'Order Item',
+                kind: DepEdgeKind.child,
+              ),
+            ],
+            incoming: [],
+          ),
+          'Order Item': DepGraph(
+            doctype: 'Order Item',
+            tier: 1,
+            outgoing: [],
+            incoming: [],
+          ),
+        },
+        childDoctypes: {'Order Item'},
+        warnings: [],
+      );
+      final notifier = SyncStateNotifier();
+      final engine = PullEngine(
+        db: db,
+        metaDao: metaDao,
+        outboxDao: OutboxDao(db),
+        pool: ConcurrencyPool(maxConcurrent: 2),
+        fetcher: fetcher,
+        pageSize: 500,
+        notifier: notifier,
+        metaResolver: (dt) async {
+          if (dt == 'Order Item') {
+            throw Exception('child meta 500');
+          }
+          return orderMeta;
+        },
+      );
+
+      // Must NOT throw despite the child meta failure.
+      await engine.run(closure);
+
+      // Parent still pulled its own scalar row (not aborted by the child).
+      expect((await db.query('docs__order')).length, 1);
+      expect(notifier.value.perDoctype['Order']!.completedAt, isNotNull);
+      // The failing CHILD is recorded observably.
+      expect(notifier.value.failedMetaSyncs, contains('Order Item'));
     },
   );
 

@@ -62,4 +62,27 @@ void main() {
     expect(c.errorOf('code'), 'duplicate');
     c.dispose();
   });
+
+  test(
+    'required Table field fails when the child list is empty, passes with a row',
+    () {
+      final c = FormController(
+        meta: _meta([
+          DocField(fieldname: 'items', fieldtype: 'Table', reqd: true),
+        ]),
+      );
+      // Regression: an empty child table is `[]`, and `[].toString()` is "[]"
+      // (not empty), so the old `v.toString().isEmpty` check never flagged it.
+      c.setValue('items', <dynamic>[]);
+      expect(c.validate(), false);
+      expect(c.errorOf('items'), contains('required'));
+      // A row present → satisfied.
+      c.setValue('items', <dynamic>[
+        {'x': 1},
+      ]);
+      expect(c.validate(), true);
+      expect(c.errorOf('items'), isNull);
+      c.dispose();
+    },
+  );
 }

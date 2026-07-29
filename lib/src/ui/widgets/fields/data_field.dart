@@ -5,6 +5,11 @@ import 'field_helpers.dart';
 
 /// Widget for Data field type
 class DataField extends BaseField {
+  /// When false (e.g. a Single doctype, which Frappe stores as mediumtext),
+  /// skip the implicit varchar(140) cap on a `Data` field whose
+  /// `DocField.length` is unset. Default true — cap, matching Frappe's
+  /// non-Single behaviour.
+  final bool capLength;
   const DataField({
     super.key,
     required super.field,
@@ -12,6 +17,7 @@ class DataField extends BaseField {
     super.onChanged,
     super.enabled,
     super.style,
+    this.capLength = true,
   });
 
   @override
@@ -50,20 +56,22 @@ class DataField extends BaseField {
                 : null,
             helperMaxLines: 2,
           ),
-      // Frappe `Data` columns are varchar(140) by default (the limit is
-      // implicit when DocField.length is unset). Cap on-device so free-text
-      // can't overflow and fail server-side with a 417 (CharacterLength
-      // ExceededError) only at sync. Counter hidden to match web (silent cap).
-      maxLength: (field.length != null && field.length! > 0)
-          ? field.length
-          : 140,
-      buildCounter: (
-        BuildContext context, {
-        required int currentLength,
-        required bool isFocused,
-        int? maxLength,
-      }) =>
-          null,
+      // Frappe `Data` columns are varchar(140) by default (implicit when
+      // DocField.length is unset) — cap on-device so free-text can't overflow
+      // and fail server-side with a 417 (CharacterLengthExceededError) only at
+      // sync. Counter hidden to match web (silent cap). [capLength] is false
+      // for Single doctypes, which Frappe stores as mediumtext and exempts
+      // from the cap entirely (regardless of any explicit length).
+      maxLength: capLength
+          ? ((field.length != null && field.length! > 0) ? field.length : 140)
+          : null,
+      buildCounter:
+          (
+            BuildContext context, {
+            required int currentLength,
+            required bool isFocused,
+            int? maxLength,
+          }) => null,
       validator: field.reqd
           ? (value) {
               final required = requiredValidator(value, field.displayLabel);
