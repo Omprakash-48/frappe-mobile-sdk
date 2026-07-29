@@ -224,6 +224,20 @@ class PullEngine {
           // (return): the parent's own scalar fields and its other child
           // tables still pull. Dropping the entire parent for one broken child
           // table silently zeroes what may be an entry-point form doctype.
+          //
+          // CONSEQUENCE — the skipped field's rows go STALE, they are NOT
+          // deleted. `edge.field` is simply never added to `childInfo`, and
+          // both of PullApply's apply paths iterate ONLY
+          // `childMetasByFieldname.entries`; each child wipe is keyed
+          // `parent_uuid = ? AND parentfield = ?`, so a fieldname absent from
+          // that map is never queried and never deleted. Whatever was cached
+          // for this child field on an earlier successful pull is therefore
+          // left in place unchanged — data-safe (no silent data loss), but the
+          // rows may be out of date until the child meta resolves again.
+          //
+          // Note the failure is attributed to the CHILD doctype below (the
+          // thing that actually failed to resolve), NOT to the parent, so the
+          // parent's own per-doctype sync state still reports success.
           notifier.recordMetaSyncFailure(
             edge.targetDoctype,
             'child meta (parent $doctype): $e',

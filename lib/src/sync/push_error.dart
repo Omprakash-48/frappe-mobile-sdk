@@ -156,11 +156,28 @@ class ServerRejection extends PushError {
   final String rawBody;
   ServerRejection({required this.status, required this.rawBody});
 
+  /// Memoised [message]. Computed at most once per instance.
+  ///
+  /// [message] used to run `jsonDecode` + `extractErrorMessage` on EVERY read,
+  /// and it is read repeatedly on error paths (persisted to
+  /// `outbox.error_message`, logged, rendered in the Sync Errors list). Both
+  /// inputs — [status] and [rawBody] — are final, and Dart `String`s are
+  /// immutable, so the result can never legitimately change between reads:
+  /// caching is observationally identical to recomputing.
+  ///
+  /// Every `try`/`catch` lives inside [_buildMessage] precisely so this lazy
+  /// initializer can NEVER throw — a throwing `late final` initializer would
+  /// leave the field unassigned and re-run on each subsequent read, turning a
+  /// malformed body into a repeated failure at every access site.
+  late final String _cachedMessage = _buildMessage();
+
   @override
-  String get message {
+  String get message => _cachedMessage;
+
+  String _buildMessage() {
     // Surface the server's real validation text (e.g. "…required fields are
     // empty: District, Block…") instead of a bare "status=417". The SDK's
-    // extractErrorMessage() unwraps Frappe's `_server_messages`; this getter is
+    // extractErrorMessage() unwraps Frappe's `_server_messages`; this value is
     // what markPaused/markFailed persist into outbox.error_message, so the Sync
     // Errors list and the home banner show an actionable reason, not a code.
     try {

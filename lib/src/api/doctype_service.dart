@@ -64,9 +64,7 @@ class DoctypeService {
       }
       return null;
     } catch (e, st) {
-      sdkLog(
-        'DoctypeService.getDocTypeWatermark($doctype) failed — $e\n$st',
-      );
+      sdkLog('DoctypeService.getDocTypeWatermark($doctype) failed — $e\n$st');
       return null;
     }
   }
