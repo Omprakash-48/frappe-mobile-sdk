@@ -43,39 +43,69 @@ class DependsOnEvaluator {
 
   /// Comparison / boolean operators, longest first so `===`/`!==`/`>=`/`<=`
   /// are matched before their shorter substrings tear them apart.
-  static final RegExp _opPattern = RegExp(
-    r'===|!==|==|!=|>=|<=|&&|\|\||>|<',
-  );
+  static final RegExp _opPattern = RegExp(r'===|!==|==|!=|>=|<=|&&|\|\||>|<');
 
   /// Frappe admins write `doc.x==1&&doc.y!=2` as often as the spaced form,
   /// but every comparison branch below splits on SPACED operators only —
   /// unspaced expressions silently fell through to the truthy fallback and
   /// mis-gated visibility / mandatory / read-only everywhere. Normalize
-  /// spacing once up front; quoted values keep their contents untouched.
+  /// spacing once up front; the contents of a quoted value come out
+  /// byte-identical to the way they went in.
   static String _normalizeOperatorSpacing(String expr) {
     final buf = StringBuffer();
     String? quote;
+    // True when the buffer already ends with a space written OUTSIDE a quoted
+    // literal, i.e. the next space would be redundant. Redundant spaces are
+    // collapsed here, character by character, instead of by a global
+    // `replaceAll(' {2,}', ' ')` over the finished string: a global collapse
+    // also rewrites the INSIDE of string literals, so a Select option or Data
+    // value carrying two consecutive spaces ("In  Progress") could never match
+    // its own form data. Starts true so leading spaces are dropped, which the
+    // closing trim() would do anyway.
+    bool pendingSpace = true;
     for (var i = 0; i < expr.length; i++) {
       final ch = expr[i];
       if (quote != null) {
+        // Inside a quoted literal: copy verbatim, runs of spaces included.
         buf.write(ch);
         if (ch == quote) quote = null;
+        pendingSpace = false;
         continue;
       }
       if (ch == '"' || ch == "'") {
         quote = ch;
         buf.write(ch);
+        pendingSpace = false;
         continue;
       }
-      final m = _opPattern.matchAsPrefix(expr, i);
-      if (m != null) {
-        buf.write(' ${m.group(0)} ');
-        i += m.group(0)!.length - 1;
+      if (ch == ' ') {
+        if (!pendingSpace) {
+          buf.write(ch);
+          pendingSpace = true;
+        }
+        continue;
+      }
+      final op = _opPattern.matchAsPrefix(expr, i)?.group(0);
+      // `=>` is a JS arrow, not a comparison. Spacing the bare `>` that follows
+      // an `=` turns `r => r.x` into `r = > r.x`, which then matches the ' > '
+      // comparison branch instead of falling through to the truthy fallback as
+      // it did before spacing normalization existed. `>=`/`<=` are unaffected:
+      // the longest-first alternation matches them whole, so `op` is never a
+      // bare `>` there.
+      final isArrowTail = op == '>' && i > 0 && expr[i - 1] == '=';
+      if (op != null && !isArrowTail) {
+        if (!pendingSpace) buf.write(' ');
+        buf.write(op);
+        buf.write(' ');
+        pendingSpace = true;
+        i += op.length - 1;
         continue;
       }
       buf.write(ch);
+      pendingSpace = false;
     }
-    return buf.toString().replaceAll(RegExp(r' {2,}'), ' ').trim();
+    // Safe: trim() only touches the ends of the whole expression.
+    return buf.toString().trim();
   }
 
   /// Evaluate depends_on expression
