@@ -141,6 +141,10 @@ class FieldFactory {
           parentFormData: parentFormData ?? const {},
           getLinkFilterBuilder: getLinkFilterBuilder,
           style: fieldStyle,
+          // Not a FormBuilderField → `invalidate()` cannot reach it, so the
+          // form builder's mandatory sweep routes its required-empty message
+          // here (same channel as 'Table' below).
+          errorText: errorText,
         );
 
       case FieldTypes.date:

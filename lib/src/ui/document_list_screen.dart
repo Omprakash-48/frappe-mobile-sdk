@@ -246,9 +246,10 @@ class _DocumentListScreenState extends State<DocumentListScreen> {
   }
 
   /// When the title-source [fieldname] is a Link, a row's raw value is the
-  /// linked document's ID — which is what made DF lists show uuid/EP ids
-  /// instead of the entrepreneur's name (#121; Frappe web resolves link titles
-  /// in list views). The resolver already ran `LinkDecorator.decorateBatch` on
+  /// linked document's ID, so list rows rendered the raw docname (a UUID or
+  /// server id) instead of the linked document's title. Frappe web resolves
+  /// link titles in list views; this brings the mobile list to parity.
+  /// The resolver already ran `LinkDecorator.decorateBatch` on
   /// every row, writing the resolved title into the `<field>__display`
   /// companion — read that directly instead of firing a second per-row
   /// `getLinkTitle` lookup (removed: it was an N+1 plus an unbounded, never-

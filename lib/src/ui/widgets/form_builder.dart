@@ -377,6 +377,12 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
   /// here and [ChildTableField] renders it; cleared on the next edit.
   final Map<String, String> _tableFieldErrors = {};
 
+  /// Field types whose widget surfaces a required-empty error through
+  /// [_tableFieldErrors] rather than `FormBuilderState.fields[…].invalidate()`
+  /// — neither is a `FormBuilderField`, so `invalidate()` is a silent no-op.
+  static bool _rendersInlineTableError(String? fieldtype) =>
+      fieldtype == 'Table' || fieldtype == 'Table MultiSelect';
+
   // Reactive mode (FormBuilderMode.reactive): app-ownable controller.
   FormController? _controller;
   bool _ownsController = false;
@@ -979,8 +985,19 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
 
     setState(() {
       // A user edit (e.g. adding a child-table row) clears any pending
-      // required-empty-table error surfaced by the mandatory sweep.
-      _tableFieldErrors.remove(field.fieldname);
+      // required-empty-table error surfaced by the mandatory sweep. Keyed on
+      // fieldname alone — no fieldtype gate — so it covers Table and
+      // Table MultiSelect alike.
+      //
+      // A still-empty value is NOT such an edit: it does not satisfy the
+      // requirement, so the message stays accurate. This also matters for
+      // correctness rather than just tidiness — TableMultiSelectFieldBase
+      // emits `onChanged(<empty list>)` on mount (its clean-value echo), so a
+      // sweep that switches to a lazily-built tab would otherwise have the
+      // error it just surfaced wiped on the very next frame.
+      if (!(value == null || (value is List && value.isEmpty))) {
+        _tableFieldErrors.remove(field.fieldname);
+      }
       final oldValue = _formData[field.fieldname];
       // A programmatic re-fire (cascadeDepth > 0) forces the pipeline even
       // though the value is already present in _formData.
@@ -1841,17 +1858,18 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
           _tabController.index = tabIndex;
         });
       }
-      // A required-empty child table ('Table' -> ChildTableField) is NOT a
-      // FormBuilderField, so the `invalidate()` path below is a no-op for it.
-      // Route its error into `_tableFieldErrors` (rendered inline by
-      // ChildTableField). Every other field type keeps the invalidate path
-      // unchanged (incl. Table MultiSelect, whose widget renders no inline
-      // error either — pre-existing, out of this finding's scope).
+      // A required-empty child table ('Table' -> ChildTableField) or
+      // 'Table MultiSelect' (-> TableMultiSelectFieldBase) is NOT a
+      // FormBuilderField, so the `invalidate()` path below is a no-op for
+      // both. Route their errors into `_tableFieldErrors`, which both widgets
+      // render inline via their `errorText`. Without this a required-empty
+      // Table MultiSelect blocked submit with NO visible message anywhere.
+      // Every other field type keeps the invalidate path unchanged.
       final tableErrors = <String, String>{};
       for (final f in missingMandatory) {
         final name = f.fieldname;
         if (name == null) continue;
-        if (f.fieldtype == 'Table') {
+        if (_rendersInlineTableError(f.fieldtype)) {
           tableErrors[name] = sdkTr('{0} is required', [f.displayLabel]);
         }
       }
@@ -1868,7 +1886,7 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
         if (!mounted) return;
         final st = _formKey.currentState;
         for (final f in missingMandatory) {
-          if (f.fieldtype == 'Table') {
+          if (_rendersInlineTableError(f.fieldtype)) {
             continue; // surfaced via _tableFieldErrors above
           }
           st?.fields[f.fieldname]?.invalidate(
@@ -1967,10 +1985,19 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
     final linkSources = LinkOptionService.getDependentFieldNames(
       field.linkFilters,
     );
+    // Child-table fieldtypes ('Table' / 'Table MultiSelect') are NOT
+    // FormBuilderFields, so the controller's validation error has no way to
+    // reach the user except the widget's own inline `errorText` — without this
+    // a required-empty child table blocked Save with nothing on screen.
+    // Every other fieldtype IS a FormBuilderField that renders its own error;
+    // feeding it `errorText` too would double-render, so the channel (and the
+    // extra error listener that repaints it) stays gated to these two.
+    final inlineTableError = _rendersInlineTableError(field.fieldtype);
     return _ReactiveFieldHost(
       name: name,
       controller: c,
       watch: linkSources,
+      watchError: inlineTableError,
       build: (ui) {
         if (!ui.visible) return const SizedBox.shrink();
         FrappeFormBuilder.debugFieldBuildCounts[name] =
@@ -2006,8 +2033,22 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
           value: value,
           capDataLength: !widget.meta.isSingle,
           enabled: !effectiveReadOnly,
-          onChanged: (v) => c.setValue(name, v, source: ChangeSource.user),
+          // Inline-table error only: an edit made while the message is showing
+          // re-validates the field so supplying a value clears it. Gated on an
+          // error ALREADY being displayed, so the empty-list clean-value echo
+          // TableMultiSelectFieldBase emits on mount can never create one; when
+          // the field is still empty the re-validation re-sets the identical
+          // message, which a ValueNotifier<String?> treats as no change — the
+          // error the failed submit surfaced survives instead of being wiped.
+          onChanged: (v) {
+            c.setValue(name, v, source: ChangeSource.user);
+            if (inlineTableError && c.errorOf(name) != null) {
+              c.validateField(name);
+            }
+          },
           formData: c.values,
+          // Non-null only for the two child-table fieldtypes (see above).
+          errorText: inlineTableError ? c.errorOf(name) : null,
           style: fieldStyle,
           uploadFile: widget.uploadFile,
           fileUrlBase: widget.fileUrlBase,
@@ -2132,10 +2173,18 @@ class _ReactiveFieldHost extends StatefulWidget {
     required this.controller,
     required this.build,
     this.watch = const <String>[],
+    this.watchError = false,
   });
   final String name;
   final FormController controller;
   final Widget Function(FieldUiState ui) build;
+
+  /// Also rebuild when this field's validation error changes. Only child-table
+  /// fieldtypes need it: they paint the controller's error through their own
+  /// inline `errorText`, so without this listener the message is computed on
+  /// submit and never painted. FormBuilderField-backed types surface their own
+  /// error and stay off this notifier (no extra rebuilds for them).
+  final bool watchError;
 
   /// Extra field names whose value notifiers also trigger a rebuild — e.g. the
   /// fields a Link field references via `link_filters`. A change to one of them
@@ -2169,6 +2218,10 @@ class _ReactiveFieldHostState extends State<_ReactiveFieldHost> {
       widget.controller.uiStateOf(widget.name),
       widget.controller.valueOf(widget.name),
       for (final f in widget.watch) widget.controller.valueOf(f),
+      // Subscribing also CREATES the error notifier, which validate() only
+      // pushes to when it already exists — so the listener must be registered
+      // here, before the first submit, for the message to ever arrive.
+      if (widget.watchError) widget.controller.errorListenableOf(widget.name),
     ]),
     builder: (context, _) {
       final ui = widget.controller.uiStateOf(widget.name).value;

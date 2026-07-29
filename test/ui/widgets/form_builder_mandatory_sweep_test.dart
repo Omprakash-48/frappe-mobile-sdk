@@ -2,12 +2,70 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:frappe_mobile_sdk/frappe_mobile_sdk.dart';
 
+/// Serves a fixed option list so a `Table MultiSelect` can actually be picked
+/// from in a widget test (no DB, no resolver).
+class _StubLinkOptionService extends LinkOptionService {
+  _StubLinkOptionService(this._options) : super.withoutResolver();
+
+  final List<LinkOptionEntity> _options;
+
+  @override
+  Future<List<LinkOptionEntity>> getLinkOptions(
+    String doctype, {
+    List<List<dynamic>>? filters,
+  }) async => _options;
+}
+
 /// Legacy-mode submit must enforce the doctype's mandatory contract over the
 /// COMPLETE payload, not just the widgets that happen to be mounted.
 /// TabBarView builds tab pages lazily, so `state.saveAndValidate()` never sees
 /// reqd fields on other tabs — without a meta-driven sweep those docs save
 /// locally and bounce back as a server 417 at sync time.
 void main() {
+  /// Child doctype behind both the `Table` and the `Table MultiSelect` fields
+  /// below: one inner Link field, which is what TMS resolves and stores.
+  DocTypeMeta sectorRowMeta() => DocTypeMeta(
+    name: 'Sector Row',
+    label: 'Sector Row',
+    isTable: true,
+    fields: [
+      DocField(fieldname: 'sector', fieldtype: 'Link', options: 'Sector'),
+    ],
+  );
+
+  DocTypeMeta tmsMeta({bool twoTabs = false}) => DocTypeMeta(
+    name: 'Test',
+    label: 'Test',
+    isTable: false,
+    titleField: null,
+    searchFields: null,
+    fields: [
+      if (twoTabs) ...[
+        DocField(
+          fieldname: 'tab_basic',
+          fieldtype: 'Tab Break',
+          idx: 1,
+          label: 'Basic',
+        ),
+        DocField(fieldname: 'note', fieldtype: 'Data', idx: 2, label: 'Note'),
+        DocField(
+          fieldname: 'tab_details',
+          fieldtype: 'Tab Break',
+          idx: 3,
+          label: 'Details',
+        ),
+      ],
+      DocField(
+        fieldname: 'sectors',
+        fieldtype: 'Table MultiSelect',
+        idx: 4,
+        label: 'Sectors',
+        reqd: true,
+        options: 'Sector Row',
+      ),
+    ],
+  );
+
   DocTypeMeta twoTabMeta({bool nameRequired = true}) => DocTypeMeta(
     name: 'Test',
     label: 'Test',
@@ -44,11 +102,19 @@ void main() {
     ],
   );
 
-  Future<({void Function() submit, List<Map<String, dynamic>> submitted, List<int> failed})>
+  Future<
+    ({
+      void Function() submit,
+      List<Map<String, dynamic>> submitted,
+      List<int> failed,
+    })
+  >
   pumpForm(
     WidgetTester tester,
     DocTypeMeta meta, {
     Map<String, dynamic> initialData = const {},
+    Future<DocTypeMeta> Function(String doctype)? getMeta,
+    LinkOptionService? linkOptionService,
   }) async {
     void Function()? captured;
     final submitted = <Map<String, dynamic>>[];
@@ -59,6 +125,11 @@ void main() {
           body: FrappeFormBuilder(
             meta: meta,
             initialData: initialData,
+            getMeta: getMeta,
+            linkOptionService: linkOptionService,
+            // Keep the coordinator's progress stream out of pumpAndSettle;
+            // the TMS field reads linkOptionService directly.
+            useLinkFieldCoordinator: false,
             onSubmit: submitted.add,
             onValidationFailed: () => failed.add(1),
             registerSubmit: (cb) => captured = cb,
@@ -212,7 +283,12 @@ void main() {
           idx: 1,
           label: 'Basic',
         ),
-        DocField(fieldname: 'is_msme', fieldtype: 'Check', idx: 2, label: 'MSME'),
+        DocField(
+          fieldname: 'is_msme',
+          fieldtype: 'Check',
+          idx: 2,
+          label: 'MSME',
+        ),
         DocField(
           fieldname: 'tab_details',
           fieldtype: 'Tab Break',
@@ -283,5 +359,141 @@ void main() {
 
     expect(form.failed, isEmpty);
     expect(form.submitted, hasLength(1));
+  });
+
+  // ---------------------------------------------------------------------
+  // Table MultiSelect: the sweep used to block submit for it with NO visible
+  // message anywhere — TableMultiSelectFieldBase is not a FormBuilderField, so
+  // `invalidate()` was a silent no-op and Save just did nothing.
+  // ---------------------------------------------------------------------
+
+  testWidgets(
+    'reqd empty Table MultiSelect blocks submit AND shows an inline error',
+    (tester) async {
+      final form = await pumpForm(
+        tester,
+        tmsMeta(),
+        getMeta: (_) async => sectorRowMeta(),
+        linkOptionService: _StubLinkOptionService(const []),
+      );
+
+      form.submit();
+      await tester.pumpAndSettle();
+      await tester.pump(const Duration(milliseconds: 200));
+
+      expect(form.submitted, isEmpty);
+      expect(form.failed, hasLength(1));
+      expect(
+        find.text('Sectors is required'),
+        findsOneWidget,
+        reason:
+            'a blocked submit must tell the user why — a dead Save button is '
+            'worse than the 417 the sweep prevents',
+      );
+    },
+  );
+
+  testWidgets(
+    'Table MultiSelect inline error survives the sweep switching tabs',
+    (tester) async {
+      // The discriminating case: the field is on tab 2, so it MOUNTS only after
+      // the sweep switches tabs. On mount it emits its clean-value echo
+      // (onChanged with an empty list) — treating that as an edit would wipe
+      // the error on the very next frame and leave the user with nothing.
+      final form = await pumpForm(
+        tester,
+        tmsMeta(twoTabs: true),
+        getMeta: (_) async => sectorRowMeta(),
+        linkOptionService: _StubLinkOptionService(const []),
+      );
+
+      form.submit();
+      await tester.pumpAndSettle();
+      await tester.pump(const Duration(milliseconds: 200));
+      await tester.pumpAndSettle();
+
+      final tabBar = tester.widget<TabBar>(find.byType(TabBar));
+      expect(tabBar.controller!.index, 1);
+      expect(form.submitted, isEmpty);
+      expect(find.text('Sectors is required'), findsOneWidget);
+    },
+  );
+
+  testWidgets('Table MultiSelect error clears once the user picks a value', (
+    tester,
+  ) async {
+    final form = await pumpForm(
+      tester,
+      tmsMeta(),
+      getMeta: (_) async => sectorRowMeta(),
+      linkOptionService: _StubLinkOptionService([
+        LinkOptionEntity(
+          doctype: 'Sector',
+          name: 'AGRI',
+          label: 'Agriculture',
+          lastUpdated: 0,
+        ),
+      ]),
+    );
+
+    form.submit();
+    await tester.pumpAndSettle();
+    await tester.pump(const Duration(milliseconds: 200));
+    expect(find.text('Sectors is required'), findsOneWidget);
+
+    // Focus the search input so the suggestion list opens, then pick.
+    await tester.tap(find.byType(TextField));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Agriculture'));
+    await tester.pumpAndSettle();
+
+    expect(
+      find.text('Sectors is required'),
+      findsNothing,
+      reason: 'adding a value must clear the pending required-empty error',
+    );
+
+    // And the form now submits with the picked row.
+    form.submit();
+    await tester.pumpAndSettle();
+    expect(form.submitted, hasLength(1));
+    expect(form.submitted.single['sectors'], [
+      {'sector': 'AGRI'},
+    ]);
+  });
+
+  testWidgets('reqd empty Table still shows its inline error (unchanged)', (
+    tester,
+  ) async {
+    final meta = DocTypeMeta(
+      name: 'Test',
+      label: 'Test',
+      isTable: false,
+      titleField: null,
+      searchFields: null,
+      fields: [
+        DocField(
+          fieldname: 'sectors',
+          fieldtype: 'Table',
+          idx: 1,
+          label: 'Sectors',
+          reqd: true,
+          options: 'Sector Row',
+        ),
+      ],
+    );
+    final form = await pumpForm(
+      tester,
+      meta,
+      getMeta: (_) async => sectorRowMeta(),
+    );
+
+    form.submit();
+    await tester.pumpAndSettle();
+    await tester.pump(const Duration(milliseconds: 200));
+
+    expect(form.submitted, isEmpty);
+    expect(form.failed, hasLength(1));
+    expect(find.text('Sectors is required'), findsOneWidget);
   });
 }

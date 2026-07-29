@@ -5,6 +5,9 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter_form_builder/flutter_form_builder.dart';
 import 'package:image_picker/image_picker.dart';
+import 'package:path_provider/path_provider.dart';
+import '../../../models/doc_field.dart';
+import '../../../utils/sdk_log.dart';
 import 'base_field.dart';
 import 'field_helpers.dart';
 
@@ -78,6 +81,31 @@ void showFullScreenImage(
   showFullScreenImageProvider(context, NetworkImage(url, headers: headers));
 }
 
+/// Name of the marker file written to the app's cache dir immediately before a
+/// camera capture is launched. It survives the host activity (and process) being
+/// killed mid-capture, which is the only way a later run can tell WHICH field
+/// the platform's stashed photo belongs to.
+const String _captureMarkerFileName = 'frappe_sdk_camera_capture.marker';
+
+/// A marker older than this is treated as abandoned. Without an age bound, a
+/// field whose capture was interrupted days ago would resurface that ancient
+/// photo the next time its camera button is tapped.
+const Duration _captureMarkerMaxAge = Duration(minutes: 30);
+
+/// Identity written into the capture marker so a recovered photo can be scoped
+/// back to the field that actually took it. [ImagePicker.retrieveLostData]'s
+/// cache is app-wide, so this key is the only thing standing between field A's
+/// photo and field B's tap.
+///
+/// LIMITATION: [DocField] carries no owning-doctype/row identifier, so the key
+/// is the fieldtype + fieldname alone. Two ImageFields that share a fieldname —
+/// the same fieldname in two different forms, or in two child-table rows — can
+/// still cross-claim a recovered photo. Narrowing that further needs an owner
+/// identifier the field model does not currently expose.
+@visibleForTesting
+String cameraCaptureMarkerKey(DocField field) =>
+    '${field.fieldtype}/${field.fieldname ?? ''}';
+
 /// Widget for Image/Attach Image field type.
 /// When [uploadFile] is set, picks upload to server first and store file_url; otherwise stores local path.
 /// For /private/files/ and /files/, uses Frappe download_file API and [imageHeaders] for auth.
@@ -147,7 +175,10 @@ class ImageField extends BaseField {
     return '$baseNoSlash$p';
   }
 
-  Future<void> _onImagePicked(
+  /// Applies a picked/recovered [file] to the field. Returns true only when the
+  /// field value actually changed, so callers never report success over a field
+  /// that an upload failure left empty.
+  Future<bool> _onImagePicked(
     FormFieldState<String> fieldState,
     File file,
   ) async {
@@ -157,16 +188,119 @@ class ImageField extends BaseField {
         if (url != null && url.isNotEmpty) {
           fieldState.didChange(url);
           onChanged?.call(url);
+          return true;
         }
         // On upload failure or empty response, do not store local path (server expects file_url)
       } catch (e, st) {
         // Do not fall back to local path; leave field unchanged so wrong URL is never sent
-        debugPrint('ImageField: uploadFile failed — $e\n$st');
+        sdkLog('ImageField: uploadFile failed — $e\n$st');
       }
-    } else {
-      fieldState.didChange(file.path);
-      onChanged?.call(file.path);
+      return false;
     }
+    fieldState.didChange(file.path);
+    onChanged?.call(file.path);
+    return true;
+  }
+
+  /// Handle to the capture marker, or null when the cache dir is unavailable
+  /// (path_provider missing, e.g. in a widget test).
+  Future<File?> _captureMarkerFile() async {
+    try {
+      final dir = await getTemporaryDirectory();
+      return File('${dir.path}/$_captureMarkerFileName');
+    } catch (e) {
+      sdkLog('ImageField: cache dir unavailable for capture marker — $e');
+      return null;
+    }
+  }
+
+  /// Claims the lost-data slot for this field just before the camera is
+  /// launched. Best-effort: if the marker cannot be written the only cost is
+  /// that an interrupted capture will not be recovered (the pre-marker
+  /// behaviour of dropping it), never a photo landing on the wrong field.
+  Future<void> _writeCaptureMarker() async {
+    if (!Platform.isAndroid) return;
+    try {
+      final marker = await _captureMarkerFile();
+      await marker?.writeAsString(cameraCaptureMarkerKey(field), flush: true);
+    } catch (e) {
+      sdkLog('ImageField: could not write capture marker — $e');
+    }
+  }
+
+  Future<void> _clearCaptureMarker() async {
+    if (!Platform.isAndroid) return;
+    try {
+      final marker = await _captureMarkerFile();
+      if (marker != null && await marker.exists()) await marker.delete();
+    } catch (e) {
+      sdkLog('ImageField: could not clear capture marker — $e');
+    }
+  }
+
+  /// Consumes a photo the platform stashed when Android killed the host activity
+  /// mid-capture — but ONLY when the marker written before that interrupted
+  /// capture names THIS field, and only while it is recent.
+  ///
+  /// Returns true when a photo was restored, in which case the caller must not
+  /// start a new capture. The user is told why their tap did not open the
+  /// camera; previously the tap was silently swallowed and an older photo
+  /// appeared instead.
+  ///
+  /// Deliberately does NOT call [ImagePicker.retrieveLostData] when the marker
+  /// belongs to another field: that call CLEARS the platform cache, so probing
+  /// it here would destroy the photo the owning field is still entitled to
+  /// recover.
+  Future<bool> _restoreInterruptedCapture(
+    BuildContext context,
+    ImagePicker picker,
+    FormFieldState<String> fieldState,
+  ) async {
+    if (!Platform.isAndroid) return false;
+    final marker = await _captureMarkerFile();
+    if (marker == null) return false;
+    final String owner;
+    final DateTime writtenAt;
+    try {
+      if (!await marker.exists()) return false;
+      owner = (await marker.readAsString()).trim();
+      writtenAt = await marker.lastModified();
+    } catch (e) {
+      sdkLog('ImageField: could not read capture marker — $e');
+      return false;
+    }
+    final stale = DateTime.now().difference(writtenAt) > _captureMarkerMaxAge;
+    if (stale || owner != cameraCaptureMarkerKey(field)) {
+      // Drop an abandoned marker, but leave another field's marker (and the
+      // platform's stashed photo) alone.
+      if (stale) await _clearCaptureMarker();
+      return false;
+    }
+    await _clearCaptureMarker();
+    try {
+      final lost = await picker.retrieveLostData();
+      final lostFile = lost.file;
+      if (lost.isEmpty || lostFile == null) return false;
+      // An upload failure leaves the field empty — do not claim a restore (and
+      // do not swallow the tap) in that case.
+      if (!await _onImagePicked(fieldState, File(lostFile.path))) return false;
+    } catch (e) {
+      // Recovery is best-effort (iOS throws UnimplementedError) — the caller
+      // falls through to a normal capture.
+      sdkLog('ImageField: lost-capture recovery failed — $e');
+      return false;
+    }
+    if (context.mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text(
+            'Restored the photo taken before the app restarted. '
+            'Tap the camera again to replace it.',
+          ),
+        ),
+      );
+    }
+    return true;
   }
 
   @override
@@ -301,28 +435,43 @@ class ImageField extends BaseField {
                           // Android can kill the host activity mid-capture
                           // and stash the result; without recovering it the
                           // FIRST capture is silently dropped and users must
-                          // shoot twice ("camera-twice" bug). Recover any
-                          // stashed result before launching a fresh capture.
+                          // shoot twice ("camera-twice" bug). The stash is
+                          // app-wide, so only the field named by the marker
+                          // written before that capture may claim it —
+                          // otherwise field B's tap could pick up field A's
+                          // photo.
+                          if (await _restoreInterruptedCapture(
+                            context,
+                            picker,
+                            fieldState,
+                          )) {
+                            return;
+                          }
+                          await _writeCaptureMarker();
                           try {
-                            final lost = await picker.retrieveLostData();
-                            final lostFile = lost.file;
-                            if (!lost.isEmpty && lostFile != null) {
+                            final result = await picker.pickImage(
+                              source: ImageSource.camera,
+                            );
+                            if (result != null) {
+                              // A photo came back inside this run, so nothing is
+                              // stashed — the marker has done its job.
+                              await _clearCaptureMarker();
                               await _onImagePicked(
                                 fieldState,
-                                File(lostFile.path),
+                                File(result.path),
                               );
-                              return;
                             }
+                            // A null result is ambiguous: the user cancelled, OR
+                            // Android recreated the activity and stashed the
+                            // photo (pickImage then completes with null). The
+                            // marker is deliberately LEFT in place — clearing it
+                            // here would make that stashed photo unrecoverable,
+                            // which is the very bug this marker exists to fix.
+                            // A plain cancel costs one empty retrieveLostData()
+                            // on the next tap, and the age bound expires it.
                           } catch (_) {
-                            // Recovery is best-effort (iOS throws
-                            // UnimplementedError) — fall through to a
-                            // normal capture.
-                          }
-                          final result = await picker.pickImage(
-                            source: ImageSource.camera,
-                          );
-                          if (result != null) {
-                            await _onImagePicked(fieldState, File(result.path));
+                            await _clearCaptureMarker();
+                            rethrow;
                           }
                         }
                       : null,
