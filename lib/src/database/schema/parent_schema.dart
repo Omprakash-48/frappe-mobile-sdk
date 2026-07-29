@@ -31,6 +31,14 @@ List<String> buildParentSchemaDDL(
     'push_base_payload TEXT',
     'docstatus INTEGER NOT NULL DEFAULT 0',
     'modified TEXT',
+    // Frappe's server-owned audit fields. NULLABLE with no default — the
+    // server is their only writer, so a locally-created row legitimately has
+    // none of them until a pull fills them in. Materialized so a filter on
+    // `owner` / `creation` / `modified_by` produces real SQL offline instead
+    // of being silently dropped. See `serverAuditColumnNames`.
+    'owner TEXT',
+    'creation TEXT',
+    'modified_by TEXT',
     'local_modified INTEGER NOT NULL',
     'pulled_at INTEGER',
   ];

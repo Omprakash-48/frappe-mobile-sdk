@@ -13,21 +13,24 @@ DocField _f(String n, String t, {String? options}) =>
     DocField(fieldname: n, fieldtype: t, options: options);
 
 DocTypeMeta _orderMeta() => DocTypeMeta(
-      name: 'Order',
-      isTable: false,
-      fields: [
-        _f('title', 'Data'),
-        _f('items', 'Table', options: 'Order Item'),
-        _f('tags', 'Table MultiSelect', options: 'Order Tag'),
-      ],
-    );
+  name: 'Order',
+  isTable: false,
+  fields: [
+    _f('title', 'Data'),
+    _f('items', 'Table', options: 'Order Item'),
+    _f('tags', 'Table MultiSelect', options: 'Order Tag'),
+  ],
+);
 
 void main() {
   group('metaHasChildTableFields', () {
     test('true when meta has a Table field', () {
       final meta = DocTypeMeta(
         name: 'Order',
-        fields: [_f('title', 'Data'), _f('items', 'Table', options: 'Order Item')],
+        fields: [
+          _f('title', 'Data'),
+          _f('items', 'Table', options: 'Order Item'),
+        ],
       );
       expect(metaHasChildTableFields(meta), isTrue);
     });
@@ -35,9 +38,7 @@ void main() {
     test('true when meta has a Table MultiSelect field', () {
       final meta = DocTypeMeta(
         name: 'Order',
-        fields: [
-          _f('tags', 'Table MultiSelect', options: 'Order Tag'),
-        ],
+        fields: [_f('tags', 'Table MultiSelect', options: 'Order Tag')],
       );
       expect(metaHasChildTableFields(meta), isTrue);
     });
@@ -91,30 +92,28 @@ void main() {
     });
 
     test('does not overwrite an existing `name` key on a child row', () {
-      final merged = mergeChildRowsIntoData(
-        {},
-        _orderMeta(),
-        {
-          'items': [
-            {'server_name': 'ITEM-1', 'name': 'already-set'},
-          ],
-        },
-      );
+      final merged = mergeChildRowsIntoData({}, _orderMeta(), {
+        'items': [
+          {'server_name': 'ITEM-1', 'name': 'already-set'},
+        ],
+      });
       final items = merged['items'] as List;
       expect(items.single['name'], 'already-set');
     });
 
-    test('leaves a Table field untouched when absent from childRowsByField',
-        () {
-      final merged = mergeChildRowsIntoData(
-        {'title': 'O-1'},
-        _orderMeta(),
-        const {}, // no rows supplied for 'items' or 'tags'
-      );
-      expect(merged.containsKey('items'), isFalse);
-      expect(merged.containsKey('tags'), isFalse);
-      expect(merged['title'], 'O-1');
-    });
+    test(
+      'leaves a Table field untouched when absent from childRowsByField',
+      () {
+        final merged = mergeChildRowsIntoData(
+          {'title': 'O-1'},
+          _orderMeta(),
+          const {}, // no rows supplied for 'items' or 'tags'
+        );
+        expect(merged.containsKey('items'), isFalse);
+        expect(merged.containsKey('tags'), isFalse);
+        expect(merged['title'], 'O-1');
+      },
+    );
 
     test('ignores childRowsByField entries for non-Table fields', () {
       final merged = mergeChildRowsIntoData(
@@ -133,33 +132,25 @@ void main() {
 
     test('does not mutate the input parentData map', () {
       final input = {'title': 'O-1'};
-      final merged = mergeChildRowsIntoData(
-        input,
-        _orderMeta(),
-        {
-          'items': [
-            {'server_name': 'ITEM-1'},
-          ],
-        },
-      );
+      final merged = mergeChildRowsIntoData(input, _orderMeta(), {
+        'items': [
+          {'server_name': 'ITEM-1'},
+        ],
+      });
       expect(input.containsKey('items'), isFalse);
       expect(merged.containsKey('items'), isTrue);
     });
 
     test('handles multiple Table fields independently', () {
-      final merged = mergeChildRowsIntoData(
-        {},
-        _orderMeta(),
-        {
-          'items': [
-            {'server_name': 'ITEM-1'},
-          ],
-          'tags': [
-            {'server_name': 'TAG-1'},
-            {'server_name': 'TAG-2'},
-          ],
-        },
-      );
+      final merged = mergeChildRowsIntoData({}, _orderMeta(), {
+        'items': [
+          {'server_name': 'ITEM-1'},
+        ],
+        'tags': [
+          {'server_name': 'TAG-1'},
+          {'server_name': 'TAG-2'},
+        ],
+      });
       expect((merged['items'] as List), hasLength(1));
       expect((merged['tags'] as List), hasLength(2));
     });

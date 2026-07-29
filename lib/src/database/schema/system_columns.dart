@@ -1,3 +1,39 @@
+/// Frappe's server-owned audit fields, materialized as nullable `TEXT` on
+/// every PARENT `docs__<doctype>` table.
+///
+/// They exist offline so a filter referencing them produces real SQL. Before
+/// they were materialized, `FilterParser` silently DROPPED such a clause,
+/// which made offline results a SUPERSET of the server query — an
+/// `owner = <current user>` filter became a no-op and surfaced rows that
+/// were not the user's.
+///
+/// The server is AUTHORITATIVE. Frappe assigns `owner` / `creation` on insert
+/// and `modified_by` on every save, and a client must never SEND them — they
+/// are in [systemSyncMetadataColumnNames], so both the outbound payload and
+/// the `ThreeWayMerge` base strip them. That is a security property: it is
+/// what stops a client forging `owner`.
+///
+/// A row created ON THE DEVICE is nevertheless stamped with a LOCAL PREDICTION
+/// (`LocalWriter._resolveParentAudit`): `owner` / `modified_by` = the session
+/// user, `creation` = now. This is not fabrication — Frappe assigns `owner` to
+/// the authenticated user performing the insert, so the prediction is what the
+/// server will confirm, and Frappe's own web client does the same
+/// (`frappe.model.get_new_doc` sets `owner = frappe.session.user`). Without it
+/// the creator's own offline draft is missing from their own
+/// `owner = <me>` list — the record looks lost.
+///
+/// Server truth always overwrites the prediction, from both directions:
+/// `PullApply._copyServerAuditFields` on pull, and
+/// `ResponseWriteback.applyInTxn` on a successful push. Neither routes through
+/// [LocalWriter], so the prediction can never block them. An UPDATE preserves
+/// the existing `owner` / `creation` (authorship belongs to the creator); only
+/// `modified_by` moves.
+///
+/// PARENT ONLY — `child_schema.dart` does not emit these, so
+/// [systemChildColumnNames] deliberately excludes them and `FilterParser`
+/// whitelists them only when `!meta.isTable`.
+const serverAuditColumnNames = <String>{'owner', 'creation', 'modified_by'};
+
 /// System column names emitted by the offline-document parent table block.
 /// A meta field that uses any of these names is dropped from the meta loop
 /// because the system column already covers it (and SQLite rejects duplicate
@@ -18,6 +54,7 @@ const systemParentColumnNames = <String>{
   'push_base_payload',
   'docstatus',
   'modified',
+  ...serverAuditColumnNames,
   'local_modified',
   'pulled_at',
 };
@@ -49,6 +86,12 @@ const systemSyncMetadataColumnNames = <String>{
   // Identity / link columns — emitted explicitly by the caller.
   'mobile_uuid',
   'server_name',
+  // Server-owned audit fields. Frappe assigns these itself, so a client
+  // that sent them would at best be rejected by validation and at worst
+  // forge document attribution (`owner` drives permission checks). Stripped
+  // from BOTH the outbound payload and the `ThreeWayMerge` base so the two
+  // agree — see [serverAuditColumnNames].
+  ...serverAuditColumnNames,
   // Per-doc sync state.
   'sync_status',
   'sync_error',

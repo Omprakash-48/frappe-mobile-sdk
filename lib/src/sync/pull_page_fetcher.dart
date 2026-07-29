@@ -1,4 +1,5 @@
 import '../database/field_type_mapping.dart';
+import '../database/schema/system_columns.dart';
 import '../models/doc_type_meta.dart';
 import 'cursor.dart';
 
@@ -94,11 +95,18 @@ class PullPageFetcher {
   }
 
   /// Fields to request from `frappe.client.get_list`. Always includes
-  /// `name` + `modified` (system identifiers); plus every persisted
-  /// fieldname (skipping layout/break/button types). Child-table fields
-  /// are included so Frappe expands them inline.
+  /// `name` + `modified` and Frappe's server-owned audit fields (system
+  /// identifiers); plus every persisted fieldname (skipping
+  /// layout/break/button types). Child-table fields are included so Frappe
+  /// expands them inline.
+  ///
+  /// `owner` / `creation` / `modified_by` are real columns on every DocType
+  /// table (never declared in `meta.fields`), so they must be requested
+  /// explicitly or `PullApply` would persist NULL and any offline filter on
+  /// them would match nothing. `listableFieldnamesForStar` already sends the
+  /// same three to this endpoint for wildcard expansion.
   static List<String> _fieldsToRequest(DocTypeMeta meta) {
-    final set = <String>{'name', 'modified'};
+    final set = <String>{'name', 'modified', ...serverAuditColumnNames};
     for (final f in meta.fields) {
       final t = f.fieldtype;
       final n = f.fieldname;

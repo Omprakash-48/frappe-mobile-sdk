@@ -1,7 +1,6 @@
 import '../database/field_type_mapping.dart';
 import '../database/normalize_for_search.dart';
 import '../models/doc_type_meta.dart';
-import '../utils/sdk_log.dart';
 import 'filter_errors.dart';
 import 'frappe_timespan.dart';
 import 'parsed_query.dart';
@@ -60,22 +59,23 @@ class FilterParser {
     'idx': 'INTEGER',
   };
 
-  /// Frappe framework audit fields that the offline schema never materializes
-  /// (see `parent_schema.dart` / `system_columns.dart`). A server link_filter
-  /// may reference them (e.g. the entrepreneur link_filters use `owner`);
-  /// OFFLINE we DROP such a clause instead of throwing, because the local
-  /// cache is already server-permission-scoped so the clause is effectively
-  /// pre-applied. Genuinely-unknown columns (typos, real fields) still error.
+  /// Frappe's server-owned audit fields, present only on PARENT tables — see
+  /// `parent_schema.dart` / `serverAuditColumnNames`. Added to the whitelist
+  /// when `!meta.isTable`.
   ///
-  /// CAVEAT: dropping an AND clause makes the offline result a SUPERSET of the
-  /// online query — safe only for doctypes whose local cache is already scoped
-  /// to the user's own rows. The drop is logged (debug) via [sdkLog] so it is
-  /// not silent; a fuller fix would materialize these columns offline. Do NOT
-  /// add non-audit business fields here.
-  static const Set<String> _skippableAbsentColumns = {
-    'owner',
-    'creation',
-    'modified_by',
+  /// These used to be dropped from the filter list entirely (they were not
+  /// materialized offline), which made an offline result a SUPERSET of the
+  /// server query — an `owner = <current user>` clause became a no-op and
+  /// surfaced rows belonging to other users. They now emit real, bound SQL.
+  ///
+  /// Deliberately NOT added for child tables: `child_schema.dart` emits no
+  /// such columns, so whitelisting them there would generate SQL against a
+  /// column that does not exist. A child-table filter on them therefore
+  /// throws `Unknown column`, like any other absent column.
+  static const Map<String, String> _parentAuditColumns = {
+    'owner': 'TEXT',
+    'creation': 'TEXT',
+    'modified_by': 'TEXT',
   };
 
   static ParsedQuery toSql({
@@ -109,7 +109,6 @@ class FilterParser {
       malformedMessage: (f) =>
           'Malformed filter: $f (expected [col, op, value])',
       length4Message: length4,
-      doctype: meta.name,
     );
 
     final orParts = <String>[];
@@ -122,7 +121,6 @@ class FilterParser {
       malformedMessage: (f) =>
           'Malformed or_filter: $f (expected [col, op, value])',
       length4Message: length4,
-      doctype: meta.name,
     );
 
     final where = <String>[];
@@ -164,7 +162,6 @@ class FilterParser {
     required List<Object?> params,
     required String Function(List<dynamic>) malformedMessage,
     required String length4Message,
-    required String doctype,
   }) {
     for (final f in inputs) {
       if (f.length == 4) {
@@ -172,19 +169,6 @@ class FilterParser {
       }
       if (f.length != 3) {
         throw FilterParseError(malformedMessage(f));
-      }
-      final col0 = f[0];
-      if (col0 is String &&
-          _skippableAbsentColumns.contains(col0) &&
-          !colTypes.containsKey(col0)) {
-        // Standard audit field not materialized offline — drop the clause
-        // rather than throwing (see [_skippableAbsentColumns]). Logged so the
-        // offline/online divergence is diagnosable rather than silent.
-        sdkLog(
-          'FilterParser: dropped offline-unmaterialized audit clause $f on '
-          '"$doctype" — offline results may be a SUPERSET of the server query.',
-        );
-        continue;
       }
       final parsed = _parseOne(f, colTypes, normFields);
       sqlParts.add(parsed.sql);
@@ -322,7 +306,11 @@ class FilterParser {
   static Map<String, String> _columnTypes(DocTypeMeta meta) {
     final map = <String, String>{};
     map.addAll(_systemColumns);
-    if (meta.isTable) map.addAll(_childSystemColumns);
+    if (meta.isTable) {
+      map.addAll(_childSystemColumns);
+    } else {
+      map.addAll(_parentAuditColumns);
+    }
     for (final f in meta.fields) {
       final n = f.fieldname;
       if (n == null || n.isEmpty) continue;

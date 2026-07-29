@@ -3,8 +3,8 @@ import 'package:frappe_mobile_sdk/src/models/doc_field.dart';
 import 'package:frappe_mobile_sdk/src/models/doc_type_meta.dart';
 import 'package:frappe_mobile_sdk/src/sdk/frappe_sdk.dart';
 
-DocField f(String n, String t) =>
-    DocField(fieldname: n, fieldtype: t, label: n);
+DocField f(String n, String t, {bool isVirtual = false}) =>
+    DocField(fieldname: n, fieldtype: t, label: n, isVirtual: isVirtual);
 
 void main() {
   group('listableFieldnamesForStar', () {
@@ -42,6 +42,49 @@ void main() {
           'docstatus',
         ]),
       );
+    });
+
+    test('excludes virtual fields regardless of fieldtype', () {
+      final meta = DocTypeMeta(
+        name: 'X',
+        fields: [
+          // Same fieldtype, differing ONLY in is_virtual — pins that the skip
+          // is driven by the flag, not by the fieldtype set.
+          f('real_total', 'Currency'),
+          f('virtual_total', 'Currency', isVirtual: true),
+          f('virtual_note', 'Data', isVirtual: true),
+          f('virtual_link', 'Link', isVirtual: true),
+        ],
+      );
+      final cols = listableFieldnamesForStar(meta);
+
+      // Virtual fields have no DB column — never emit them.
+      expect(cols, isNot(contains('virtual_total')));
+      expect(cols, isNot(contains('virtual_note')));
+      expect(cols, isNot(contains('virtual_link')));
+      // A non-virtual field of the SAME fieldtype is still emitted.
+      expect(cols, contains('real_total'));
+      // Standard document columns are unaffected.
+      expect(cols, containsAll(<String>['name', 'owner', 'modified']));
+    });
+
+    test('is_virtual survives a DocTypeMeta JSON round-trip', () {
+      // MetaService persists DocTypeMeta.toJson() into the local meta cache;
+      // if the flag were dropped there, the virtual column would come back on
+      // the next cold start.
+      final meta = DocTypeMeta(
+        name: 'X',
+        fields: [
+          f('real_total', 'Currency'),
+          f('virtual_total', 'Currency', isVirtual: true),
+        ],
+      );
+      final cols = listableFieldnamesForStar(
+        DocTypeMeta.fromJson(meta.toJson()),
+      );
+
+      expect(cols, isNot(contains('virtual_total')));
+      expect(cols, contains('real_total'));
     });
   });
 }

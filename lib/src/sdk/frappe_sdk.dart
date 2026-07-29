@@ -266,7 +266,13 @@ class FrappeSDK {
     _metaService = MetaService(_client!, _database!);
     final testMetaService = _metaService!;
     final testMetaFn = testMetaService.getMeta;
-    final testLocalWriter = LocalWriter(database.rawDatabase, testMetaFn);
+    // `currentUserId` is read lazily, so it is safe that `_sessionUserService`
+    // is created further down — same wiring as production (see _doInitialize).
+    final testLocalWriter = LocalWriter(
+      database.rawDatabase,
+      testMetaFn,
+      currentUserId: () => _sessionUserService?.current?.name,
+    );
     _repository = OfflineRepository(
       _database!,
       localWriter: testLocalWriter,
@@ -411,7 +417,16 @@ class FrappeSDK {
     await _sessionUserService!.restoreFromDb();
     final metaSvc = _metaService!;
     final metaFn = metaSvc.getMeta;
-    final localWriter = LocalWriter(rawDb, metaFn);
+    // `currentUserId` lets LocalWriter predict Frappe's `owner` / `creation` /
+    // `modified_by` for a document created on this device, so the creator's own
+    // `owner = <me>` list shows it before it ever syncs. Read through the
+    // service on every call (not captured once) so login / logout mid-session
+    // is reflected immediately.
+    final localWriter = LocalWriter(
+      rawDb,
+      metaFn,
+      currentUserId: () => _sessionUserService?.current?.name,
+    );
     _repository = OfflineRepository(
       _database!,
       localWriter: localWriter,
@@ -1723,9 +1738,10 @@ class FrappeSDK {
 
 /// Concrete, `get_list`-safe column fieldnames for [meta] — used to expand a
 /// wildcard `['*']` request, which this server rejects. Skips layout-only and
-/// child-table field types (not real DB columns) and always includes the
-/// standard document columns. `workflow_state` / `status` are included
-/// automatically when present in the doctype's fields (workflow doctypes).
+/// child-table field types plus virtual fields (none are real DB columns) and
+/// always includes the standard document columns. `workflow_state` / `status`
+/// are included automatically when present in the doctype's fields (workflow
+/// doctypes).
 List<String> listableFieldnamesForStar(DocTypeMeta meta) {
   const skip = <String>{
     'Section Break',
@@ -1755,6 +1771,12 @@ List<String> listableFieldnamesForStar(DocTypeMeta meta) {
   for (final f in meta.fields) {
     final fn = f.fieldname;
     if (fn == null || fn.isEmpty) continue;
+    // A virtual DocField (`is_virtual=1`) is computed at runtime by a property
+    // setter / controller and gets NO DB column, whatever its fieldtype — so
+    // the fieldtype skip set above cannot catch it. Emitting it in a ['*']
+    // expansion sends a nonexistent column to frappe.client.get_list (the
+    // exact unknown-column failure this expansion exists to avoid).
+    if (f.isVirtual) continue;
     if (skip.contains(f.fieldtype)) continue;
     out.add(fn);
   }

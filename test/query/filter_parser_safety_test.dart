@@ -86,23 +86,82 @@ void main() {
     );
   });
 
-  test('absent standard audit column (owner) is dropped, not thrown', () {
+  test(
+    'standard audit column (owner) emits real bound SQL, is NOT dropped',
+    () {
+      final meta = DocTypeMeta(name: 'X', fields: [f('a', 'Data')]);
+      // `owner` is materialized on every parent `docs__*` table, so the clause
+      // must reach SQL. It used to be silently dropped, which made the offline
+      // result a SUPERSET of the server query (rows owned by other users).
+      final pq = FilterParser.toSql(
+        meta: meta,
+        tableName: 'docs__x',
+        filters: [
+          ['owner', '=', 'someone@example.com'],
+          ['a', '=', 'keep'],
+        ],
+        page: 0,
+        pageSize: 10,
+      );
+      expect(pq.sql, contains("IFNULL(owner, '') = ?"));
+      expect(pq.params, containsAllInOrder(['someone@example.com', 'keep']));
+    },
+  );
+
+  test('creation emits real bound SQL (range comparison)', () {
     final meta = DocTypeMeta(name: 'X', fields: [f('a', 'Data')]);
-    // `owner` is a Frappe framework field not materialized offline; a server
-    // link_filter on it must be silently dropped, never throw.
     final pq = FilterParser.toSql(
       meta: meta,
       tableName: 'docs__x',
       filters: [
-        ['owner', '=', 'someone@example.com'],
-        ['a', '=', 'keep'],
+        ['creation', '>=', '2026-01-01 00:00:00'],
       ],
       page: 0,
       pageSize: 10,
     );
-    expect(pq.params, contains('keep'));
-    expect(pq.params, isNot(contains('someone@example.com')));
-    expect(pq.sql, isNot(contains('owner')));
+    expect(pq.sql, contains('creation >= ?'));
+    expect(pq.params, ['2026-01-01 00:00:00']);
+  });
+
+  test('modified_by is filterable on a parent doctype', () {
+    final meta = DocTypeMeta(name: 'X', fields: [f('a', 'Data')]);
+    final pq = FilterParser.toSql(
+      meta: meta,
+      tableName: 'docs__x',
+      filters: [
+        ['modified_by', '=', 'editor@example.com'],
+      ],
+      page: 0,
+      pageSize: 10,
+    );
+    expect(pq.sql, contains("IFNULL(modified_by, '') = ?"));
+    expect(pq.params, ['editor@example.com']);
+  });
+
+  test('audit columns are NOT whitelisted on a child table (isTable)', () {
+    // `child_schema.dart` emits no audit columns, so whitelisting them for a
+    // child doctype would generate SQL against a column that does not exist.
+    // Throwing is correct — and is what any other absent column does.
+    final meta = DocTypeMeta(
+      name: 'C',
+      fields: [f('a', 'Data')],
+      isTable: true,
+    );
+    for (final col in ['owner', 'creation', 'modified_by']) {
+      expect(
+        () => FilterParser.toSql(
+          meta: meta,
+          tableName: 'docs__c',
+          filters: [
+            [col, '=', 'x'],
+          ],
+          page: 0,
+          pageSize: 10,
+        ),
+        throwsA(isA<FilterParseError>()),
+        reason: '$col must not be whitelisted for a child table',
+      );
+    }
   });
 
   test('genuinely-unknown column still throws (not silently dropped)', () {
