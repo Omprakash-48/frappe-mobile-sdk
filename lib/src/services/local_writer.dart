@@ -85,12 +85,24 @@ class LocalWriter {
   /// as TEXT and `FilterParser` compares/orders it with plain SQL operators.
   /// An ISO-8601 string would sort AFTER every server value on the same date
   /// (`' '` < `'T'`) and silently break `creation >= ...` range filters.
-  /// Second precision is a lexicographic prefix of Frappe's `.ffffff`, so
-  /// comparisons against a microsecond-bearing server value still order
-  /// correctly.
+  /// Second precision is a lexicographic prefix of Frappe's `.ffffff`. That
+  /// makes a bare second-precision string order correctly for `>=` / `>`, but
+  /// it is strictly LESS THAN any same-second microsecond value, so it does
+  /// NOT hold for `<=` / `<` / `=`:
   ///
-  /// Same shape as `FrappeTimespan._iso`, which builds the `creation` /
-  /// `modified` bounds this SDK already sends to Frappe.
+  ///     '2026-07-29 23:59:59.123456' <= '2026-07-29 23:59:59'  -> false
+  ///     '2026-07-29 12:00:00.000000' =  '2026-07-29 12:00:00'  -> false
+  ///
+  /// Consequence (pre-existing, not introduced here): the `23:59:59` upper
+  /// bounds in `FrappeTimespan._endOfDay` and
+  /// `FilterParser._normalizeBetweenBound` exclude server rows created inside
+  /// that final second. Fixing that means widening those bounds to
+  /// `.999999` or making the upper bound exclusive — a behaviour change, so it
+  /// is deliberately not done here.
+  ///
+  /// Same shape as `FrappeTimespan._iso`. NOTE: that helper builds bounds for
+  /// LOCAL SQLite comparison only — `FilterParser` is pure and does no I/O —
+  /// so neither formatter is ever sent to Frappe.
   static String _frappeDateTime(DateTime dt) =>
       '${dt.year.toString().padLeft(4, '0')}-'
       '${dt.month.toString().padLeft(2, '0')}-'

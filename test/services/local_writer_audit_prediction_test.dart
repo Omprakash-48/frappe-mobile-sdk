@@ -34,9 +34,11 @@ import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 DocField f(String n, String t, {String? options}) =>
     DocField(fieldname: n, fieldtype: t, label: n, options: options);
 
-/// Frappe's `Datetime` wire shape: `YYYY-MM-DD HH:MM:SS`. Space separator, no
-/// `T`, no timezone designator — anything else breaks lexicographic
-/// comparison against a server value in a `creation >= ...` filter.
+/// Frappe's `Datetime` shape: `YYYY-MM-DD HH:MM:SS`. Space separator, no `T`,
+/// no timezone designator — anything else breaks lexicographic comparison
+/// against a server-supplied value in a LOCAL `creation >= ...` filter.
+/// (These values are never sent to Frappe; they are stripped from every
+/// outbound payload. The comparison being protected is local SQLite's.)
 final _frappeDateTime = RegExp(r'^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$');
 
 void main() {
