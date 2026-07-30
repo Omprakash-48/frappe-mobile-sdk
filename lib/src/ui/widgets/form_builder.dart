@@ -383,6 +383,37 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
   static bool _rendersInlineTableError(String? fieldtype) =>
       fieldtype == 'Table' || fieldtype == 'Table MultiSelect';
 
+  /// Pushes the two per-form inputs onto [FieldFactory] as instance state.
+  ///
+  /// These are deliberately NOT `createField` parameters: that method is
+  /// documented as overridable, and Dart requires an override to redeclare
+  /// every named parameter of the method it overrides — so a new parameter
+  /// breaks every existing subclass at compile time, and a default value does
+  /// not help (a caller holding a `FieldFactory` reference may still pass it
+  /// explicitly). Host apps subclass this factory, so the signature is treated
+  /// as frozen. Mirrors how `linkOptionService` / `linkFieldCoordinator` are
+  /// already wired. Re-invoked from [didUpdateWidget] because `meta` can change.
+  void _configureFieldFactoryForMeta() {
+    // Frappe stores Single doctypes as mediumtext and exempts them from the
+    // implicit Data varchar(140) cap.
+    _fieldFactory.capDataLength = !widget.meta.isSingle;
+    _fieldFactory.errorTextResolver = _inlineTableErrorFor;
+  }
+
+  /// Inline error for a child-table field, for whichever mode is active.
+  /// Returns null for every other fieldtype — those ARE `FormBuilderField`s and
+  /// render their own error, so supplying one here would double-render.
+  String? _inlineTableErrorFor(String fieldname) {
+    if (!_rendersInlineTableError(widget.meta.getField(fieldname)?.fieldtype)) {
+      return null;
+    }
+    final c = _controller;
+    if (widget.mode == FormBuilderMode.reactive && c != null) {
+      return c.errorOf(fieldname);
+    }
+    return _tableFieldErrors[fieldname];
+  }
+
   // Reactive mode (FormBuilderMode.reactive): app-ownable controller.
   FormController? _controller;
   bool _ownsController = false;
@@ -478,6 +509,7 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
       _fieldFactory.linkOptionService ??= widget.linkOptionService;
       _fieldFactory.linkFieldCoordinator ??= _linkFieldCoordinator;
     }
+    _configureFieldFactoryForMeta();
 
     _buildFormStructure();
     _tabController = TabController(
@@ -1224,7 +1256,6 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
     final fieldWidget = _fieldFactory.createField(
       field: fieldWithEffectiveProps,
       value: initialValue,
-      capDataLength: !widget.meta.isSingle,
       uploadFile: widget.uploadFile,
       fileUrlBase: widget.fileUrlBase,
       imageHeaders: widget.imageHeaders,
@@ -1254,7 +1285,6 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
                 )
           : null,
       onButtonPressed: widget.onButtonPressed,
-      errorText: _tableFieldErrors[field.fieldname],
       onChanged: (value) => _onFieldValueChanged(field, value),
       enabled: !effectiveReadOnly,
       formData: Map<String, dynamic>.from(_formData),
@@ -1632,6 +1662,7 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
         });
       }
       _fieldFactory.linkFieldCoordinator = _linkFieldCoordinator;
+      _configureFieldFactoryForMeta();
       _buildFormStructure();
       _tabController.dispose();
       _tabController = TabController(
@@ -2031,7 +2062,6 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
         final w = _fieldFactory.createField(
           field: effective,
           value: value,
-          capDataLength: !widget.meta.isSingle,
           enabled: !effectiveReadOnly,
           // Inline-table error only: an edit made while the message is showing
           // re-validates the field so supplying a value clears it. Gated on an
@@ -2047,8 +2077,6 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
             }
           },
           formData: c.values,
-          // Non-null only for the two child-table fieldtypes (see above).
-          errorText: inlineTableError ? c.errorOf(name) : null,
           style: fieldStyle,
           uploadFile: widget.uploadFile,
           fileUrlBase: widget.fileUrlBase,
