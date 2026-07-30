@@ -264,4 +264,41 @@ void main() {
       await db.close();
     },
   );
+
+  group('cache-miss reporting', () {
+    test('a miss still allows, and is reported once per check', () async {
+      final db = await AppDatabase.inMemoryDatabase();
+      final missed = <String>[];
+      final svc = PermissionService(
+        FrappeClient('http://localhost'),
+        db,
+        onCacheMiss: missed.add,
+      );
+
+      // Behaviour is unchanged — the default is still allow.
+      expect(await svc.canWrite('Never Synced'), isTrue);
+      expect(await svc.canCreate('Never Synced'), isTrue);
+
+      // ...but the UI is gating on an assumption, and now we can see it.
+      expect(missed, ['Never Synced', 'Never Synced']);
+      await db.close();
+    });
+
+    test('a synced row is NOT reported as a miss', () async {
+      final db = await AppDatabase.inMemoryDatabase();
+      final missed = <String>[];
+      final svc = PermissionService(
+        FrappeClient('http://localhost'),
+        db,
+        onCacheMiss: missed.add,
+      );
+      await svc.saveFromLoginResponse([
+        {'doctype': 'Customer', 'read': true, 'write': false},
+      ]);
+
+      expect(await svc.canWrite('Customer'), isFalse);
+      expect(missed, isEmpty);
+      await db.close();
+    });
+  });
 }

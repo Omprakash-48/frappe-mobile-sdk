@@ -1,6 +1,7 @@
 import '../api/client.dart';
 import '../database/app_database.dart';
 import '../database/entities/doctype_permission_entity.dart';
+import '../utils/sdk_log.dart';
 
 /// Syncs and caches user permissions from login response or mobile_auth.permissions API.
 /// Use [saveFromLoginResponse] after login; use [syncFromApi] on app launch to refresh.
@@ -8,7 +9,16 @@ class PermissionService {
   final FrappeClient _client;
   final AppDatabase _database;
 
-  PermissionService(this._client, this._database);
+  /// [onCacheMiss] is invoked with the doctype whenever no synced permission
+  /// row exists for it. Optional and named so every existing call site is
+  /// unaffected.
+  PermissionService(
+    this._client,
+    this._database, {
+    void Function(String doctype)? onCacheMiss,
+  }) : _onCacheMiss = onCacheMiss;
+
+  final void Function(String doctype)? _onCacheMiss;
 
   /// Save permissions from login response.
   /// [permissions] can be:
@@ -86,29 +96,38 @@ class PermissionService {
     return _database.doctypePermissionDao.findByDoctype(doctype);
   }
 
+  /// Resolves one permission flag.
+  ///
+  /// A MISS — no synced row for [doctype] — defaults to ALLOW, preserving
+  /// historical behaviour, but is reported via [_onCacheMiss] and logged. A miss
+  /// means the UI is gating on an assumption rather than on the server's matrix:
+  /// the doctype is absent from the `mobile_auth.permissions` payload, or the
+  /// sync has not run or failed. The server still enforces the real permission,
+  /// so the user-visible symptom is a 403 AFTER filling in a form.
+  Future<bool> _flag(
+    String doctype,
+    bool Function(DoctypePermissionEntity) pick,
+  ) async {
+    final p = await getDoctypePermission(doctype);
+    if (p == null) {
+      _onCacheMiss?.call(doctype);
+      sdkLog(
+        'PermissionService: no synced permission row for "$doctype" '
+        '- defaulting to allow',
+      );
+      return true;
+    }
+    return pick(p);
+  }
+
   /// Default true if no row (allow); otherwise use stored value.
-  Future<bool> canRead(String doctype) async {
-    final p = await getDoctypePermission(doctype);
-    return p?.read ?? true;
-  }
+  Future<bool> canRead(String doctype) => _flag(doctype, (p) => p.read);
 
-  Future<bool> canCreate(String doctype) async {
-    final p = await getDoctypePermission(doctype);
-    return p?.create ?? true;
-  }
+  Future<bool> canCreate(String doctype) => _flag(doctype, (p) => p.create);
 
-  Future<bool> canWrite(String doctype) async {
-    final p = await getDoctypePermission(doctype);
-    return p?.write ?? true;
-  }
+  Future<bool> canWrite(String doctype) => _flag(doctype, (p) => p.write);
 
-  Future<bool> canDelete(String doctype) async {
-    final p = await getDoctypePermission(doctype);
-    return p?.delete ?? true;
-  }
+  Future<bool> canDelete(String doctype) => _flag(doctype, (p) => p.delete);
 
-  Future<bool> canSubmit(String doctype) async {
-    final p = await getDoctypePermission(doctype);
-    return p?.submit ?? true;
-  }
+  Future<bool> canSubmit(String doctype) => _flag(doctype, (p) => p.submit);
 }
