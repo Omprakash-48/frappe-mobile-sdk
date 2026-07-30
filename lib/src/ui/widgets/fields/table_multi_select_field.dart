@@ -45,6 +45,8 @@ class TableMultiSelectFieldBase extends BaseField {
       formData: formData,
       parentFormData: parentFormData,
       getLinkFilterBuilder: getLinkFilterBuilder,
+      labelText: style?.decoration?.labelText,
+      style: style,
     );
   }
 }
@@ -61,6 +63,8 @@ class _Loader extends StatefulWidget {
     this.formData = const {},
     this.parentFormData = const {},
     this.getLinkFilterBuilder,
+    this.labelText,
+    this.style,
   });
 
   final DocField field;
@@ -73,6 +77,8 @@ class _Loader extends StatefulWidget {
   final Map<String, dynamic> parentFormData;
   final LinkFilterBuilder? Function(String doctype, String fieldname)?
   getLinkFilterBuilder;
+  final String? labelText;
+  final FieldStyle? style;
 
   @override
   State<_Loader> createState() => _LoaderState();
@@ -121,7 +127,9 @@ class _LoaderState extends State<_Loader> {
           break;
         }
       }
-    } catch (_) {}
+    } catch (e, st) {
+      debugPrint('TableMultiSelectField: option load failed — $e\n$st');
+    }
     if (mounted) {
       setState(() => _loading = false);
       // Emit a clean list value into _formData immediately after load.
@@ -160,6 +168,10 @@ class _LoaderState extends State<_Loader> {
       multiSelect: true,
       enabled: widget.enabled,
       loading: _loading,
+      hintText: widget.field.placeholder,
+      labelText: widget.labelText,
+      pickerMode:
+          widget.style?.linkFieldPickerMode ?? LinkFieldPickerMode.inline,
       onChanged: (values) {
         if (_linkFieldName == null) return;
         final rows = values

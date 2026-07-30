@@ -247,17 +247,11 @@ class _HomeScreenState extends State<HomeScreen> {
       return;
     }
 
-    // Initialize services if not already done
-    _metaService ??= MetaService(_authService!.client!, _database!);
-    _repository ??= OfflineRepository(_database!);
-    _syncService ??= SyncService(
-      _authService!.client!,
-      _repository!,
-      _database!,
-    );
-    _linkOptionService ??= LinkOptionService(_authService!.client!);
-
-    // Initial metadata + data sync for mobile forms
+    // Services are wired once by sdk.initialize() in _initialize() and exposed
+    // via sdk.meta / sdk.repository / sdk.sync / sdk.linkOptions. Do NOT rebuild
+    // them here — a hand-rolled graph diverges from the SDK's wiring (offline
+    // mode, connectivity-aware resolver, push runner) and would run alongside
+    // the SDK's own instances. Just run the post-login data sync.
     await _initialMetaAndDataSync();
 
     setState(() {
@@ -371,28 +365,18 @@ class _HomeScreenState extends State<HomeScreen> {
       );
     }
 
-    // Initialize services if not already done (should happen in _handleLoginSuccess, but double-check)
+    // Services are wired once by sdk.initialize() in _initialize(). If any is
+    // missing (initialize() failed), surface that rather than rebuilding a
+    // divergent service graph.
     if (_metaService == null ||
         _repository == null ||
         _syncService == null ||
         _linkOptionService == null) {
-      if (_database != null && _authService!.client != null) {
-        _metaService = MetaService(_authService!.client!, _database!);
-        _repository = OfflineRepository(_database!);
-        _syncService = SyncService(
-          _authService!.client!,
-          _repository!,
-          _database!,
-          getMobileUuid: () => _authService!.getOrCreateMobileUuid(),
-        );
-        _linkOptionService = LinkOptionService(_authService!.client!);
-      } else {
-        return const Scaffold(
-          body: Center(
-            child: Text('Services not initialized. Please restart the app.'),
-          ),
-        );
-      }
+      return const Scaffold(
+        body: Center(
+          child: Text('Services not initialized. Please restart the app.'),
+        ),
+      );
     }
 
     if (_appConfig == null) {
@@ -472,6 +456,7 @@ class _HomeScreenState extends State<HomeScreen> {
           return DoctypeListScreen(
             appConfig: _appConfig!,
             repository: _repository!,
+            resolver: _sdk!.resolver,
             homeScreenLayout: _homeScreenLayout,
             groupedDoctypes: homeData.groups.isNotEmpty
                 ? homeData.groups
@@ -507,9 +492,6 @@ class _HomeScreenState extends State<HomeScreen> {
                   }
                 }
 
-                // Get documents from local database (after sync attempt)
-                final docs = await _repository!.getDocumentsByDoctype(doctype);
-
                 if (mounted) {
                   final ctx = context;
                   ScaffoldMessenger.of(ctx).hideCurrentSnackBar();
@@ -520,13 +502,13 @@ class _HomeScreenState extends State<HomeScreen> {
                         doctype: doctype,
                         meta: meta,
                         repository: _repository!,
+                        resolver: _sdk!.resolver,
                         syncService: _syncService!,
                         metaService: _metaService!,
                         linkOptionService: _linkOptionService,
                         api: _authService?.client,
                         getMobileUuid: () =>
                             _authService!.getOrCreateMobileUuid(),
-                        initialDocuments: docs,
                         userRoles: _authService?.roles,
                         permissionService: _permissionService,
                         translate: _translationService != null

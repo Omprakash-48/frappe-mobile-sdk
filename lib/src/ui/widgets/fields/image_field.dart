@@ -6,6 +6,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_form_builder/flutter_form_builder.dart';
 import 'package:image_picker/image_picker.dart';
 import 'base_field.dart';
+import 'field_helpers.dart';
 
 /// Widget for Image/Attach Image field type.
 /// When [uploadFile] is set, picks upload to server first and store file_url; otherwise stores local path.
@@ -80,8 +81,9 @@ class ImageField extends BaseField {
           onChanged?.call(url);
         }
         // On upload failure or empty response, do not store local path (server expects file_url)
-      } catch (_) {
+      } catch (e, st) {
         // Do not fall back to local path; leave field unchanged so wrong URL is never sent
+        debugPrint('ImageField: uploadFile failed — $e\n$st');
       }
     } else {
       fieldState.didChange(file.path);
@@ -95,17 +97,13 @@ class ImageField extends BaseField {
     final String? imagePath = raw?.trim();
 
     return FormBuilderField<String>(
+      autovalidateMode: AutovalidateMode.onUserInteraction,
       key: ValueKey('image_${field.fieldname}'),
       name: field.fieldname ?? '',
       initialValue: imagePath,
       enabled: enabled && !field.readOnly,
       validator: field.reqd
-          ? (value) {
-              if (value == null || value.isEmpty) {
-                return '${field.displayLabel} is required';
-              }
-              return null;
-            }
+          ? (value) => requiredValidator(value, field.displayLabel)
           : null,
       builder: (FormFieldState<String> fieldState) {
         final raw = fieldState.value ?? imagePath;
@@ -113,14 +111,12 @@ class ImageField extends BaseField {
         final isUrl = _isServerUrl(currentValue);
         final displayUrl = isUrl ? _fullImageUrl(currentValue) : null;
 
+        // BaseField.build (the enclosing widget) already renders the
+        // external label with required-asterisk; the inline label that
+        // used to live here is gone for parity with text/numeric/etc.
         return Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            if (field.label != null)
-              Padding(
-                padding: const EdgeInsets.only(bottom: 8.0),
-                child: Text(field.label!, style: style?.labelStyle),
-              ),
             if (currentValue != null && currentValue.isNotEmpty)
               Padding(
                 padding: const EdgeInsets.only(bottom: 8.0),
@@ -199,14 +195,7 @@ class ImageField extends BaseField {
                 ),
               ],
             ),
-            if (fieldState.hasError)
-              Padding(
-                padding: const EdgeInsets.only(top: 4.0),
-                child: Text(
-                  fieldState.errorText!,
-                  style: const TextStyle(color: Colors.red, fontSize: 12),
-                ),
-              ),
+            fieldErrorText(fieldState),
           ],
         );
       },

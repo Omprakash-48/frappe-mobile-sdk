@@ -45,3 +45,22 @@ This policy applies to the **Frappe Mobile SDK** Flutter package in this reposit
 ## Safe harbor
 
 We support responsible disclosure. If you make a good-faith effort to avoid privacy violations, destruction of data, or interruption of services, and give us reasonable time to address the issue before public disclosure, we will not pursue legal action against you for research related to this policy.
+
+## Device-integrity checks: deployment requirements
+
+The optional `FrappeSecurityService` tamper checks have environmental requirements. Misconfiguring the deployment can cause **false positives that block legitimate users**, so review these before enabling a check in production:
+
+### Server time anchor (UTC assumption)
+
+The `serverTimeAnchor` check compares the device clock against the most recent server-supplied `modified` timestamp (read from `doctype_meta.last_ok_cursor`). It assumes the **Frappe server stores `modified` in UTC** — the Frappe default. If a deployment is configured to write local-time timestamps, the anchor is permanently offset by the server's UTC offset and every device will appear to have a rolled-back clock.
+
+- Ensure the server stores timestamps in UTC, **or** exclude `serverTimeAnchor` from `checks` for that deployment.
+- The SDK logs a diagnostic (via `sdkLog`) whenever the anchor is more than 24 hours from the device clock — a strong signal of a non-UTC server or a misconfigured server clock rather than a genuine rollback.
+
+### Clock skew tolerance
+
+`serverTimeAnchor` allows a default skew of **15 minutes** (`serverAnchorToleranceMs`). Deployments without reliable NTP commonly drift 6–10 minutes; the default absorbs this. Only tighten the tolerance where NTP is guaranteed.
+
+### Root and mock-location checks
+
+`root` and `mockLocation` rely on platform plugins (`root_checker_plus`, `geolocator`). When a plugin is unavailable the check **fails open** (treated as a pass) so a platform gap can never brick the app; it never fails closed.

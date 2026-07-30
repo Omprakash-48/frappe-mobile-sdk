@@ -1,5 +1,7 @@
 import 'dart:convert';
 
+import '../utils/frappe_json_utils.dart' as frappe_json;
+
 /// Represents a Frappe DocField (field definition in metadata)
 class DocField {
   final String? fieldname;
@@ -24,6 +26,10 @@ class DocField {
   final bool inListView;
   final bool allowMultiple;
 
+  /// Frappe `search_index=1` flag — indicates the field should be indexed
+  /// for search. Used by the offline-first SDK's index policy.
+  final bool searchIndex;
+
   DocField({
     this.fieldname,
     required this.fieldtype,
@@ -46,17 +52,13 @@ class DocField {
     this.idx,
     this.inListView = false,
     this.allowMultiple = false,
+    this.searchIndex = false,
   });
 
   factory DocField.fromJson(Map<String, dynamic> json) {
-    // Handle Frappe's JSON format - can be int (0/1) or bool
-    bool parseBool(dynamic value, {bool defaultValue = false}) {
-      if (value == null) return defaultValue;
-      if (value is bool) return value;
-      if (value is int) return value == 1;
-      if (value is String) return value == '1' || value.toLowerCase() == 'true';
-      return defaultValue;
-    }
+    // Frappe's JSON encodes booleans inconsistently — see frappe_json_utils.
+    bool parseBool(dynamic v, {bool defaultValue = false}) =>
+        frappe_json.parseBool(v, defaultValue: defaultValue);
 
     int? parseInt(dynamic value) {
       if (value == null) return null;
@@ -106,6 +108,8 @@ class DocField {
           parseBool(json['allow_multiple']) ||
           parseBool(json['allowMultiple']) ||
           _isMultiSelectFieldType(json['fieldtype'] as String?),
+      searchIndex:
+          parseBool(json['search_index']) || parseBool(json['searchIndex']),
     );
   }
 
@@ -139,6 +143,7 @@ class DocField {
       if (idx != null) 'idx': idx,
       'in_list_view': inListView ? 1 : 0,
       'allow_multiple': allowMultiple ? 1 : 0,
+      'search_index': searchIndex ? 1 : 0,
     };
   }
 

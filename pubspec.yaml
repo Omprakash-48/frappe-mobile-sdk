@@ -1,6 +1,6 @@
 name: frappe_mobile_sdk
 description: Flutter SDK for offline-first Frappe/ERPNext mobile apps with auth, API access, dynamic forms, and sync-aware local data operations.
-version: 1.2.0
+version: 2.0.0-beta.1+1
 homepage: https://github.com/dhwani-ris/frappe-mobile-sdk
 repository: https://github.com/dhwani-ris/frappe-mobile-sdk
 issue_tracker: https://github.com/dhwani-ris/frappe-mobile-sdk/issues
@@ -70,6 +70,25 @@ dependencies:
   # GPS location for Geolocation field type
   geolocator: ^13.0.2
 
+  # Unicode diacritic stripping for search normalization
+  diacritic: ^0.1.5
+
+  # Device tier detection for adaptive concurrency pool sizing
+  device_info_plus: ^12.0.0
+
+  # Security: Android root + iOS jailbreak detection
+  root_checker_plus: ^1.0.0
+
+  # Bounded so downstream consumers pinning their own `meta` don't hit
+  # version-skew conflicts (PR#36 round-4 M8). meta stays on 1.x.
+  meta: ">=1.9.0 <3.0.0"
+
+  # SQLite FFI for offline database access
+  sqflite_common_ffi: ^2.3.0
+
+  # Native SQLite bindings (transitive, now explicit for clarity)
+  sqlite3: ^3.0.0
+
 dev_dependencies:
   flutter_test:
     sdk: flutter
@@ -78,8 +97,12 @@ dev_dependencies:
   # Pre-commit: format + analyze before commit (run: dart run flutter_pre_commit)
   flutter_pre_commit: ^0.2.4
 
-  # SQLite FFI for testing
-  sqflite_common_ffi: ^2.3.0
-
 flutter:
   uses-material-design: true
+  plugin:
+    platforms:
+      android:
+        package: com.dhwaniris.frappe_mobile_sdk
+        pluginClass: FrappeSecurityPlugin
+      ios:
+        pluginClass: FrappeSecurityPlugin

@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
 import '../../../database/entities/link_option_entity.dart';
+import 'link_field_picker_mode.dart';
+import 'searchable_select_dialog.dart';
 
 /// Reusable searchable select widget for Frappe Link options.
 ///
@@ -19,6 +21,9 @@ class SearchableSelect extends StatefulWidget {
     this.enabled = true,
     this.loading = false,
     this.hintText,
+    this.labelText,
+    this.errorText,
+    this.pickerMode = LinkFieldPickerMode.inline,
   });
 
   /// All available options (already loaded).
@@ -34,6 +39,14 @@ class SearchableSelect extends StatefulWidget {
   final bool enabled;
   final bool loading;
   final String? hintText;
+
+  /// Floating label shown inside the input border (mirrors [InputDecoration.labelText]).
+  /// Derives from the parent field's [FieldStyle.decoration.labelText] so the
+  /// Link field matches every other field type in the form's visual style.
+  final String? labelText;
+
+  final String? errorText;
+  final LinkFieldPickerMode pickerMode;
 
   @override
   State<SearchableSelect> createState() => _SearchableSelectState();
@@ -79,7 +92,6 @@ class _SearchableSelectState extends State<SearchableSelect> {
               _search.isEmpty ||
               (o.label ?? o.name).toLowerCase().contains(_search.toLowerCase()),
         )
-        .take(8)
         .toList();
   }
 
@@ -106,6 +118,26 @@ class _SearchableSelectState extends State<SearchableSelect> {
     widget.onChanged([]);
     _controller.clear();
     setState(() => _search = '');
+  }
+
+  void _openDialog() async {
+    if (!widget.enabled) return;
+
+    final List<String>? result = await showDialog<List<String>>(
+      context: context,
+      builder: (context) {
+        return SearchableSelectDialog(
+          options: widget.options,
+          initialSelected: widget.selected,
+          multiSelect: widget.multiSelect,
+          title: widget.labelText,
+        );
+      },
+    );
+
+    if (result != null) {
+      widget.onChanged(result);
+    }
   }
 
   @override
@@ -147,112 +179,153 @@ class _SearchableSelectState extends State<SearchableSelect> {
             ),
           ),
 
-        // Single-select current value
-        if (!widget.multiSelect && hasValue && !_showSuggestions)
-          GestureDetector(
-            onTap: widget.enabled
-                ? () {
-                    _focusNode.requestFocus();
-                    setState(() => _showSuggestions = true);
-                  }
-                : null,
+        if (widget.pickerMode == LinkFieldPickerMode.dialog)
+          InkWell(
+            onTap: _openDialog,
             child: InputDecorator(
               decoration: InputDecoration(
+                labelText: widget.labelText,
+                errorText: widget.errorText,
+                hintText:
+                    widget.hintText ??
+                    (widget.multiSelect
+                        ? (hasValue ? 'Add more...' : 'Select options...')
+                        : 'Select...'),
                 isDense: true,
                 contentPadding: const EdgeInsets.symmetric(
                   horizontal: 12,
                   vertical: 10,
                 ),
                 border: const OutlineInputBorder(),
-                suffixIcon: widget.enabled
+                suffixIcon: (!widget.multiSelect && hasValue && widget.enabled)
                     ? IconButton(
                         icon: const Icon(Icons.close, size: 18),
                         onPressed: _clear,
                         padding: EdgeInsets.zero,
                         constraints: const BoxConstraints(),
                       )
-                    : null,
+                    : const Icon(Icons.arrow_drop_down),
               ),
               child: Text(
-                _labelFor(selected.first),
+                (!widget.multiSelect && hasValue)
+                    ? _labelFor(selected.first)
+                    : '',
                 style: const TextStyle(fontSize: 14),
               ),
             ),
-          ),
-
-        // Search input
-        if (widget.enabled &&
-            (widget.multiSelect || !hasValue || _showSuggestions))
-          TextField(
-            controller: _controller,
-            focusNode: _focusNode,
-            decoration: InputDecoration(
-              hintText:
-                  widget.hintText ??
-                  (widget.multiSelect
-                      ? (hasValue ? 'Add more...' : 'Search & select...')
-                      : 'Search...'),
-              prefixIcon: const Icon(Icons.search, size: 20),
-              isDense: true,
-              contentPadding: const EdgeInsets.symmetric(
-                horizontal: 12,
-                vertical: 10,
-              ),
-              border: const OutlineInputBorder(),
-            ),
-            style: const TextStyle(fontSize: 14),
-            onChanged: (text) => setState(() => _search = text),
-          ),
-
-        // Suggestion list
-        if (_showSuggestions && filtered.isNotEmpty)
-          Container(
-            constraints: const BoxConstraints(maxHeight: 200),
-            margin: const EdgeInsets.only(top: 4),
-            decoration: BoxDecoration(
-              color: Theme.of(context).cardColor,
-              border: Border.all(color: Colors.grey.shade300),
-              borderRadius: BorderRadius.circular(4),
-              boxShadow: [
-                BoxShadow(
-                  color: Colors.black.withValues(alpha: 0.08),
-                  blurRadius: 4,
-                  offset: const Offset(0, 2),
-                ),
-              ],
-            ),
-            child: ListView.builder(
-              shrinkWrap: true,
-              padding: EdgeInsets.zero,
-              itemCount: filtered.length,
-              itemBuilder: (context, index) {
-                final opt = filtered[index];
-                return InkWell(
-                  onTap: () => _pick(opt.name),
-                  child: Padding(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 12,
-                      vertical: 10,
-                    ),
-                    child: Text(
-                      opt.label ?? opt.name,
-                      style: const TextStyle(fontSize: 14),
-                    ),
+          )
+        else ...[
+          // Single-select current value
+          if (!widget.multiSelect && hasValue && !_showSuggestions)
+            GestureDetector(
+              onTap: widget.enabled
+                  ? () {
+                      _focusNode.requestFocus();
+                      setState(() => _showSuggestions = true);
+                    }
+                  : null,
+              child: InputDecorator(
+                decoration: InputDecoration(
+                  labelText: widget.labelText,
+                  errorText: widget.errorText,
+                  isDense: true,
+                  contentPadding: const EdgeInsets.symmetric(
+                    horizontal: 12,
+                    vertical: 10,
                   ),
-                );
-              },
+                  border: const OutlineInputBorder(),
+                  suffixIcon: widget.enabled
+                      ? IconButton(
+                          icon: const Icon(Icons.close, size: 18),
+                          onPressed: _clear,
+                          padding: EdgeInsets.zero,
+                          constraints: const BoxConstraints(),
+                        )
+                      : null,
+                ),
+                child: Text(
+                  _labelFor(selected.first),
+                  style: const TextStyle(fontSize: 14),
+                ),
+              ),
             ),
-          ),
 
-        // Empty state
-        if (_showSuggestions && _search.isNotEmpty && filtered.isEmpty)
-          Padding(
-            padding: const EdgeInsets.only(top: 8),
-            child: Text(
-              'No matching options',
-              style: TextStyle(fontSize: 13, color: Colors.grey[600]),
+          // Search input
+          if (widget.enabled &&
+              (widget.multiSelect || !hasValue || _showSuggestions))
+            TextField(
+              controller: _controller,
+              focusNode: _focusNode,
+              decoration: InputDecoration(
+                labelText: widget.labelText,
+                errorText: widget.errorText,
+                hintText:
+                    widget.hintText ??
+                    (widget.multiSelect
+                        ? (hasValue ? 'Add more...' : 'Search & select...')
+                        : 'Search...'),
+                prefixIcon: const Icon(Icons.search, size: 20),
+                isDense: true,
+                contentPadding: const EdgeInsets.symmetric(
+                  horizontal: 12,
+                  vertical: 10,
+                ),
+                border: const OutlineInputBorder(),
+              ),
+              style: const TextStyle(fontSize: 14),
+              onChanged: (text) => setState(() => _search = text),
             ),
-          ),
+
+          // Suggestion list
+          if (_showSuggestions && filtered.isNotEmpty)
+            Container(
+              constraints: const BoxConstraints(maxHeight: 200),
+              margin: const EdgeInsets.only(top: 4),
+              decoration: BoxDecoration(
+                color: Theme.of(context).cardColor,
+                border: Border.all(color: Colors.grey.shade300),
+                borderRadius: BorderRadius.circular(4),
+                boxShadow: [
+                  BoxShadow(
+                    color: Colors.black.withValues(alpha: 0.08),
+                    blurRadius: 4,
+                    offset: const Offset(0, 2),
+                  ),
+                ],
+              ),
+              child: ListView.builder(
+                shrinkWrap: true,
+                padding: EdgeInsets.zero,
+                itemCount: filtered.length,
+                itemBuilder: (context, index) {
+                  final opt = filtered[index];
+                  return InkWell(
+                    onTap: () => _pick(opt.name),
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 12,
+                        vertical: 10,
+                      ),
+                      child: Text(
+                        opt.label ?? opt.name,
+                        style: const TextStyle(fontSize: 14),
+                      ),
+                    ),
+                  );
+                },
+              ),
+            ),
+
+          // Empty state
+          if (_showSuggestions && _search.isNotEmpty && filtered.isEmpty)
+            Padding(
+              padding: const EdgeInsets.only(top: 8),
+              child: Text(
+                'No matching options',
+                style: TextStyle(fontSize: 13, color: Colors.grey[600]),
+              ),
+            ),
+        ],
       ],
     );
   }

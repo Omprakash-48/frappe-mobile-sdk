@@ -2,12 +2,26 @@
 // For license information, please see license.txt
 
 import 'dart:convert';
+import 'dart:math' as math;
+
+import '../sync/sync_details.dart';
+import '../utils/sdk_log.dart';
+import 'exceptions.dart';
 import 'rest_helper.dart';
+import 'utils.dart';
 
 class DoctypeService {
   final RestHelper _restHelper;
+  final int listChildDocsPageSize;
+  final int listFullDocsPageSize;
+  final int listDefaultPageSize;
 
-  DoctypeService(this._restHelper);
+  DoctypeService(
+    this._restHelper, {
+    this.listChildDocsPageSize = 1000,
+    this.listFullDocsPageSize = 1000,
+    this.listDefaultPageSize = 20,
+  });
 
   Future<Map<String, dynamic>> getDocTypeMeta(String doctype) async {
     final response = await _restHelper.get(
@@ -22,22 +36,56 @@ class DoctypeService {
     return response as Map<String, dynamic>;
   }
 
+  /// Fetches just the `modified` timestamp of a DocType meta. Used by the
+  /// offline-first watermark check (spec §4.9). Avoids the full meta payload.
+  /// Returns null if the request fails or the DocType has no recorded
+  /// modified timestamp on the server.
+  Future<String?> getDocTypeWatermark(String doctype) async {
+    try {
+      final response = await _restHelper.get(
+        '/api/method/frappe.client.get_value',
+        queryParams: {
+          'doctype': 'DocType',
+          'filters': jsonEncode({'name': doctype}),
+          'fieldname': jsonEncode(['modified']),
+        },
+      );
+      if (response is Map<String, dynamic>) {
+        final message = response['message'];
+        if (message is Map && message['modified'] != null) {
+          return message['modified'].toString();
+        }
+      }
+      return null;
+    } catch (e, st) {
+      sdkLog(
+        'DoctypeService.getDocTypeWatermark($doctype) failed — $e\n$st',
+      );
+      return null;
+    }
+  }
+
   Future<List<dynamic>> list(
     String doctype, {
     List<String>? fields,
     List<List<dynamic>>? filters,
+    List<List<dynamic>>? orFilters,
     int limitStart = 0,
-    int limitPageLength = 20,
+    int? limitPageLength,
     String? orderBy,
   }) async {
+    final resolvedLimit = limitPageLength ?? listDefaultPageSize;
     final methodParams = <String, dynamic>{
       'doctype': doctype,
       'limit_start': limitStart,
-      'limit_page_length': limitPageLength,
+      'limit_page_length': resolvedLimit,
     };
 
     if (fields != null) methodParams['fields'] = jsonEncode(fields);
     if (filters != null) methodParams['filters'] = jsonEncode(filters);
+    if (orFilters != null && orFilters.isNotEmpty) {
+      methodParams['or_filters'] = jsonEncode(orFilters);
+    }
     if (orderBy != null) methodParams['order_by'] = orderBy;
 
     final response = await _restHelper.get(
@@ -46,9 +94,39 @@ class DoctypeService {
     );
 
     if (response is Map<String, dynamic> && response.containsKey('message')) {
-      return response['message'] as List<dynamic>;
+      final msg = response['message'];
+      if (msg is List) return msg;
+      // Frappe returned a non-List message (null, error string, etc.).
+      // Treat as empty page — callers see no records and pull continues.
+      sdkLog(
+        'DoctypeService.list: unexpected message shape for $doctype '
+        '(${msg?.runtimeType ?? "null"}) — treating as empty page',
+      );
+      return [];
     }
     return [];
+  }
+
+  /// Counts records via `frappe.client.get_count`. Whitelisted in
+  /// `apps/frappe/frappe/client.py:79`. Returns the total matching count,
+  /// or 0 when the response is malformed. Optional [filters] follow the
+  /// same `[field, operator, value]` shape as [list].
+  Future<int> count(String doctype, {List<List<dynamic>>? filters}) async {
+    final methodParams = <String, dynamic>{'doctype': doctype};
+    if (filters != null && filters.isNotEmpty) {
+      methodParams['filters'] = jsonEncode(filters);
+    }
+    final response = await _restHelper.get(
+      '/api/method/frappe.client.get_count',
+      queryParams: methodParams,
+    );
+    if (response is Map<String, dynamic>) {
+      final message = response['message'];
+      if (message is int) return message;
+      if (message is num) return message.toInt();
+      if (message is String) return int.tryParse(message) ?? 0;
+    }
+    return 0;
   }
 
   /// Lists child doctype records with ALL fields.
@@ -57,14 +135,15 @@ class DoctypeService {
   Future<List<Map<String, dynamic>>> listChildDocs(
     String doctype, {
     List<List<dynamic>>? filters,
-    int limitPageLength = 1000,
+    int? limitPageLength,
   }) async {
+    final resolvedLimit = limitPageLength ?? listChildDocsPageSize;
     // Step 1: get names (get_list works for this)
     final nameList = await list(
       doctype,
       fields: ['name'],
       filters: filters,
-      limitPageLength: limitPageLength,
+      limitPageLength: resolvedLimit,
     );
     if (nameList.isEmpty) return [];
 
@@ -88,9 +167,139 @@ class DoctypeService {
 
   Future<Map<String, dynamic>> getByName(String doctype, String name) async {
     final response = await _restHelper.get('/api/resource/$doctype/$name');
-    if (response is Map<String, dynamic> && response.containsKey('data')) {
-      return response['data'] as Map<String, dynamic>;
+    return unwrapData<Map<String, dynamic>>(response);
+  }
+
+  /// Bulk-fetch full parent docs (with embedded child rows) via the
+  /// `mobile_sync.get_docs_with_children` server endpoint shipped in
+  /// `mobile_control`. The server enforces the same per-doc permission
+  /// gate as `/api/resource/<doctype>/<name>` (via
+  /// `doc.check_permission("read")`), so denied / missing names are
+  /// silently dropped — return length may be < input length.
+  ///
+  /// Must be kept in sync with `MAX_BATCH` on the server (200).
+  Future<List<Map<String, dynamic>>> bulkGetWithChildren(
+    String doctype,
+    List<String> names,
+  ) async {
+    if (names.isEmpty) return [];
+    final response = await _restHelper.post(
+      '/api/method/mobile_sync.get_docs_with_children',
+      body: {'doctype': doctype, 'names': names},
+    );
+    final dynamic message = response is Map<String, dynamic>
+        ? response['message']
+        : response;
+    if (message is! List) return [];
+    return [
+      for (final row in message)
+        if (row is Map) Map<String, dynamic>.from(row),
+    ];
+  }
+
+  /// Pre-flight manifest (#49). Posts the INCREMENTAL doctypes about to be
+  /// pulled, each with its own `since` watermark, and returns per-doctype
+  /// change info. Returns null on ANY failure (network, 404, missing endpoint,
+  /// malformed body) so the caller falls back to a full pull.
+  Future<SyncDetailsResponse?> getSyncDetails(
+    List<Map<String, String>> doctypeSince,
+  ) async {
+    if (doctypeSince.isEmpty) return null;
+    try {
+      final response = await _restHelper.post(
+        '/api/method/mobile_sync.sync_details',
+        body: {'doctypes': doctypeSince},
+      );
+      final dynamic message = response is Map<String, dynamic>
+          ? response['message']
+          : response;
+      if (message is! Map) return null;
+      return SyncDetailsResponse.fromJson(Map<String, dynamic>.from(message));
+    } catch (e, st) {
+      sdkLog(
+        'DoctypeService.getSyncDetails failed — falling back to full pull — '
+        '$e\n$st',
+      );
+      return null;
     }
-    return response as Map<String, dynamic>;
+  }
+
+  /// Pages through `frappe.client.get_list` for names, then bulk-fetches
+  /// full documents (parents + child rows) via the server-side
+  /// `mobile_sync.get_docs_with_children` endpoint. Used by the pull
+  /// engine for parents that declare child tables, since `get_list`
+  /// returns flat parent rows only — child arrays are missing.
+  ///
+  /// Caller is responsible for paginating across the full result set; one
+  /// call returns at most [limitPageLength] full docs starting at
+  /// [limitStart].
+  Future<List<Map<String, dynamic>>> listFullDocs(
+    String doctype, {
+    List<List<dynamic>>? filters,
+    int limitStart = 0,
+    int? limitPageLength,
+    String? orderBy,
+  }) async {
+    final resolvedLimit = limitPageLength ?? listFullDocsPageSize;
+    final nameList = await list(
+      doctype,
+      fields: ['name'],
+      filters: filters,
+      limitStart: limitStart,
+      limitPageLength: resolvedLimit,
+      orderBy: orderBy,
+    );
+    if (nameList.isEmpty) return [];
+
+    // Use `?.toString()` (matches listChildDocs) so int-valued `name`
+    // fields from Frappe's autoname-by-numeric-series — which historically
+    // dropped silently under the `is String` check — round-trip correctly.
+    final names = <String>[
+      for (final n in nameList)
+        if (n is Map<String, dynamic>)
+          if (n['name']?.toString() case final String s when s.isNotEmpty) s,
+    ];
+    if (names.isEmpty) return [];
+
+    // Match the server's MAX_BATCH cap. Each chunk is a single HTTP
+    // round-trip, so this typically reduces a 1000-row pull from
+    // ~1001 calls (1 list + 1000 per-name GETs) down to ~6 calls.
+    const int chunkSize = 200;
+    final docs = <Map<String, dynamic>>[];
+    for (var i = 0; i < names.length; i += chunkSize) {
+      final chunk = names.sublist(i, math.min(i + chunkSize, names.length));
+      List<Map<String, dynamic>> batch;
+      try {
+        batch = await bulkGetWithChildren(doctype, chunk);
+      } on ApiException catch (e) {
+        // Older deployments may not have `mobile_control` (or have a
+        // version without `mobile_sync.get_docs_with_children`). Fall
+        // back to per-name GETs only on 404 — let 5xx / auth / other
+        // failures propagate so they aren't masked as silent N+1.
+        if (e.statusCode != 404) rethrow;
+        batch = await _perNameFallback(doctype, chunk);
+      }
+      docs.addAll(batch);
+    }
+    return docs;
+  }
+
+  Future<List<Map<String, dynamic>>> _perNameFallback(
+    String doctype,
+    List<String> names,
+  ) async {
+    // Bounded concurrency: a 200-name chunk fanned out as 200 simultaneous
+    // sockets can trip per-host limits and trigger a thundering-herd retry
+    // storm against an already-strained server.
+    const int sliceSize = 20;
+    final out = <Map<String, dynamic>>[];
+    for (var i = 0; i < names.length; i += sliceSize) {
+      final slice = names.sublist(i, math.min(i + sliceSize, names.length));
+      final results = await Future.wait(
+        slice.map((n) => getByName(doctype, n)),
+      );
+      out.addAll(results.where((d) => d.isNotEmpty));
+    }
+    return out;
   }
 }

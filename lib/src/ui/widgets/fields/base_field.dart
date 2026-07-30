@@ -1,5 +1,10 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import '../../../models/doc_field.dart';
+import '../../../utils/translate.dart';
+import 'link_field_picker_mode.dart';
+
+export 'link_field_picker_mode.dart';
 
 /// Customization options for field styling
 class FieldStyle {
@@ -16,13 +21,30 @@ class FieldStyle {
   /// When false, hides the external description rendered below the field widget.
   final bool showDescription;
 
+  /// Keystroke-level input formatters for text inputs
+  final List<TextInputFormatter>? inputFormatters;
+
+  final LinkFieldPickerMode linkFieldPickerMode;
+
+  final DateTime? Function(DocField field)? getFirstDate;
+  final DateTime? Function(DocField field)? getLastDate;
+
   const FieldStyle({
     this.labelStyle,
     this.descriptionStyle,
     this.decoration,
     this.translate,
+    // Default to showing labels/descriptions for backward compatibility — a
+    // consumer constructing FieldStyle for an unrelated reason (e.g. a custom
+    // decoration) must not silently lose them (PR#36 round-4 B6).
+    // FrappeFormBuilder always passes these explicitly (form_builder.dart),
+    // so this default only affects external consumers.
     this.showLabel = true,
     this.showDescription = true,
+    this.inputFormatters,
+    this.linkFieldPickerMode = LinkFieldPickerMode.inline,
+    this.getFirstDate,
+    this.getLastDate,
   });
 }
 
@@ -59,19 +81,23 @@ abstract class BaseField extends StatelessWidget {
           Padding(
             padding: const EdgeInsets.only(bottom: 8.0),
             child: Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text(
-                  style?.translate != null
-                      ? style!.translate!(field.displayLabel)
-                      : field.displayLabel,
-                  style:
-                      style?.labelStyle ??
-                      TextStyle(
-                        fontWeight: field.reqd
-                            ? FontWeight.bold
-                            : FontWeight.normal,
-                        fontSize: 14,
-                      ),
+                Expanded(
+                  child: Text(
+                    style?.translate != null
+                        ? style!.translate!(field.displayLabel)
+                        : field.displayLabel,
+                    softWrap: true,
+                    style:
+                        style?.labelStyle ??
+                        TextStyle(
+                          fontWeight: field.reqd
+                              ? FontWeight.bold
+                              : FontWeight.normal,
+                          fontSize: 14,
+                        ),
+                  ),
                 ),
                 if (field.reqd)
                   const Padding(
@@ -111,7 +137,7 @@ abstract class BaseField extends StatelessWidget {
       final label = style?.translate != null
           ? style!.translate!(field.displayLabel)
           : field.displayLabel;
-      return '$label is required';
+      return sdkTr('{0} is required', [label]);
     }
     return null;
   }

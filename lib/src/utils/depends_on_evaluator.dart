@@ -1,8 +1,46 @@
 // Copyright (c) 2026, Bhushan Barbuddhe and contributors
 // For license information, please see license.txt
 
-/// Evaluates Frappe depends_on expressions
+import 'package:flutter/foundation.dart';
+
+/// Evaluates Frappe `depends_on` / `mandatory_depends_on` expressions.
+///
+/// **Trust boundary:** expressions evaluated here come from server-side
+/// DocType meta configured by Frappe admins, not from end-user input. This
+/// evaluator is NOT sandboxed — do not pass user-supplied strings to
+/// [evaluate].
 class DependsOnEvaluator {
+  /// Returns the set of fieldnames an expression references. Used to build the
+  /// reverse-dependency graph. Returns an EMPTY set for a non-null, non-empty
+  /// expression it cannot parse — callers treat that as "subscribe to all"
+  /// (see DependencyGraph fallback). A bare `field_name` (Frappe truthy form)
+  /// resolves to {field_name}.
+  static Set<String> referencedFields(String? expression) {
+    if (expression == null || expression.trim().isEmpty) return const {};
+    var expr = expression.trim();
+    if (expr.startsWith('eval:')) expr = expr.substring(5).trim();
+
+    final docRefs = RegExp(
+      r'doc\.(\w+)',
+    ).allMatches(expr).map((m) => m.group(1)!).toSet();
+    if (docRefs.isNotEmpty) return docRefs;
+
+    // No `doc.` tokens: a bare identifier is the Frappe truthy form.
+    final bare = RegExp(r'^(\w+)$').firstMatch(expr);
+    if (bare != null) return {bare.group(1)!};
+
+    return const {}; // unparseable -> caller falls back to subscribe-all
+  }
+
+  /// Like [evaluate] but returns [defaultWhenEmpty] for a null/empty expression.
+  /// `depends_on` defaults visible=true; `mandatory_depends_on` /
+  /// `read_only_depends_on` must default false when absent.
+  static bool evaluate2(
+    String? expr,
+    Map<String, dynamic> data,
+    bool defaultWhenEmpty,
+  ) => (expr == null || expr.isEmpty) ? defaultWhenEmpty : evaluate(expr, data);
+
   /// Evaluate depends_on expression
   /// Supports: eval:doc.field == value, eval:doc.field != value, etc.
   static bool evaluate(String? expression, Map<String, dynamic> formData) {
@@ -13,6 +51,11 @@ class DependsOnEvaluator {
     if (expr.startsWith('eval:')) {
       expr = expr.substring(5).trim();
     }
+    // Strip outer parens left over from grouped expressions like
+    // `(A && B) || (C && D)` — after the && / || split each fragment
+    // arrives wrapped in its own parens and would otherwise leak `(`/`)`
+    // into _extractFieldName / _extractValue.
+    expr = _stripOuterParens(expr);
 
     // Simple evaluation for common patterns
     // eval:doc.field == value
@@ -142,8 +185,11 @@ class DependsOnEvaluator {
       final fieldName = _extractFieldName(expr);
       final value = formData[fieldName];
       return value != null && value != '' && value != 0 && value != false;
-    } catch (e) {
+    } catch (e, st) {
       // If evaluation fails, default to true (show field)
+      debugPrint(
+        'DependsOnEvaluator.evaluate failed for "$expression" — $e\n$st',
+      );
       return true;
     }
   }
@@ -185,18 +231,28 @@ class DependsOnEvaluator {
     return expr;
   }
 
-  /// Split expression by delimiter, but only when not inside [...] brackets.
+  /// Split [expr] by [delimiter], but only at top level — i.e. not inside
+  /// `[...]` array literals or `(...)` grouped subexpressions. Without paren
+  /// awareness, a Frappe expression like `(A && B) || (C && D)` would split
+  /// on the inner `&&`s first and produce fragments with unmatched parens.
   static List<String> _splitOutsideBrackets(String expr, String delimiter) {
     final parts = <String>[];
     int bracketDepth = 0;
+    int parenDepth = 0;
     int lastSplit = 0;
 
     for (int i = 0; i < expr.length; i++) {
-      if (expr[i] == '[') {
+      final ch = expr[i];
+      if (ch == '[') {
         bracketDepth++;
-      } else if (expr[i] == ']') {
+      } else if (ch == ']') {
         bracketDepth--;
+      } else if (ch == '(') {
+        parenDepth++;
+      } else if (ch == ')') {
+        parenDepth--;
       } else if (bracketDepth == 0 &&
+          parenDepth == 0 &&
           i + delimiter.length <= expr.length &&
           expr.substring(i, i + delimiter.length) == delimiter) {
         parts.add(expr.substring(lastSplit, i));
@@ -206,6 +262,32 @@ class DependsOnEvaluator {
     }
     parts.add(expr.substring(lastSplit));
     return parts;
+  }
+
+  /// Strip balanced outermost parens — but only when they wrap the whole
+  /// expression (the matching `)` is at the end). `(A) || (B)` keeps both
+  /// pairs because neither pair spans the whole string. Repeats so
+  /// `((A))` flattens fully.
+  static String _stripOuterParens(String expr) {
+    String s = expr.trim();
+    while (s.length >= 2 && s.startsWith('(') && s.endsWith(')')) {
+      int depth = 0;
+      bool wholeExpr = false;
+      for (int i = 0; i < s.length; i++) {
+        if (s[i] == '(') {
+          depth++;
+        } else if (s[i] == ')') {
+          depth--;
+          if (depth == 0) {
+            wholeExpr = (i == s.length - 1);
+            break;
+          }
+        }
+      }
+      if (!wholeExpr) break;
+      s = s.substring(1, s.length - 1).trim();
+    }
+    return s;
   }
 
   /// Parse comma-separated quoted values from inside array brackets.
@@ -233,27 +315,40 @@ class DependsOnEvaluator {
         if (actual == expected) return false;
         return actual?.toString() != expected?.toString();
       case '>':
-        if (actual is num && expected is num) {
-          return actual > expected;
-        }
-        return false;
       case '<':
-        if (actual is num && expected is num) {
-          return actual < expected;
-        }
-        return false;
       case '>=':
-        if (actual is num && expected is num) {
-          return actual >= expected;
-        }
-        return false;
       case '<=':
-        if (actual is num && expected is num) {
-          return actual <= expected;
+        // Relational comparisons need numeric operands. Frappe form data often
+        // carries numeric field values as strings (e.g. a Float field read back
+        // as "10.0"), and JS `depends_on` coerces those before comparing. Mirror
+        // that by parsing both sides; if either isn't numeric, the comparison is
+        // undefined → false (same as the old num-only guard for non-numbers).
+        final a = _toNum(actual);
+        final b = _toNum(expected);
+        if (a == null || b == null) return false;
+        switch (operator) {
+          case '>':
+            return a > b;
+          case '<':
+            return a < b;
+          case '>=':
+            return a >= b;
+          case '<=':
+            return a <= b;
         }
         return false;
       default:
         return false;
     }
+  }
+
+  /// Coerce a value to [num] for relational comparisons: passes numbers
+  /// through, parses numeric strings (trimmed), and returns null for anything
+  /// non-numeric (null, bool, non-numeric text) so the caller treats it as an
+  /// unsatisfiable comparison rather than throwing.
+  static num? _toNum(dynamic v) {
+    if (v is num) return v;
+    if (v is String) return num.tryParse(v.trim());
+    return null;
   }
 }

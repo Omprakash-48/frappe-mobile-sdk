@@ -2,6 +2,28 @@
 // For license information, please see license.txt
 
 import 'dart:convert';
+import '../utils/sdk_log.dart';
+
+/// Frappe wraps API responses inconsistently: most `frappe.client.*` and
+/// `frappe.*.method` calls return `{"message": ...}` while REST resource
+/// endpoints return `{"data": ...}`. Service callers that know which
+/// envelope to expect use [unwrapMessage] / [unwrapData] to strip it,
+/// keeping the two strip-decisions in one place. The bare-response
+/// fallback (no envelope) is returned unchanged so non-Frappe / direct-
+/// payload endpoints continue to work.
+T unwrapMessage<T>(dynamic response) {
+  if (response is Map<String, dynamic> && response.containsKey('message')) {
+    return response['message'] as T;
+  }
+  return response as T;
+}
+
+T unwrapData<T>(dynamic response) {
+  if (response is Map<String, dynamic> && response.containsKey('data')) {
+    return response['data'] as T;
+  }
+  return response as T;
+}
 
 Map<String, String> parseSetCookie(String setCookieValue) {
   final cookies = <String, String>{};
@@ -32,7 +54,11 @@ String extractErrorMessage(dynamic body) {
       if (serverMsg != null && serverMsg.isNotEmpty) {
         raw = serverMsg;
       }
-    } catch (_) {}
+    } catch (e, st) {
+      sdkLog(
+        'extractErrorMessage: _server_messages parse failed — $e\n$st',
+      );
+    }
   }
 
   if (raw == null && body.containsKey('exception')) {
@@ -66,19 +92,36 @@ String _stripHtmlTags(String html) {
       .trim();
 }
 
-/// Extract exception message from _server_messages JSON if present.
+/// Extract exception message from _server_messages if present.
+///
+/// Frappe's `_server_messages` is double-encoded and reaches us in a few
+/// shapes depending on how far the response has already been decoded:
+///   • a JSON string:  `"[\"{\\\"message\\\": \\\"...\\\"}\"]"`
+///   • an already-decoded list of JSON strings: `["{\"message\": \"...\"}"]`
+///   • a list of maps: `[{message: ...}]`
+/// The previous implementation only handled the first shape *and* assumed the
+/// list element was already a Map, so real payloads (list-of-json-strings)
+/// fell through to null and the caller surfaced a bare "Unknown Error".
+/// Normalise every shape here: decode the container if it's a string, then
+/// decode each element if it's a string, then read `message`.
 String? _extractServerMessage(dynamic body) {
-  if (body is Map && body.containsKey('_server_messages')) {
-    try {
-      final serverMsgs = body['_server_messages'];
-      if (serverMsgs is String) {
-        final decoded = jsonDecode(serverMsgs) as List;
-        if (decoded.isNotEmpty && decoded.first is Map) {
-          final msg = decoded.first as Map;
-          return msg['message']?.toString();
-        }
+  if (body is! Map || !body.containsKey('_server_messages')) return null;
+  try {
+    var serverMsgs = body['_server_messages'];
+    if (serverMsgs is String) {
+      serverMsgs = jsonDecode(serverMsgs);
+    }
+    if (serverMsgs is List && serverMsgs.isNotEmpty) {
+      var first = serverMsgs.first;
+      if (first is String) {
+        first = jsonDecode(first);
       }
-    } catch (_) {}
+      if (first is Map) {
+        return first['message']?.toString();
+      }
+    }
+  } catch (e, st) {
+    sdkLog('_extractServerMessage: parse failed — $e\n$st');
   }
   return null;
 }

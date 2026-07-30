@@ -2,77 +2,136 @@ import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
 
-import '../api/client.dart';
-import '../database/app_database.dart';
 import '../database/entities/link_option_entity.dart';
 import '../models/doc_field.dart';
-import '../models/doc_type_meta.dart';
 import '../models/link_filter_result.dart';
+import '../models/meta_resolver.dart';
+import '../query/unified_resolver.dart';
 import '../utils/depends_on_evaluator.dart';
-import 'meta_service.dart';
 
-/// Fetches link field options from API at runtime. Link filters are sent to the API; no DB table.
+/// Fetches link field options via [UnifiedResolver] (DB-first + background API refresh).
 ///
-/// No client-side result cache by design — matches Frappe Desk semantics
-/// (every dropdown re-queries) and avoids staleness when dependent fields
-/// mutate. Per-form dedupe lives in [LinkFieldCoordinator._resultsCache],
-/// which bounds cost to one API call per (doctype, filters) per form open.
+/// The resolver handles both offline reads and online background refresh in a
+/// single path. Per-form dedupe lives in [LinkFieldCoordinator._resultsCache],
+/// which bounds the cost to one resolve call per (doctype, filters) per form open.
 class LinkOptionService {
-  final FrappeClient _client;
+  final UnifiedResolver? _resolver;
+  final MetaResolverFn? _metaResolver;
+  final Stream<void>? _syncCompleteStream;
 
-  LinkOptionService(this._client);
+  /// Optional translation hook (wired from `TranslationService.translate`).
+  /// Applied to option *display labels* — never to the stored `name` — and
+  /// only when the target doctype is a `translated_doctype`. Mirrors Frappe's
+  /// `__()` on link/select titles. Null in tests / when no host is bound.
+  final String Function(String)? _translate;
 
-  /// Fetches link options from API (with optional filters). No DB; filters sent to server.
+  /// Broadcasts after each closure-pull batch finishes. Wired from
+  /// [FrappeSDK.syncComplete$]. Pickers and the [LinkFieldCoordinator]
+  /// listen to this to invalidate stale empty caches and re-fetch
+  /// options for fields whose target doctype just got fresh data.
+  Stream<void>? get syncComplete$ => _syncCompleteStream;
+
+  /// Primary constructor — inject a wired [UnifiedResolver].
+  LinkOptionService(
+    UnifiedResolver resolver,
+    MetaResolverFn metaResolver, {
+    Stream<void>? syncComplete$,
+    String Function(String)? translate,
+  }) : _resolver = resolver,
+       _metaResolver = metaResolver,
+       _syncCompleteStream = syncComplete$,
+       _translate = translate;
+
+  /// Converts Frappe-shaped filter rows to the 3-tuple `[field, op, value]`
+  /// shape that [UnifiedResolver.resolve] consumes. Frappe APIs hand back
+  /// either 4-tuples (`[doctype, field, op, value]`) or already-3-tuples;
+  /// rows of any other length are silently dropped (consistent with the
+  /// pre-refactor inline behavior). The output type is always
+  /// `List<List<dynamic>>` so both callers (`getLinkOptions` and
+  /// `getLinkOptionsOffline`) get the same typed collection.
+  static List<List<dynamic>> _toThreeTuples(List<List>? filters) {
+    final out = <List<dynamic>>[];
+    if (filters == null) return out;
+    for (final f in filters) {
+      if (f.length == 4) {
+        out.add([f[1], f[2], f[3]]);
+      } else if (f.length == 3) {
+        out.add(List<dynamic>.from(f));
+      }
+    }
+    return out;
+  }
+
+  /// Test / subclass constructor. Use when all methods are overridden and no
+  /// resolver is needed (e.g. recording mocks in widget tests).
+  LinkOptionService.withoutResolver()
+    : _resolver = null,
+      _metaResolver = null,
+      _syncCompleteStream = null,
+      _translate = null;
+
+  /// Fetches link options via the resolver (DB-first + background refresh when online).
   Future<List<LinkOptionEntity>> getLinkOptions(
     String doctype, {
     List<List<dynamic>>? filters,
   }) async {
+    final resolver = _resolver;
+    final metaResolver = _metaResolver;
+    if (resolver == null || metaResolver == null) return const [];
+
     final normalizedFilters = _normalizeFiltersForDoctype(doctype, filters);
-    final meta = await _getDocTypeMeta(doctype);
-    final titleField = meta?.titleField;
+    final meta = await metaResolver(doctype);
+    final titleField = meta.titleField;
 
-    List<dynamic> documents;
+    // Convert Frappe 4-tuple filters [doctype, field, op, value] → 3-tuples.
+    final threeTuples = _toThreeTuples(normalizedFilters);
 
-    try {
-      // For child doctypes (istable=1), get_list/reportview only return
-      // standard fields. Batch-fetch full docs via /api/resource instead.
-      if (meta != null && meta.isTable) {
-        documents = await _client.doctype.listChildDocs(
-          doctype,
-          filters: normalizedFilters,
-          limitPageLength: 5000,
-        );
-      } else {
-        documents = await _client.doctype.list(
-          doctype,
-          fields: ['*'],
-          filters: normalizedFilters,
-          limitPageLength: 5000,
-        );
-      }
-    } catch (_) {
-      return [];
-    }
+    final result = await resolver.resolve(
+      doctype: doctype,
+      filters: threeTuples,
+      page: 0,
+      pageSize: 5000,
+    );
 
+    return _rowsToEntities(
+      result.rows,
+      doctype,
+      titleField,
+      translateLabels: meta.translatedDoctype,
+    );
+  }
+
+  /// Converts resolver rows to [LinkOptionEntity] list.
+  ///
+  /// When [translateLabels] is true and a translate hook is bound, each
+  /// option's *display label* is translated while its `name` (the stored
+  /// value sent to the server) is left untouched — same contract as the
+  /// static Select field.
+  List<LinkOptionEntity> _rowsToEntities(
+    List<Map<String, Object?>> rows,
+    String doctype,
+    String? titleField, {
+    bool translateLabels = false,
+  }) {
     final now = DateTime.now().millisecondsSinceEpoch;
-    final linkOptions = <LinkOptionEntity>[];
-
-    for (final doc in documents) {
-      final docMap = doc is Map<String, dynamic> ? doc : null;
-      if (docMap == null) continue;
-      final name = docMap['name'] as String? ?? '';
+    final out = <LinkOptionEntity>[];
+    for (final row in rows) {
+      // Offline rows from `docs__<doctype>` carry `server_name`; online rows
+      // from `frappe.client.get_list` carry `name`. Mobile-created rows
+      // pre-server-confirm carry only `mobile_uuid`. Try all three so the
+      // mapping works in both modes.
+      final name =
+          (row['server_name'] as String?) ??
+          (row['name'] as String?) ??
+          (row['mobile_uuid'] as String?) ??
+          '';
       if (name.isEmpty) continue;
       String? label;
-
-      // Determine the display label for the link option
-      // First try the title field if it exists and has a value
-      if (titleField != null &&
-          docMap[titleField] != null &&
-          docMap[titleField].toString().trim().isNotEmpty) {
-        label = docMap[titleField].toString();
+      if (titleField != null && row[titleField] != null) {
+        final s = row[titleField].toString().trim();
+        if (s.isNotEmpty) label = s;
       }
-      // Fall back to common label fields if title field is not available or empty
-      for (final k in [
+      for (final k in const [
         'title',
         'full_name',
         'customer_name',
@@ -80,30 +139,59 @@ class LinkOptionService {
         'label',
       ]) {
         if (label != null && label.isNotEmpty) break;
-        if (docMap.containsKey(k) && docMap[k] != null) {
-          label = docMap[k].toString();
-          break;
+        final v = row[k];
+        if (v != null) {
+          final s = v.toString().trim();
+          if (s.isNotEmpty) label = s;
         }
       }
-      // Default to the document name if no label is found
       label ??= name;
-      linkOptions.add(
+      // Translate the display label for translated_doctype targets (Frappe
+      // `__()` parity). `name` is intentionally left English — it is the
+      // value persisted and pushed to the server.
+      final translate = _translate;
+      if (translateLabels && translate != null) {
+        // The translate hook runs host code (TranslationService.translateDelegate
+        // is a public, host-settable field) and can throw. A thrown hook must
+        // never propagate out of the picker — that would degrade the dropdown to
+        // empty instead of just showing the untranslated English label. Same
+        // "host hook failures never propagate" contract as [resolveFilters] /
+        // [safeHook]; on failure we keep the untranslated label.
+        try {
+          label = translate(label);
+        } catch (e, st) {
+          debugPrint(
+            'LinkOptionService._rowsToEntities: translate hook threw for '
+            '"$label" ($doctype) — using untranslated label. $e\n$st',
+          );
+        }
+      }
+      // Offline-only rows (no server_name yet) carry their mobile_uuid as
+      // the picker value; the form must mark `<field>__is_local: 1` so the
+      // push pipeline rewrites the UUID after the target's INSERT lands.
+      final isLocal = (row['server_name'] as String?) == null;
+      out.add(
         LinkOptionEntity(
           doctype: doctype,
           name: name,
           label: label,
-          dataJson: jsonEncode(docMap),
+          dataJson: jsonEncode(row),
           lastUpdated: now,
+          isLocal: isLocal,
         ),
       );
     }
-
-    return linkOptions;
+    return out;
   }
 
   /// Normalize filter doctype to match the queried doctype.
   /// Fixes 417 "Field not permitted" when meta uses singular form (e.g. Village)
   /// but API queries plural (Villages).
+  ///
+  /// Accepts both Frappe filter forms:
+  ///   3-tuple [field, op, value]  — doctype is prepended from [doctype].
+  ///   4-tuple [dt, field, op, value] — dt is replaced with [doctype] if it
+  ///   differs (singular/plural mismatch) or is null/empty.
   static List<List<dynamic>>? _normalizeFiltersForDoctype(
     String doctype,
     List<List<dynamic>>? filters,
@@ -111,13 +199,20 @@ class LinkOptionService {
     if (filters == null || filters.isEmpty) return filters;
     final result = <List<dynamic>>[];
     for (final filter in filters) {
-      if (filter.length < 4) continue;
-      final filterDoctype = filter[0]?.toString();
-      if (filterDoctype == null || filterDoctype.isEmpty) {
-        result.add(List<dynamic>.from(filter));
+      if (filter.length == 3) {
+        result.add([doctype, filter[0], filter[1], filter[2]]);
         continue;
       }
-      if (filterDoctype != doctype) {
+      if (filter.length < 4) {
+        debugPrint(
+          'LinkOptionService: malformed filter (length ${filter.length}), skipping',
+        );
+        continue;
+      }
+      final filterDoctype = filter[0]?.toString();
+      if (filterDoctype == null ||
+          filterDoctype.isEmpty ||
+          filterDoctype != doctype) {
         result.add([doctype, filter[1], filter[2], filter[3]]);
       } else {
         result.add(List<dynamic>.from(filter));
@@ -125,6 +220,12 @@ class LinkOptionService {
     }
     return result.isEmpty ? null : result;
   }
+
+  @visibleForTesting
+  static List<List<dynamic>>? normalizeFiltersForDoctypeForTesting(
+    String doctype,
+    List<List<dynamic>>? filters,
+  ) => _normalizeFiltersForDoctype(doctype, filters);
 
   /// Returns field names that are dependencies in link_filters (eval:doc.xxx).
   /// Handles both `eval:doc.state` and `eval: doc.state` (Frappe standard format).
@@ -141,7 +242,6 @@ class LinkOptionService {
         if (filter is! List) continue;
         for (final elem in filter) {
           if (elem is! String) continue;
-          // Prefer the evaluator helper (supports "eval: doc.x" and variations)
           final extracted = DependsOnEvaluator.extractEvalDocField(elem);
           final fieldName =
               extracted ??
@@ -152,7 +252,10 @@ class LinkOptionService {
         }
       }
       return names;
-    } catch (_) {
+    } catch (e, st) {
+      debugPrint(
+        'LinkOptionService.dependentFieldNames parse failed — $e\n$st',
+      );
       return [];
     }
   }
@@ -185,7 +288,8 @@ class LinkOptionService {
         result.add([filter[0], filter[1], filter[2], value]);
       }
       return result.isEmpty ? null : result;
-    } catch (_) {
+    } catch (e, st) {
+      debugPrint('LinkOptionService.parseLinkFilters parse failed — $e\n$st');
       return null;
     }
   }
@@ -261,13 +365,42 @@ class LinkOptionService {
     }
   }
 
-  Future<DocTypeMeta?> _getDocTypeMeta(String doctype) async {
-    try {
-      final database = await AppDatabase.getInstance();
-      final metaService = MetaService(_client, database);
-      return await metaService.getMeta(doctype);
-    } catch (_) {
-      return null;
+  /// Offline-first link options with optional text search.
+  ///
+  /// Delegates to the stored [UnifiedResolver]. The [filters] accept Frappe
+  /// 4-tuple `[doctype, field, op, value]` or 3-tuple `[field, op, value]`
+  /// form. [query] becomes a `LIKE %...%` search on the doctype's title field.
+  Future<List<LinkOptionEntity>> getLinkOptionsOffline({
+    required String doctype,
+    List<List<dynamic>>? filters,
+    String? query,
+    int page = 0,
+    int pageSize = 5000,
+  }) async {
+    final resolver = _resolver;
+    final metaResolver = _metaResolver;
+    if (resolver == null || metaResolver == null) return const [];
+
+    final meta = await metaResolver(doctype);
+    final titleField = meta.titleField;
+
+    final threeTuples = _toThreeTuples(filters);
+    if (query != null && query.isNotEmpty && titleField != null) {
+      threeTuples.add([titleField, 'like', '%$query%']);
     }
+
+    final result = await resolver.resolve(
+      doctype: doctype,
+      filters: threeTuples,
+      page: page,
+      pageSize: pageSize,
+    );
+
+    return _rowsToEntities(
+      result.rows,
+      doctype,
+      titleField,
+      translateLabels: meta.translatedDoctype,
+    );
   }
 }

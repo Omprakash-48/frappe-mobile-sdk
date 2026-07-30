@@ -6,6 +6,7 @@ import 'package:url_launcher/url_launcher.dart';
 
 import '../api/exceptions.dart';
 import '../services/app_status_service.dart';
+import '../utils/sdk_log.dart';
 
 /// App guard widget that checks server-side app status on launch.
 ///
@@ -47,6 +48,10 @@ class FrappeAppGuard extends StatefulWidget {
   /// Optional: Custom title for force update screen
   final String? forceUpdateTitle;
 
+  /// Optional: Whether minor/patch version updates can be skipped/deferred by the user.
+  /// Defaults to `true`.
+  final bool allowDeferringUpdates;
+
   const FrappeAppGuard({
     super.key,
     required this.baseUrl,
@@ -55,6 +60,7 @@ class FrappeAppGuard extends StatefulWidget {
     this.currentVersion,
     this.appNotConfiguredMessage,
     this.forceUpdateTitle,
+    this.allowDeferringUpdates = true,
   });
 
   @override
@@ -66,6 +72,8 @@ class _FrappeAppGuardState extends State<FrappeAppGuard> {
   bool _isAppBlocked = false;
   bool _forceUpdateRequired = false;
   bool _maintenanceMode = false;
+  bool _deferrableUpdate = false;
+  bool _deferrableUpdateSkipped = false;
   String? _errorMessage;
   String? _storeUrl;
   String? _updateTitle;
@@ -125,12 +133,37 @@ class _FrappeAppGuardState extends State<FrappeAppGuard> {
           expectedPackage != null &&
           expectedPackage.isNotEmpty &&
           expectedPackage != currentPackage;
-      final versionMismatch =
-          expectedVersion != null &&
-          expectedVersion.isNotEmpty &&
-          expectedVersion != currentVersion;
 
-      if (packageMismatch || versionMismatch) {
+      if (packageMismatch) {
+        if (!mounted) return;
+        setState(() {
+          _isAppBlocked = true;
+          _errorMessage =
+              widget.appNotConfiguredMessage ??
+              'This app is not configured for mobile access.';
+          _isChecking = false;
+        });
+        return;
+      }
+
+      bool forceUpdateRequired = false;
+      bool deferrableUpdate = false;
+
+      if (expectedVersion != null && expectedVersion.isNotEmpty) {
+        final expectedSemVer = SemVer.parse(expectedVersion);
+        final currentSemVer = SemVer.parse(currentVersion);
+
+        if (currentSemVer.isLessThan(expectedSemVer)) {
+          if (currentSemVer.isMajorLessThan(expectedSemVer) ||
+              !widget.allowDeferringUpdates) {
+            forceUpdateRequired = true;
+          } else {
+            deferrableUpdate = true;
+          }
+        }
+      }
+
+      if (forceUpdateRequired || deferrableUpdate) {
         String? storeUrl = status.storeUrl;
         final pkg = expectedPackage?.isNotEmpty == true
             ? expectedPackage!
@@ -146,7 +179,8 @@ class _FrappeAppGuardState extends State<FrappeAppGuard> {
 
         if (!mounted) return;
         setState(() {
-          _forceUpdateRequired = true;
+          _forceUpdateRequired = forceUpdateRequired;
+          _deferrableUpdate = deferrableUpdate;
           _updateTitle =
               widget.forceUpdateTitle ?? status.appTitle ?? 'Update required';
           _storeUrl = storeUrl;
@@ -157,7 +191,8 @@ class _FrappeAppGuardState extends State<FrappeAppGuard> {
 
       if (!mounted) return;
       setState(() => _isChecking = false);
-    } catch (e) {
+    } catch (e, st) {
+      sdkLog('AppGuard: status check failed — $e\n$st');
       // Treat 417 (ValidationException) and 404 as "app not configured"
       if (e is ValidationException ||
           (e is ApiException && (e.statusCode == 417 || e.statusCode == 404))) {
@@ -230,6 +265,53 @@ class _FrappeAppGuardState extends State<FrappeAppGuard> {
       );
     }
 
+    if (_deferrableUpdate && !_deferrableUpdateSkipped) {
+      return Scaffold(
+        appBar: AppBar(title: const Text('Update Available')),
+        body: Center(
+          child: Padding(
+            padding: const EdgeInsets.all(24.0),
+            child: Column(
+              mainAxisAlignment: MainAxisAlignment.center,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                const Icon(Icons.system_update, size: 80, color: Colors.blue),
+                const SizedBox(height: 24),
+                Text(
+                  _updateTitle ?? 'Update available',
+                  textAlign: TextAlign.center,
+                  style: const TextStyle(
+                    fontSize: 22,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+                const SizedBox(height: 12),
+                const Text(
+                  'A new update is available. '
+                  'Would you like to update now or continue using the app?',
+                  textAlign: TextAlign.center,
+                ),
+                const SizedBox(height: 24),
+                ElevatedButton(
+                  onPressed: _openStore,
+                  child: const Text('Open Store'),
+                ),
+                const SizedBox(height: 12),
+                OutlinedButton(
+                  onPressed: () {
+                    setState(() {
+                      _deferrableUpdateSkipped = true;
+                    });
+                  },
+                  child: const Text('Skip for now'),
+                ),
+              ],
+            ),
+          ),
+        ),
+      );
+    }
+
     if (_maintenanceMode) {
       return Scaffold(
         appBar: AppBar(title: const Text('Maintenance')),
@@ -290,5 +372,39 @@ class _FrappeAppGuardState extends State<FrappeAppGuard> {
     }
 
     return widget.child;
+  }
+}
+
+class SemVer {
+  final int major;
+  final int minor;
+  final int patch;
+
+  const SemVer(this.major, this.minor, this.patch);
+
+  static SemVer parse(String versionStr) {
+    try {
+      final clean = versionStr.trim().replaceFirst(RegExp(r'^[vV]'), '');
+      final base = clean.split('-').first.split('+').first;
+      final parts = base.split('.');
+
+      final major = parts.isNotEmpty ? int.tryParse(parts[0]) ?? 0 : 0;
+      final minor = parts.length > 1 ? int.tryParse(parts[1]) ?? 0 : 0;
+      final patch = parts.length > 2 ? int.tryParse(parts[2]) ?? 0 : 0;
+
+      return SemVer(major, minor, patch);
+    } catch (_) {
+      return const SemVer(0, 0, 0);
+    }
+  }
+
+  bool isLessThan(SemVer other) {
+    if (major != other.major) return major < other.major;
+    if (minor != other.minor) return minor < other.minor;
+    return patch < other.patch;
+  }
+
+  bool isMajorLessThan(SemVer other) {
+    return major < other.major;
   }
 }

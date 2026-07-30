@@ -3,23 +3,33 @@ import 'package:flutter/material.dart';
 import '../api/client.dart';
 import '../api/exceptions.dart';
 import '../api/utils.dart';
+import '../utils/translate.dart';
 import '../models/doc_field.dart';
 import '../models/doc_type_meta.dart';
 import '../models/document.dart';
 import '../models/link_filter_result.dart';
+import '../models/outbox_row.dart';
 import '../models/workflow_transition.dart';
 import '../services/link_option_service.dart';
 import '../services/meta_service.dart';
 import '../services/offline_repository.dart';
+import '../services/sync_controller.dart';
 import '../services/sync_service.dart';
 import '../services/workflow_service.dart';
-import 'sync_status_screen.dart';
+import '../utils/uuid_pattern.dart';
+import 'widgets/screen_helpers.dart';
+import 'widgets/sync_error_banner.dart';
 import 'widgets/form_builder.dart'
     show
         FrappeFormBuilder,
         FrappeFormStyle,
+        FormBuilderMode,
         OnButtonPressedCallback,
-        FieldChangeHandler;
+        FieldChangeHandler,
+        FormValidator;
+import 'form/form_controller.dart' show FormController;
+import 'widgets/fields/field_factory.dart' show FieldFactory;
+import '../utils/sdk_log.dart';
 
 /// Visual customization for [FormScreen] action area.
 class FormScreenStyle {
@@ -75,15 +85,63 @@ class FormScreen extends StatefulWidget {
   /// Called when a field value changes. Returns computed field patches (for hidden computed fields).
   final FieldChangeHandler? onFieldChange;
 
+  /// Called before save with the current form data. Return a non-null error
+  /// message to block the save; return null to allow it to proceed. Use this
+  /// for DB-independent rules so the user sees errors at save-time, not
+  /// sync-time.
+  final FormValidator? validator;
+
   /// Optional builder for runtime link filters. Called during link option resolution.
   final LinkFilterBuilder? Function(String doctype, String fieldname)?
-      getLinkFilterBuilder;
+  getLinkFilterBuilder;
+
+  /// LEGACY mode only — forwarded to [FrappeFormBuilder.cascadeProgrammaticChanges].
+  /// When true, a value set by an [onFieldChange] handler's patch re-fires that
+  /// field's own change pipeline (Frappe `set_value` parity). Ignored in
+  /// [FormBuilderMode.reactive]. Default `false`.
+  final bool cascadeProgrammaticChanges;
 
   /// When true (default), use LinkFieldCoordinator for sequenced link option loading.
   final bool useLinkFieldCoordinator;
 
   /// Optional visual customization for AppBar/action buttons.
   final FormScreenStyle? screenStyle;
+
+  /// Imperative sync surface for the persistent in-form sync error
+  /// banner. When non-null and the document already has stuck outbox
+  /// rows (failed/blocked/conflict), a banner above the form lets the
+  /// user expand details and tap `Retry`. When null the banner is
+  /// suppressed entirely — useful in tests or hosting paths that have
+  /// no push engine wired.
+  final SyncController? syncController;
+
+  final void Function(void Function() submit)? registerSubmit;
+  final bool hideAppBarActions;
+
+  /// When false, the workflow header shows the state chip only (no Actions
+  /// button) and workflow transitions are not loaded. Default true.
+  final bool showWorkflowActions;
+  final void Function(bool isSaving)? onSaveStateChanged;
+  final void Function(bool isDirty)? onFormDirtyChanged;
+  final Widget? bottomNavigationBar;
+
+  /// State-management path passed to the underlying [FrappeFormBuilder].
+  /// Defaults to legacy; set [FormBuilderMode.reactive] for per-field rebuilds.
+  final FormBuilderMode mode;
+
+  /// Optional app-owned [FormController] (reactive mode). If null in reactive
+  /// mode, FormScreen creates one, exposes it via [onControllerReady], and
+  /// disposes it. If provided, the app owns + disposes it.
+  final FormController? controller;
+
+  /// Called once with the resolved controller (reactive mode) so the app can
+  /// read/listen/mutate form state directly.
+  final void Function(FormController controller)? onControllerReady;
+
+  /// Optional factory for rendering custom field widgets, forwarded to the
+  /// underlying [FrappeFormBuilder] (which already supports it). Lets hosts
+  /// supply an app-specific [FieldFactory] subclass to override field types.
+  final FieldFactory? customFieldFactory;
 
   const FormScreen({
     super.key,
@@ -104,16 +162,29 @@ class FormScreen extends StatefulWidget {
     this.initialData,
     this.onButtonPressed,
     this.onFieldChange,
+    this.validator,
     this.getLinkFilterBuilder,
+    this.cascadeProgrammaticChanges = false,
     this.useLinkFieldCoordinator = true,
     this.screenStyle,
+    this.syncController,
+    this.registerSubmit,
+    this.hideAppBarActions = false,
+    this.showWorkflowActions = true,
+    this.onSaveStateChanged,
+    this.onFormDirtyChanged,
+    this.bottomNavigationBar,
+    this.mode = FormBuilderMode.legacy,
+    this.controller,
+    this.onControllerReady,
+    this.customFieldFactory,
   });
 
   @override
   State<FormScreen> createState() => _FormScreenState();
 }
 
-class _FormScreenState extends State<FormScreen> {
+class _FormScreenState extends State<FormScreen> with WidgetsBindingObserver {
   bool _isSaving = false;
   String? _errorMessage;
   void Function()? _triggerSubmit;
@@ -123,9 +194,27 @@ class _FormScreenState extends State<FormScreen> {
   Map<String, dynamic>? _workflowUpdatedDocData;
   late WorkflowService? _workflowService;
 
+  /// Stuck outbox rows (failed/blocked/conflict) for `widget.document`,
+  /// or empty when the document is new or has no errors. Loaded from the
+  /// repo in [initState] / [didUpdateWidget] and refreshed on lifecycle
+  /// resume + after a Retry tap so the banner reflects the latest state.
+  List<OutboxRow> _syncErrorRows = const [];
+
   /// Baseline form data for dirty check. When current form data differs, show Save.
   Map<String, dynamic>? _baselineFormData;
-  bool _isFormDirty = false;
+
+  /// Drives the AppBar Save button visibility. Held in a [ValueNotifier]
+  /// (not in `setState`) because `_onFormDataChanged` fires on every
+  /// keystroke — using `setState` rebuilds the entire FormBuilder tree
+  /// per keystroke, which is a non-trivial cost on long forms. The
+  /// notifier scopes the rebuild to a single [ValueListenableBuilder] in
+  /// the AppBar `actions` list.
+  final ValueNotifier<bool> _isFormDirty = ValueNotifier<bool>(false);
+
+  /// Drives the AppBar push-to-server spinner. Held in a [ValueNotifier]
+  /// for the same reason as [_isFormDirty]: a long-running push must not
+  /// keep the whole form rebuilding while the spinner spins.
+  final ValueNotifier<bool> _isSyncing = ValueNotifier<bool>(false);
 
   Map<String, dynamic> get _currentDocData =>
       _workflowUpdatedDocData ??
@@ -169,20 +258,92 @@ class _FormScreenState extends State<FormScreen> {
     return true;
   }
 
+  void _setSaving(bool value) {
+    if (mounted) {
+      setState(() {
+        _isSaving = value;
+      });
+      widget.onSaveStateChanged?.call(value);
+    }
+  }
+
   void _onFormDataChanged(Map<String, dynamic> currentData) {
     final baseline = _baselineFormData ?? _currentDocData;
     final dirty = !_formDataEquals(currentData, baseline, widget.meta);
-    if (mounted && dirty != _isFormDirty) {
-      setState(() => _isFormDirty = dirty);
+    if (mounted) {
+      _isFormDirty.value = dirty;
+      widget.onFormDirtyChanged?.call(dirty);
     }
   }
 
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _workflowService = widget.api != null ? WorkflowService(widget.api!) : null;
     _baselineFormData = Map<String, dynamic>.from(_currentDocData);
     _loadWorkflowTransitions();
+    _loadSyncErrors();
+    widget.onFormDirtyChanged?.call(false);
+
+    if (widget.mode == FormBuilderMode.reactive) {
+      _formController =
+          widget.controller ??
+          FormController(
+            meta: widget.meta,
+            initialData: widget.document?.data ?? widget.initialData,
+          );
+      _ownsFormController = widget.controller == null;
+      widget.onControllerReady?.call(_formController!);
+    }
+  }
+
+  // Reactive mode: resolved controller (app-provided or FormScreen-created).
+  FormController? _formController;
+  bool _ownsFormController = false;
+
+  // Enclosing route, captured in didChangeDependencies() where the element is
+  // guaranteed active. App-lifecycle callbacks read this cached reference
+  // instead of calling ModalRoute.of(context): `mounted` stays true during the
+  // inactive phase (after deactivate(), before unmount()), so an ancestor
+  // lookup there can assert "Looking up a deactivated widget's ancestor".
+  ModalRoute<dynamic>? _route;
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    _isFormDirty.dispose();
+    _isSyncing.dispose();
+    if (_ownsFormController) _formController?.dispose();
+    super.dispose();
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    // Cache the enclosing route while the element is active so lifecycle
+    // callbacks never look it up on a deactivated context.
+    _route = ModalRoute.of(context);
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state != AppLifecycleState.resumed) return;
+    // Every mounted FormScreen subscribed to WidgetsBindingObserver
+    // receives this callback on app resume — including off-screen
+    // IndexedStack / PageView siblings that stay mounted by design.
+    // Without this gate, an N-tab form host hits the outbox DAO N
+    // times per foreground. Cap to the form the user is actually
+    // looking at. (PR#36 round-2 M14)
+    if (!mounted) return;
+    // Use the route cached in didChangeDependencies — NOT ModalRoute.of(context)
+    // here. `mounted` is still true while an element is inactive (deactivated
+    // but not yet unmounted), and an ancestor lookup on such a context asserts
+    // "Looking up a deactivated widget's ancestor is unsafe", destabilising the
+    // element tree (the cascade then surfaces as `_dependents.isEmpty`).
+    final route = _route;
+    if (route != null && !route.isCurrent) return;
+    _loadSyncErrors();
   }
 
   @override
@@ -198,13 +359,91 @@ class _FormScreenState extends State<FormScreen> {
           ? WorkflowService(widget.api!)
           : null;
       _baselineFormData = Map<String, dynamic>.from(_currentDocData);
-      _isFormDirty = false;
+      _isFormDirty.value = false;
+      widget.onFormDirtyChanged?.call(false);
       _loadWorkflowTransitions();
+      _loadSyncErrors();
     }
+  }
+
+  Future<void> _loadSyncErrors() async {
+    final localId = widget.document?.localId;
+    if (localId == null || localId.isEmpty) {
+      if (_syncErrorRows.isNotEmpty && mounted) {
+        setState(() => _syncErrorRows = const []);
+      }
+      return;
+    }
+    try {
+      final rows = await widget.repository.getSyncErrorsForDoc(
+        doctype: widget.meta.name,
+        mobileUuid: localId,
+      );
+      if (!mounted) return;
+      setState(() => _syncErrorRows = rows);
+    } catch (e, st) {
+      // Banner is best-effort; a query failure should never block the
+      // form from rendering.
+      sdkLog('FormScreen: _loadSyncErrors failed — $e\n$st');
+    }
+  }
+
+  Future<void> _retrySyncRow(int outboxId) async {
+    final controller = widget.syncController;
+    if (controller == null) return;
+    try {
+      await controller.retry(outboxId);
+    } catch (e, st) {
+      sdkLog('FormScreen: retry($outboxId) failed — $e\n$st');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              sdkTr('Retry failed: {0}', [toUserFriendlyMessage(e)]),
+            ),
+            backgroundColor: Colors.red,
+          ),
+        );
+      }
+    }
+    await _loadSyncErrors();
+  }
+
+  /// Drains the outbox without pulling. Upstream rows TierComputer
+  /// places ahead of this record go in the same drain.
+  Future<void> _handlePushRecord() async {
+    final svc = widget.syncService;
+    if (svc == null) return;
+    _isSyncing.value = true;
+    try {
+      await svc.pushSync(doctype: widget.meta.name);
+    } catch (e, st) {
+      sdkLog('FormScreen: pushSync failed — $e\n$st');
+      if (mounted) {
+        showStatusSnackBar(
+          context,
+          'Push failed: ${toUserFriendlyMessage(e)}',
+          severity: SnackBarSeverity.error,
+        );
+      }
+      return;
+    } finally {
+      if (mounted) _isSyncing.value = false;
+    }
+    await _loadSyncErrors();
+    if (!mounted) return;
+    final stuck = _syncErrorRows.isNotEmpty;
+    showStatusSnackBar(
+      context,
+      stuck ? sdkTr('Push completed with errors') : sdkTr('Pushed'),
+      severity: stuck ? SnackBarSeverity.warning : SnackBarSeverity.success,
+      duration: const Duration(seconds: 2),
+    );
   }
 
   Future<void> _loadWorkflowTransitions() async {
     if (!widget.meta.hasWorkflow ||
+        !widget.showWorkflowActions ||
         widget.api == null ||
         widget.document?.serverId == null) {
       return;
@@ -221,7 +460,8 @@ class _FormScreenState extends State<FormScreen> {
           _workflowLoading = false;
         });
       }
-    } catch (_) {
+    } catch (e, st) {
+      sdkLog('FormScreen._loadWorkflowTransitions failed — $e\n$st');
       if (mounted) {
         setState(() {
           _workflowTransitions = [];
@@ -239,33 +479,32 @@ class _FormScreenState extends State<FormScreen> {
         widget.document!.serverId!,
         action,
       );
-      await widget.repository.updateDocumentData(
-        widget.document!.localId,
-        updated,
+      await widget.repository.saveDocument(
+        doctype: widget.meta.name,
+        data: {...updated, 'mobile_uuid': widget.document!.localId},
       );
       if (mounted) {
         setState(() {
           _workflowUpdatedDocData = updated;
           _baselineFormData = Map<String, dynamic>.from(updated);
-          _isFormDirty = false;
         });
+        _isFormDirty.value = false;
         await _loadWorkflowTransitions();
         if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(
-              content: Text('Workflow: $action'),
-              backgroundColor: Colors.green,
-            ),
+          showStatusSnackBar(
+            context,
+            'Workflow: $action',
+            severity: SnackBarSeverity.success,
           );
         }
       }
-    } catch (e) {
+    } catch (e, st) {
+      sdkLog('FormScreen._applyWorkflowAction($action) failed — $e\n$st');
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text(toUserFriendlyMessage(e)),
-            backgroundColor: Colors.red,
-          ),
+        showStatusSnackBar(
+          context,
+          toUserFriendlyMessage(e),
+          severity: SnackBarSeverity.error,
         );
       }
     }
@@ -311,7 +550,9 @@ class _FormScreenState extends State<FormScreen> {
                         ? widget.translate!(
                             'No workflow actions available for this state.',
                           )
-                        : 'No workflow actions available for this state.',
+                        : sdkTr(
+                            'No workflow actions available for this state.',
+                          ),
                     style: Theme.of(context).textTheme.bodyMedium,
                   ),
                 )
@@ -339,15 +580,13 @@ class _FormScreenState extends State<FormScreen> {
     final method = field.options?.trim();
     if (method == null || method.isEmpty) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text(
-              '${field.displayLabel}: Action not configured for mobile. '
-              'This button may use client-side logic only available on web.',
-            ),
-            backgroundColor: Colors.orange,
-            duration: const Duration(seconds: 4),
+        showStatusSnackBar(
+          context,
+          sdkTr(
+            '{0}: Action not configured for mobile. This button may use client-side logic only available on web.',
+            [field.displayLabel],
           ),
+          severity: SnackBarSeverity.warning,
         );
       }
       return;
@@ -355,11 +594,10 @@ class _FormScreenState extends State<FormScreen> {
 
     if (widget.api == null) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('Action unavailable offline'),
-            backgroundColor: Colors.orange,
-          ),
+        showStatusSnackBar(
+          context,
+          sdkTr('Action unavailable offline'),
+          severity: SnackBarSeverity.warning,
         );
       }
       return;
@@ -368,20 +606,19 @@ class _FormScreenState extends State<FormScreen> {
     try {
       await widget.api!.call(method, args: {'doc': formData});
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('Action completed'),
-            backgroundColor: Colors.green,
-          ),
+        showStatusSnackBar(
+          context,
+          sdkTr('Action completed'),
+          severity: SnackBarSeverity.success,
         );
       }
-    } catch (e) {
+    } catch (e, st) {
+      sdkLog('FormScreen.action($method) failed — $e\n$st');
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text(toUserFriendlyMessage(e)),
-            backgroundColor: Colors.red,
-          ),
+        showStatusSnackBar(
+          context,
+          toUserFriendlyMessage(e),
+          severity: SnackBarSeverity.error,
         );
       }
     }
@@ -391,22 +628,65 @@ class _FormScreenState extends State<FormScreen> {
     String linkedDoctype,
     String docName,
   ) async {
+    // Per-doctype table covers both synced (server_name) and offline-only
+    // (mobile_uuid) rows without touching the legacy documents table.
     try {
-      final doc = await widget.repository.getDocumentByServerId(
-        docName,
+      final row = await widget.repository.getRowFromPerDoctypeTable(
         linkedDoctype,
+        docName,
       );
-      if (doc != null) return doc.data;
-    } catch (_) {}
+      if (row != null) return row;
+    } catch (e, st) {
+      sdkLog(
+        'FormScreen: getRowFromPerDoctypeTable($linkedDoctype, $docName) '
+        'failed — $e\n$st',
+      );
+    }
+    // If the value is shaped like a mobile_uuid, it is a local identity
+    // and must never be looked up on the server — Frappe naming series
+    // never produce v4 UUIDs, so `getByName(..., uuid)` is guaranteed
+    // to 500. This guards against orphan-link cases (the linked local
+    // row was deleted/replaced after sync, or the `<field>__is_local`
+    // flag was never set) by failing closed instead of leaking the
+    // mobile_uuid out of the device.
+    if (looksLikeMobileUuid(docName)) return null;
     if (widget.api != null) {
       try {
         return await widget.api!.doctype.getByName(linkedDoctype, docName);
-      } catch (_) {}
+      } catch (e, st) {
+        sdkLog(
+          'FormScreen: api.doctype.getByName($linkedDoctype, $docName) '
+          'failed — $e\n$st',
+        );
+      }
     }
     return null;
   }
 
   Future<void> _handleSubmit(Map<String, dynamic> formData) async {
+    // Local-first validation: DB-independent rules run on-device so the user
+    // sees errors at save-time rather than at sync-time. Returns null on pass;
+    // a non-null String aborts the save and is shown to the user.
+    if (widget.validator != null) {
+      final error = widget.validator!(formData);
+      if (error != null) {
+        setState(() {
+          _errorMessage = error;
+        });
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text(error),
+              backgroundColor: Theme.of(context).colorScheme.error,
+              behavior: SnackBarBehavior.floating,
+              duration: const Duration(seconds: 5),
+            ),
+          );
+        }
+        return;
+      }
+    }
+
     // Normalize multi-select: Frappe expects comma-separated string for plain
     // multi-select fields, but Table / Table MultiSelect fields must remain as
     // List<Map> so Frappe can create child-table rows.
@@ -422,21 +702,69 @@ class _FormScreenState extends State<FormScreen> {
       }
     }
 
+    _setSaving(true);
     setState(() {
-      _isSaving = true;
       _errorMessage = null;
     });
 
+    // Offline-first contract: every save queues to docs__ + outbox;
+    // push is driven by the cloud icon / Sync. Server-first below
+    // runs only in legacy online-only mode where there is no outbox.
+    final offlineEnabled = widget.repository.offlineMode.enabled;
+    bool serverReachable = !offlineEnabled && widget.api != null;
+    if (serverReachable && widget.syncService != null) {
+      try {
+        serverReachable = await widget.syncService!.isOnline();
+      } catch (e, st) {
+        sdkLog('FormScreen.save: isOnline check failed — $e\n$st');
+        serverReachable = false;
+      }
+    }
+
     try {
-      if (widget.api != null) {
+      if (widget.api != null && serverReachable) {
         Map<String, dynamic>? savedData;
-        // Server-first: create/update on server, then update local
-        if (widget.document == null) {
-          if (widget.getMobileUuid != null) {
+        // Server-first: create/update on server, then update local.
+        // Treat an offline-only document (document!=null but serverId==null)
+        // the same as a brand-new doc — the server has never seen it, so we
+        // must INSERT, not UPDATE. Forwarding `mobile_uuid` lets Frappe's
+        // L2 idempotency match the row when push-back lands.
+        final isInsert =
+            widget.document == null || widget.document!.serverId == null;
+        // True when this save edits a previously-saved offline record
+        // (lineage already exists locally with mobile_uuid = localId).
+        // Drives both the identity-locking below and the post-save
+        // reconcileServerSave path that collapses any failed outbox
+        // rows for this same lineage.
+        final isEditingExistingDoc = widget.document != null;
+        if (isInsert) {
+          // Preserve any existing offline data + mobile_uuid from the local doc.
+          if (widget.document != null) {
+            final existing = Map<String, dynamic>.from(widget.document!.data);
+            existing.addAll(payload);
+            payload
+              ..clear()
+              ..addAll(existing);
+          }
+          if (widget.getMobileUuid != null &&
+              (payload['mobile_uuid'] == null ||
+                  (payload['mobile_uuid'] as String).isEmpty)) {
             final uuid = await widget.getMobileUuid!();
             if (uuid != null && uuid.isNotEmpty) {
               payload['mobile_uuid'] = uuid;
             }
+          }
+          // Identity lock: when this is an edit-save of an existing
+          // local record, the mobile_uuid is system-owned metadata
+          // and MUST equal the document's localId. The form payload
+          // and the device-level getMobileUuid callback are both
+          // untrusted for this field — a stray empty string from
+          // either would otherwise fork lineage (the server generates
+          // a fresh UUID, leaving the original docs__ row + failed
+          // outbox row orphaned). See `reconcileServerSave` for the
+          // companion cleanup that runs after the server replies.
+          if (isEditingExistingDoc) {
+            payload['mobile_uuid'] = widget.document!.localId;
           }
           final result = await widget.api!.document.createDocument(
             widget.meta.name,
@@ -455,11 +783,25 @@ class _FormScreenState extends State<FormScreen> {
               );
               merged['docstatus'] = 1;
             }
-            await widget.repository.saveServerDocument(
-              doctype: widget.meta.name,
-              serverId: serverName,
-              data: merged,
-            );
+            if (isEditingExistingDoc) {
+              // Collapses lineage: attach server_name to the existing
+              // docs__ row, drop the failed outbox row, then apply
+              // the server snapshot. Without this, the failed outbox
+              // row + dirty docs__ row from the prior failed attempt
+              // would stay behind alongside the freshly-synced row.
+              await widget.repository.reconcileServerSave(
+                doctype: widget.meta.name,
+                mobileUuid: widget.document!.localId,
+                serverName: serverName,
+                serverData: merged,
+              );
+            } else {
+              await widget.repository.applyServerDocument(
+                doctype: widget.meta.name,
+                serverName: serverName,
+                data: merged,
+              );
+            }
             savedData = merged;
           } else {
             savedData = Map<String, dynamic>.from(payload);
@@ -484,22 +826,22 @@ class _FormScreenState extends State<FormScreen> {
               existingData['docstatus'] = 1;
             }
           }
-          await widget.repository.updateDocumentData(
-            widget.document!.localId,
-            existingData,
+          await widget.repository.applyServerDocument(
+            doctype: widget.meta.name,
+            serverName: widget.document!.serverId!,
+            data: existingData,
           );
           savedData = existingData;
         }
         if (mounted) {
           setState(() {
             _baselineFormData = savedData!;
-            _isFormDirty = false;
           });
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(
-              content: Text('Saved successfully'),
-              backgroundColor: Colors.green,
-            ),
+          _isFormDirty.value = false;
+          showStatusSnackBar(
+            context,
+            sdkTr('Saved successfully'),
+            severity: SnackBarSeverity.success,
           );
           widget.onSaveSuccess?.call();
         }
@@ -514,91 +856,17 @@ class _FormScreenState extends State<FormScreen> {
             payload['mobile_uuid'] = uuid;
           }
         }
-        await widget.repository.createDocument(
+        await widget.repository.saveDocument(
           doctype: widget.meta.name,
           data: payload,
         );
       } else {
         final existingData = Map<String, dynamic>.from(widget.document!.data);
         existingData.addAll(payload);
-        await widget.repository.updateDocumentData(
-          widget.document!.localId,
-          existingData,
+        await widget.repository.saveDocument(
+          doctype: widget.meta.name,
+          data: {...existingData, 'mobile_uuid': widget.document!.localId},
         );
-      }
-
-      if (widget.syncService != null) {
-        final isOnline = await widget.syncService!.isOnline();
-        if (isOnline) {
-          try {
-            final syncResult = await widget.syncService!.pushSync(
-              doctype: widget.meta.name,
-            );
-            if (mounted) {
-              if (syncResult.errors.isNotEmpty) {
-                _showSyncErrorDialog(syncResult.errors);
-              } else if (syncResult.failed > 0) {
-                ScaffoldMessenger.of(context).showSnackBar(
-                  SnackBar(
-                    content: Text(
-                      'Saved locally. ${syncResult.failed} update(s) failed to sync.',
-                    ),
-                    backgroundColor: Colors.orange,
-                    action: SnackBarAction(
-                      label: 'Details',
-                      textColor: Colors.white,
-                      onPressed: () => _showSyncErrorDialog(syncResult.errors),
-                    ),
-                  ),
-                );
-              } else if (syncResult.success > 0) {
-                ScaffoldMessenger.of(context).showSnackBar(
-                  SnackBar(
-                    content: Text(
-                      'Saved and synced (${syncResult.success} document(s))',
-                    ),
-                    backgroundColor: Colors.green,
-                  ),
-                );
-              }
-            }
-          } catch (e) {
-            if (mounted) {
-              ScaffoldMessenger.of(context).showSnackBar(
-                SnackBar(
-                  content: Text('Saved locally. Sync failed: ${e.toString()}'),
-                  backgroundColor: Colors.orange,
-                  duration: const Duration(seconds: 3),
-                  action: SnackBarAction(
-                    label: 'View Status',
-                    textColor: Colors.white,
-                    onPressed: () {
-                      if (widget.syncService != null) {
-                        Navigator.push(
-                          context,
-                          MaterialPageRoute(
-                            builder: (context) => SyncStatusScreen(
-                              syncService: widget.syncService!,
-                              repository: widget.repository,
-                            ),
-                          ),
-                        );
-                      }
-                    },
-                  ),
-                ),
-              );
-            }
-          }
-        } else if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(
-              content: Text('Saved locally. Will sync when online.'),
-              backgroundColor: Colors.blue,
-              duration: Duration(seconds: 2),
-            ),
-          );
-        }
       }
 
       if (mounted) {
@@ -609,166 +877,93 @@ class _FormScreenState extends State<FormScreen> {
               ..addAll(payload);
         setState(() {
           _baselineFormData = savedData;
-          _isFormDirty = false;
         });
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('Document saved successfully'),
-            backgroundColor: Colors.green,
-          ),
+        _isFormDirty.value = false;
+        showStatusSnackBar(
+          context,
+          sdkTr('Document saved successfully'),
+          severity: SnackBarSeverity.success,
         );
         widget.onSaveSuccess?.call();
       }
-    } catch (e) {
-      setState(() {
-        _errorMessage = e is FrappeException
-            ? e.message
-            : toUserFriendlyMessage(e);
-      });
+    } catch (e, st) {
+      sdkLog('FormScreen.save (server-first/offline) failed — $e\n$st');
+      if (mounted) {
+        setState(() {
+          _errorMessage = e is FrappeException
+              ? e.message
+              : toUserFriendlyMessage(e);
+        });
+      }
     } finally {
-      setState(() {
-        _isSaving = false;
-      });
+      _setSaving(false);
+      // Either branch above may have queued a fresh outbox row or
+      // resolved an existing one; refresh the persistent banner.
+      _loadSyncErrors();
     }
   }
 
   Future<void> _handleDelete() async {
     if (widget.document == null) return;
 
-    final confirmed = await showDialog<bool>(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('Delete Document'),
-        content: const Text('Are you sure you want to delete this document?'),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context, false),
-            child: const Text('Cancel'),
-          ),
-          TextButton(
-            onPressed: () => Navigator.pop(context, true),
-            child: const Text('Delete', style: TextStyle(color: Colors.red)),
-          ),
-        ],
-      ),
+    final confirmed = await showConfirmDialog(
+      context,
+      title: sdkTr('Delete Document'),
+      content: sdkTr('Are you sure you want to delete this document?'),
+      confirmLabel: sdkTr('Delete'),
+      confirmColor: Colors.red,
     );
 
     if (confirmed != true) return;
 
-    setState(() {
-      _isSaving = true;
-    });
+    _setSaving(true);
 
     try {
-      if (widget.api != null && widget.document!.serverId != null) {
+      final offlineEnabled = widget.repository.offlineMode.enabled;
+      if (!offlineEnabled &&
+          widget.api != null &&
+          widget.document!.serverId != null) {
         await widget.api!.document.deleteDocument(
           widget.meta.name,
           widget.document!.serverId!,
         );
-        await widget.repository.hardDeleteDocument(widget.document!.localId);
+        // The server doc is gone; drop the local docs__ mirror too, else it
+        // reappears in list screens until the next pull (PR#36 round-4 B5).
+        await widget.repository.hardDeleteLocalMirror(
+          doctype: widget.meta.name,
+          mobileUuid: widget.document!.localId,
+        );
       } else {
-        await widget.repository.deleteDocument(widget.document!.localId);
-        if (widget.syncService != null) {
-          final isOnline = await widget.syncService!.isOnline();
-          if (isOnline) {
-            try {
-              await widget.syncService!.pushSync(doctype: widget.meta.name);
-            } catch (_) {}
-          }
-        }
+        await widget.repository.deleteDocument(
+          doctype: widget.meta.name,
+          mobileUuid: widget.document!.localId,
+        );
       }
 
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('Document deleted'),
-            backgroundColor: Colors.orange,
-          ),
+        showStatusSnackBar(
+          context,
+          sdkTr('Document deleted'),
+          severity: SnackBarSeverity.warning,
         );
-        Navigator.pop(context);
+        // Notify the parent BEFORE popping so the callback runs while this
+        // screen is still mounted — a setState/context use inside it would
+        // otherwise operate on a defunct element (M8).
         widget.onSaveSuccess?.call();
+        Navigator.pop(context);
       }
-    } catch (e) {
-      setState(() {
-        _errorMessage = e is FrappeException
-            ? e.message
-            : toUserFriendlyMessage(e);
-      });
+    } catch (e, st) {
+      sdkLog('FormScreen.delete failed — $e\n$st');
+      if (mounted) {
+        setState(() {
+          _errorMessage = e is FrappeException
+              ? e.message
+              : toUserFriendlyMessage(e);
+        });
+      }
     } finally {
-      setState(() {
-        _isSaving = false;
-      });
+      _setSaving(false);
     }
-  }
-
-  void _showSyncErrorDialog(List<SyncError> errors) {
-    showDialog(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: const Row(
-          children: [
-            Icon(Icons.error, color: Colors.red),
-            SizedBox(width: 8),
-            Text('Sync Errors'),
-          ],
-        ),
-        content: SizedBox(
-          width: double.maxFinite,
-          child: ListView.builder(
-            shrinkWrap: true,
-            itemCount: errors.length,
-            itemBuilder: (context, index) {
-              final error = errors[index];
-              return Card(
-                margin: const EdgeInsets.only(bottom: 8),
-                color: Colors.red[50],
-                child: ListTile(
-                  leading: const Icon(Icons.error_outline, color: Colors.red),
-                  title: Text(
-                    '${error.operation.toUpperCase()}: ${error.doctype}',
-                    style: const TextStyle(fontWeight: FontWeight.bold),
-                  ),
-                  subtitle: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text('Document: ${error.documentId}'),
-                      const SizedBox(height: 4),
-                      Text(
-                        error.errorMessage,
-                        style: TextStyle(fontSize: 12, color: Colors.red[700]),
-                      ),
-                    ],
-                  ),
-                  isThreeLine: true,
-                ),
-              );
-            },
-          ),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: const Text('Close'),
-          ),
-          if (widget.syncService != null)
-            TextButton(
-              onPressed: () {
-                Navigator.pop(context);
-                Navigator.push(
-                  context,
-                  MaterialPageRoute(
-                    builder: (context) => SyncStatusScreen(
-                      syncService: widget.syncService!,
-                      repository: widget.repository,
-                    ),
-                  ),
-                );
-              },
-              child: const Text('View All'),
-            ),
-        ],
-      ),
-    );
   }
 
   @override
@@ -780,11 +975,18 @@ class _FormScreenState extends State<FormScreen> {
         widget.document != null &&
         !_isSubmitted;
 
-    final showSave = allowSave && (_isFormDirty || widget.document == null);
+    // `_isFormDirty` and `_isSyncing` are ValueNotifiers, not setState
+    // fields — so the heavy FormBuilder tree below does NOT rebuild on
+    // every keystroke or while the push spinner is spinning. Only the
+    // ValueListenableBuilder closures here re-run. Remaining setState
+    // sites in this file (workflow loading, sync-error rows banner,
+    // saving spinner) still cause full rebuilds and are tracked as
+    // follow-up isolation work.
 
     final effectiveReadOnly = _isSaving || widget.readOnly || _isSubmitted;
 
     return Scaffold(
+      bottomNavigationBar: widget.bottomNavigationBar,
       appBar: AppBar(
         backgroundColor: widget.screenStyle?.appBarBackgroundColor,
         title: Text(
@@ -793,28 +995,57 @@ class _FormScreenState extends State<FormScreen> {
               : (widget.meta.label ?? widget.meta.name),
         ),
         actions: [
-          if (showSave)
-            TextButton.icon(
-              key: const Key('form_save_button'),
-              style: widget.screenStyle?.saveButtonStyle,
-              onPressed: _isSaving ? null : () => _triggerSubmit?.call(),
-              icon: _isSaving
-                  ? const SizedBox(
-                      width: 20,
-                      height: 20,
-                      child: CircularProgressIndicator(strokeWidth: 2),
-                    )
-                  : const Icon(Icons.save),
-              label: const Text('Save'),
+          ValueListenableBuilder<bool>(
+            valueListenable: _isFormDirty,
+            builder: (context, dirty, _) {
+              final showSave = allowSave && (dirty || widget.document == null);
+              if (!showSave || widget.hideAppBarActions) {
+                return const SizedBox.shrink();
+              }
+              return TextButton.icon(
+                key: const Key('form_save_button'),
+                style: widget.screenStyle?.saveButtonStyle,
+                onPressed: _isSaving ? null : () => _triggerSubmit?.call(),
+                icon: _isSaving
+                    ? const SizedBox(
+                        width: 20,
+                        height: 20,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      )
+                    : const Icon(Icons.save),
+                label: Text(sdkTr('Save')),
+              );
+            },
+          ),
+          if (widget.repository.offlineMode.enabled &&
+              widget.syncService != null &&
+              !widget.readOnly &&
+              !widget.hideAppBarActions)
+            ValueListenableBuilder<bool>(
+              valueListenable: _isSyncing,
+              builder: (context, syncing, _) {
+                return IconButton(
+                  key: const Key('form_push_button'),
+                  icon: syncing
+                      ? const SizedBox(
+                          width: 20,
+                          height: 20,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        )
+                      : const Icon(Icons.cloud_upload),
+                  onPressed: syncing || _isSaving ? null : _handlePushRecord,
+                  tooltip: sdkTr('Push to server'),
+                );
+              },
             ),
-          if (allowDelete)
+          if (allowDelete && !widget.hideAppBarActions)
             IconButton(
               icon: Icon(
                 Icons.delete,
                 color: widget.screenStyle?.deleteIconColor,
               ),
               onPressed: _isSaving ? null : _handleDelete,
-              tooltip: 'Delete',
+              tooltip: sdkTr('Delete'),
             ),
         ],
       ),
@@ -822,24 +1053,13 @@ class _FormScreenState extends State<FormScreen> {
         children: [
           Column(
             children: [
-              if (_errorMessage != null)
-                Container(
-                  width: double.infinity,
-                  padding: const EdgeInsets.all(12),
-                  color: Colors.red[50],
-                  child: Row(
-                    children: [
-                      const Icon(Icons.error, color: Colors.red),
-                      const SizedBox(width: 8),
-                      Expanded(
-                        child: Text(
-                          _errorMessage!,
-                          style: const TextStyle(color: Colors.red),
-                        ),
-                      ),
-                    ],
-                  ),
+              if (_syncErrorRows.isNotEmpty)
+                SyncErrorBanner(
+                  rows: _syncErrorRows,
+                  onRetry: widget.syncController == null ? null : _retrySyncRow,
                 ),
+              if (_errorMessage != null)
+                ErrorMessageBanner(message: _errorMessage!),
               if (widget.meta.hasWorkflow &&
                   widget.document != null &&
                   widget.api != null)
@@ -849,12 +1069,15 @@ class _FormScreenState extends State<FormScreen> {
                   loading: _workflowLoading,
                   translate: widget.translate,
                   onShowActions: _showWorkflowActionsSheet,
+                  showActions: widget.showWorkflowActions,
                 ),
               Expanded(
                 child: FrappeFormBuilder(
                   key: widget.document != null
                       ? ValueKey('form_${widget.document!.localId}')
                       : const ValueKey('form_new'),
+                  mode: widget.mode,
+                  controller: _formController,
                   meta: widget.meta,
                   initialData:
                       _workflowUpdatedDocData ??
@@ -865,6 +1088,7 @@ class _FormScreenState extends State<FormScreen> {
                   onFormDataChanged: _onFormDataChanged,
                   linkOptionService: widget.linkOptionService,
                   useLinkFieldCoordinator: widget.useLinkFieldCoordinator,
+                  customFieldFactory: widget.customFieldFactory,
                   uploadFile: widget.api != null
                       ? (file) async {
                           final res = await widget.api!.attachment.uploadFile(
@@ -880,7 +1104,10 @@ class _FormScreenState extends State<FormScreen> {
                   getMeta: widget.metaService != null
                       ? (doctype) => widget.metaService!.getMeta(doctype)
                       : null,
-                  registerSubmit: (trigger) => _triggerSubmit = trigger,
+                  registerSubmit: (trigger) {
+                    _triggerSubmit = trigger;
+                    widget.registerSubmit?.call(trigger);
+                  },
                   onButtonPressed: widget.onButtonPressed != null
                       ? (field, formData) => widget.onButtonPressed!(
                           field,
@@ -892,6 +1119,7 @@ class _FormScreenState extends State<FormScreen> {
                   translate: widget.translate,
                   onFieldChange: widget.onFieldChange,
                   getLinkFilterBuilder: widget.getLinkFilterBuilder,
+                  cascadeProgrammaticChanges: widget.cascadeProgrammaticChanges,
                 ),
               ),
             ],
@@ -915,7 +1143,7 @@ class _FormScreenState extends State<FormScreen> {
                             ),
                             const SizedBox(height: 16),
                             Text(
-                              'Saving...',
+                              sdkTr('Saving...'),
                               style: Theme.of(context).textTheme.titleMedium,
                             ),
                           ],
@@ -939,6 +1167,7 @@ class _WorkflowHeader extends StatelessWidget {
     required this.loading,
     this.translate,
     required this.onShowActions,
+    required this.showActions,
   });
 
   final DocTypeMeta meta;
@@ -946,6 +1175,7 @@ class _WorkflowHeader extends StatelessWidget {
   final bool loading;
   final String Function(String)? translate;
   final VoidCallback onShowActions;
+  final bool showActions;
 
   @override
   Widget build(BuildContext context) {
@@ -986,7 +1216,7 @@ class _WorkflowHeader extends StatelessWidget {
               width: 20,
               child: CircularProgressIndicator(strokeWidth: 2),
             )
-          else
+          else if (showActions)
             TextButton.icon(
               onPressed: onShowActions,
               icon: const Icon(Icons.playlist_play),

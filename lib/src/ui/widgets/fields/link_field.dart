@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_form_builder/flutter_form_builder.dart';
 import 'base_field.dart';
@@ -6,6 +8,8 @@ import '../../../models/link_filter_result.dart';
 import '../../../services/link_option_service.dart';
 import '../../../services/link_field_coordinator.dart';
 import '../../../database/entities/link_option_entity.dart';
+import '../../../utils/uuid_pattern.dart';
+import 'field_helpers.dart';
 import 'searchable_select.dart';
 
 /// Widget for Link field type with cached options
@@ -17,6 +21,11 @@ class LinkField extends BaseField {
   final Map<String, dynamic> parentFormData;
   final LinkFilterBuilder? Function(String doctype, String fieldname)?
   getLinkFilterBuilder;
+
+  /// Fires whenever the picked option's locality changes, including on
+  /// clear (false). Wires the `<field>__is_local` companion in the host
+  /// form data so [UuidRewriter] can rewrite the value at push time.
+  final ValueChanged<bool>? onIsLocalChanged;
 
   const LinkField({
     super.key,
@@ -31,6 +40,7 @@ class LinkField extends BaseField {
     this.formData,
     this.parentFormData = const {},
     this.getLinkFilterBuilder,
+    this.onIsLocalChanged,
   });
 
   @override
@@ -49,40 +59,46 @@ class LinkField extends BaseField {
         }
       }
 
-      // Auto-select when exactly one option and no valid selection
+      // Auto-select when exactly one option and no valid selection.
+      // Propagate `onIsLocalChanged` so an auto-picked UUID-shaped
+      // option (offline mobile_uuid) flips `<field>__is_local` for
+      // UuidRewriter at push time — matches `_applyOptionsAndAutoSelect`.
       if (options!.length == 1 &&
           (validInitialValue == null || validInitialValue.isEmpty)) {
         validInitialValue = options!.first;
         WidgetsBinding.instance.addPostFrameCallback((_) {
           onChanged?.call(options!.first);
+          onIsLocalChanged?.call(looksLikeMobileUuid(options!.first));
         });
       }
 
-      return FormBuilderDropdown<String>(
-        key: ValueKey('link_${field.fieldname}_${options!.length}'),
-        name: field.fieldname ?? '',
-        initialValue: validInitialValue,
-        enabled: enabled && !field.readOnly,
-        decoration:
-            style?.decoration ??
+      // Full-box tap target: redistribute horizontal padding into the
+      // dropdown's clickable padding (see [dropdownFullTap]).
+      final tap = dropdownFullTap(
+        style?.decoration ??
             InputDecoration(
               hintText: field.placeholder ?? 'Select ${field.displayLabel}',
               border: const OutlineInputBorder(),
               filled: field.readOnly,
               fillColor: field.readOnly ? Colors.grey[200] : null,
             ),
+      );
+      return FormBuilderDropdown<String>(
+        autovalidateMode: AutovalidateMode.onUserInteraction,
+        key: ValueKey('link_${field.fieldname}_${options!.length}'),
+        name: field.fieldname ?? '',
+        initialValue: validInitialValue,
+        enabled: enabled && !field.readOnly,
+        isExpanded: true,
+        decoration: tap.decoration,
+        padding: tap.padding,
         items: options!
             .map(
               (option) => DropdownMenuItem(value: option, child: Text(option)),
             )
             .toList(),
         validator: field.reqd
-            ? (value) {
-                if (value == null || value.toString().isEmpty) {
-                  return '${field.displayLabel} is required';
-                }
-                return null;
-              }
+            ? (value) => requiredValidator(value, field.displayLabel)
             : null,
         onChanged: (val) => onChanged?.call(val),
       );
@@ -94,24 +110,42 @@ class LinkField extends BaseField {
     if (field.options != null &&
         field.options!.isNotEmpty &&
         effectiveService != null) {
-      return _LinkFieldDropdown(
-        field: field,
-        value: value,
-        onChanged: onChanged,
-        enabled: enabled,
-        linkOptionService: effectiveService,
-        linkFieldCoordinator: linkFieldCoordinator,
-        linkedDoctype: field.options!,
-        linkFilters: field.linkFilters,
-        formData: formData ?? {},
-        parentFormData: parentFormData,
-        getLinkFilterBuilder: getLinkFilterBuilder,
-        style: style,
+      return FormBuilderField<String>(
+        autovalidateMode: AutovalidateMode.onUserInteraction,
+        key: ValueKey('linkfield_${field.fieldname}'),
+        name: field.fieldname ?? '',
+        initialValue: value?.toString() ?? field.defaultValue?.toString(),
+        enabled: enabled && !field.readOnly,
+        validator: field.reqd
+            ? (val) => requiredValidator(val, field.displayLabel)
+            : null,
+        builder: (state) {
+          return _LinkFieldDropdown(
+            field: field,
+            value: state.value,
+            onChanged: (val) {
+              state.didChange(val);
+              onChanged?.call(val);
+            },
+            enabled: enabled && !field.readOnly,
+            linkOptionService: effectiveService,
+            linkFieldCoordinator: linkFieldCoordinator,
+            linkedDoctype: field.options!,
+            linkFilters: field.linkFilters,
+            formData: formData ?? {},
+            parentFormData: parentFormData,
+            getLinkFilterBuilder: getLinkFilterBuilder,
+            style: style,
+            onIsLocalChanged: onIsLocalChanged,
+            errorText: state.errorText,
+          );
+        },
       );
     }
 
     // Fallback to text field
     return FormBuilderTextField(
+      autovalidateMode: AutovalidateMode.onUserInteraction,
       key: ValueKey('link_text_${field.fieldname}'),
       name: field.fieldname ?? '',
       initialValue: value?.toString() ?? field.defaultValue ?? '',
@@ -124,12 +158,7 @@ class LinkField extends BaseField {
         suffixIcon: const Icon(Icons.search),
       ),
       validator: field.reqd
-          ? (value) {
-              if (value == null || value.toString().isEmpty) {
-                return '${field.displayLabel} is required';
-              }
-              return null;
-            }
+          ? (value) => requiredValidator(value, field.displayLabel)
           : null,
       onChanged: (val) => onChanged?.call(val),
     );
@@ -151,6 +180,8 @@ class _LinkFieldDropdown extends StatefulWidget {
   final LinkFilterBuilder? Function(String doctype, String fieldname)?
   getLinkFilterBuilder;
   final FieldStyle? style;
+  final ValueChanged<bool>? onIsLocalChanged;
+  final String? errorText;
 
   const _LinkFieldDropdown({
     required this.field,
@@ -165,6 +196,8 @@ class _LinkFieldDropdown extends StatefulWidget {
     this.parentFormData = const {},
     this.getLinkFilterBuilder,
     this.style,
+    this.onIsLocalChanged,
+    this.errorText,
   });
 
   @override
@@ -176,6 +209,7 @@ class _LinkFieldDropdownState extends State<_LinkFieldDropdown> {
   bool _isLoading = true;
   bool _waitingForDependent = false;
   String _dependentFieldName = '';
+  StreamSubscription<void>? _syncSub;
 
   @override
   void initState() {
@@ -186,6 +220,33 @@ class _LinkFieldDropdownState extends State<_LinkFieldDropdown> {
     } else {
       _loadOptions();
     }
+
+    // Pickers opened mid-sync see an empty `docs__<doctype>` table and
+    // return an empty option list. Without this subscription the dropdown
+    // stayed empty forever even after the closure pull populated the
+    // table. On every sync-complete tick, retry the load if we currently
+    // have nothing — the coordinator's empty results aren't cached, so
+    // the retry hits the resolver and picks up freshly-synced rows.
+    final stream = widget.linkOptionService.syncComplete$;
+    if (stream != null) {
+      _syncSub = stream.listen((_) {
+        if (!mounted) return;
+        if (_isLoading || _waitingForDependent) return;
+        if (_options.isNotEmpty) return;
+        if (widget.linkFieldCoordinator != null &&
+            widget.linkFieldCoordinator!.useCoordinator) {
+          _loadOptionsViaCoordinator();
+        } else {
+          _loadOptions();
+        }
+      });
+    }
+  }
+
+  @override
+  void dispose() {
+    _syncSub?.cancel();
+    super.dispose();
   }
 
   void _applyOptionsAndAutoSelect(List<LinkOptionEntity> options) {
@@ -205,7 +266,14 @@ class _LinkFieldDropdownState extends State<_LinkFieldDropdown> {
           );
       if (!hasValidSelection) {
         WidgetsBinding.instance.addPostFrameCallback((_) {
-          if (mounted) widget.onChanged?.call(options.first.name);
+          if (!mounted) return;
+          widget.onChanged?.call(options.first.name);
+          // Auto-select must also propagate the option's locality —
+          // otherwise an auto-picked offline target leaves
+          // `<field>__is_local` at 0 and [UuidRewriter] skips the
+          // rewrite at push time, sending the raw mobile_uuid to
+          // the server (LinkValidationError 417).
+          widget.onIsLocalChanged?.call(options.first.isLocal);
         });
       }
     }
@@ -229,14 +297,7 @@ class _LinkFieldDropdownState extends State<_LinkFieldDropdown> {
       final dependentNames = LinkOptionService.getDependentFieldNames(
         widget.linkFilters,
       );
-      setState(() {
-        _options = [];
-        _isLoading = false;
-        _waitingForDependent = true;
-        _dependentFieldName = dependentNames.isNotEmpty
-            ? dependentNames.first
-            : '';
-      });
+      _setWaitingForDependent(dependentNames);
       return;
     }
     setState(() => _isLoading = true);
@@ -245,6 +306,23 @@ class _LinkFieldDropdownState extends State<_LinkFieldDropdown> {
       widget.formData,
       _applyOptionsAndAutoSelect,
     );
+  }
+
+  /// Puts the dropdown into the "waiting for parent field" state. Always
+  /// guards `.first` against an empty list (defensive — the coordinator
+  /// path historically did this with a ternary, the `_loadOptions` path
+  /// relied on an outer `.isNotEmpty` if-condition; consolidating into
+  /// one helper means a future code edit can't accidentally call `.first`
+  /// unguarded).
+  void _setWaitingForDependent(List<String> dependentNames) {
+    setState(() {
+      _options = [];
+      _isLoading = false;
+      _waitingForDependent = true;
+      _dependentFieldName = dependentNames.isNotEmpty
+          ? dependentNames.first
+          : '';
+    });
   }
 
   DocField? _docFieldFromDynamic(dynamic f) {
@@ -289,12 +367,7 @@ class _LinkFieldDropdownState extends State<_LinkFieldDropdown> {
         widget.linkFilters!.isNotEmpty &&
         filters == null &&
         dependentNames.isNotEmpty) {
-      setState(() {
-        _options = [];
-        _isLoading = false;
-        _waitingForDependent = true;
-        _dependentFieldName = dependentNames.first;
-      });
+      _setWaitingForDependent(dependentNames);
       return;
     }
     try {
@@ -303,7 +376,11 @@ class _LinkFieldDropdownState extends State<_LinkFieldDropdown> {
         filters: filters,
       );
       _applyOptionsAndAutoSelect(options);
-    } catch (e) {
+    } catch (e, st) {
+      debugPrint(
+        'LinkField: getLinkOptions(${widget.linkedDoctype}) failed — $e\n$st',
+      );
+      if (!mounted) return;
       setState(() {
         _options = [];
         _isLoading = false;
@@ -341,17 +418,17 @@ class _LinkFieldDropdownState extends State<_LinkFieldDropdown> {
     if (_isLoading) {
       final loadingValue = widget.value?.toString();
       final hasValue = loadingValue != null && loadingValue.isNotEmpty;
-      return FormBuilderDropdown<String>(
+      return DropdownButtonFormField<String>(
         key: ValueKey('${widget.field.fieldname}_loading'),
-        name: widget.field.fieldname ?? '',
         initialValue: hasValue ? loadingValue : null,
-        enabled: false,
+        onChanged: null,
         decoration:
-            widget.style?.decoration ??
-            const InputDecoration(
+            widget.style?.decoration?.copyWith(errorText: widget.errorText) ??
+            InputDecoration(
               hintText: 'Loading...',
-              border: OutlineInputBorder(),
-              suffixIcon: SizedBox(
+              errorText: widget.errorText,
+              border: const OutlineInputBorder(),
+              suffixIcon: const SizedBox(
                 width: 20,
                 height: 20,
                 child: CircularProgressIndicator(strokeWidth: 2),
@@ -387,15 +464,17 @@ class _LinkFieldDropdownState extends State<_LinkFieldDropdown> {
       final hint = isWaiting
           ? 'Select $_dependentFieldName first'
           : 'No options available';
-      return FormBuilderDropdown<String>(
+      return DropdownButtonFormField<String>(
         key: ValueKey('${widget.field.fieldname}_empty_$isWaiting'),
-        name: widget.field.fieldname ?? '',
         initialValue: null,
-        enabled: !isWaiting && (widget.enabled && !widget.field.readOnly),
+        onChanged: (!isWaiting && widget.enabled && !widget.field.readOnly)
+            ? (v) => widget.onChanged?.call(v)
+            : null,
         decoration:
-            widget.style?.decoration ??
+            widget.style?.decoration?.copyWith(errorText: widget.errorText) ??
             InputDecoration(
               hintText: hint,
+              errorText: widget.errorText,
               border: const OutlineInputBorder(),
               suffixIcon: isWaiting
                   ? null
@@ -411,7 +490,6 @@ class _LinkFieldDropdownState extends State<_LinkFieldDropdown> {
             child: Text(hint, style: TextStyle(color: Colors.grey[600])),
           ),
         ],
-        onChanged: isWaiting ? null : (v) => widget.onChanged?.call(v),
       );
     }
 
@@ -438,8 +516,28 @@ class _LinkFieldDropdownState extends State<_LinkFieldDropdown> {
       enabled: widget.enabled && !widget.field.readOnly,
       hintText:
           widget.field.placeholder ?? 'Search ${widget.field.displayLabel}...',
+      labelText: widget.style?.decoration?.labelText,
+      errorText: widget.errorText,
+      pickerMode:
+          widget.style?.linkFieldPickerMode ?? LinkFieldPickerMode.inline,
       onChanged: (values) {
-        widget.onChanged?.call(values.isEmpty ? null : values.first);
+        final picked = values.isEmpty ? null : values.first;
+        widget.onChanged?.call(picked);
+        // Mirror the picked option's locality into `<field>__is_local`. On
+        // clear, force false so a stale `1` from a prior local pick doesn't
+        // linger.
+        if (widget.onIsLocalChanged != null) {
+          var isLocal = false;
+          if (picked != null) {
+            for (final o in _options) {
+              if (o.name == picked) {
+                isLocal = o.isLocal;
+                break;
+              }
+            }
+          }
+          widget.onIsLocalChanged!(isLocal);
+        }
       },
     );
   }

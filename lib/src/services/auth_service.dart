@@ -28,6 +28,21 @@ class AuthService {
   static const Uuid _uuid = Uuid();
   FrappeClient? _client;
   bool _isAuthenticated = false;
+
+  /// Maps Frappe's `roles` JSON list (returned by `/api/method/login`,
+  /// `verify_login_otp`, and the post-login `frappe.auth.get_logged_user`
+  /// response) into a clean `List<String>`. Drops null and empty entries,
+  /// returns an empty list when the input is null. Shared by [login],
+  /// [verifyLoginOtp], and [fetchUserInfo] so role-extraction stays uniform
+  /// across auth paths.
+  static List<String> _parseRoles(dynamic rolesJson) {
+    if (rolesJson is! List) return <String>[];
+    return rolesJson
+        .map((r) => r.toString())
+        .where((r) => r.isNotEmpty)
+        .toList();
+  }
+
   bool _isRefreshingToken = false;
   AppDatabase? _database;
   List<String> _roles = [];
@@ -119,13 +134,7 @@ class AuthService {
       final mobileFormNamesJson =
           response['mobile_form_names'] as List<dynamic>?;
 
-      final rolesJson = response['roles'] as List<dynamic>?;
-      _roles =
-          rolesJson
-              ?.map((r) => r.toString())
-              .where((r) => r.isNotEmpty)
-              .toList() ??
-          <String>[];
+      _roles = _parseRoles(response['roles']);
 
       _language = response['language'] as String?;
 
@@ -210,13 +219,7 @@ class AuthService {
       }
       dev.log('access_token: $accessToken', name: 'Auth');
 
-      final rolesJson = response['roles'] as List<dynamic>?;
-      _roles =
-          rolesJson
-              ?.map((r) => r.toString())
-              .where((r) => r.isNotEmpty)
-              .toList() ??
-          <String>[];
+      _roles = _parseRoles(response['roles']);
       _language = response['language'] as String?;
 
       await _processLoginResponse(
@@ -243,18 +246,17 @@ class AuthService {
     try {
       final result = await _client!.rest.get('/api/v2/method/mobile_auth.me');
       if (result is! Map<String, dynamic>) return null;
-      final message = result;
+      // /api/v2/method/* wraps the return in {"data": ...}; fall back to
+      // the bare result for /api/method/* or no-envelope responses.
+      final message = (result['data'] is Map<String, dynamic>)
+          ? result['data'] as Map<String, dynamic>
+          : result;
 
-      final rolesJson = message['roles'] as List<dynamic>?;
-      _roles =
-          rolesJson
-              ?.map((r) => r.toString())
-              .where((r) => r.isNotEmpty)
-              .toList() ??
-          <String>[];
+      _roles = _parseRoles(message['roles']);
       _language = message['language'] as String?;
       return message;
-    } catch (_) {
+    } catch (e, st) {
+      dev.log('fetchUserInfo failed — $e\n$st', name: 'Auth');
       return null;
     }
   }
@@ -287,6 +289,14 @@ class AuthService {
           .map((json) => MobileFormName.fromJson(json as Map<String, dynamic>))
           .toList();
 
+      // Mirror MetaService._updateMobileFormDoctypes field set: carry
+      // `groupName` and `sortOrder` through the unset / upsert loops so a
+      // login here doesn't silently drop those columns relative to a
+      // later `resyncMobileConfiguration()` call. (The timestamp-newer
+      // check that MetaService also runs is intentionally NOT replicated
+      // — AuthService's login path is the entry point that establishes
+      // server-side mobile form list as authoritative; no comparison is
+      // needed here.)
       final allMetas = await _database!.doctypeMetaDao.findAll();
       for (final meta in allMetas) {
         if (meta.isMobileForm) {
@@ -296,13 +306,17 @@ class AuthService {
             serverModifiedAt: meta.serverModifiedAt,
             isMobileForm: false,
             metaJson: meta.metaJson,
+            groupName: meta.groupName,
+            sortOrder: meta.sortOrder,
           );
           await _database!.doctypeMetaDao.updateDoctypeMeta(updatedMeta);
         }
       }
 
-      for (final mfn in mobileFormNames) {
+      for (int i = 0; i < mobileFormNames.length; i++) {
+        final mfn = mobileFormNames[i];
         final doctype = mfn.mobileDoctype;
+        if (doctype.isEmpty) continue;
         final existingMeta = await _database!.doctypeMetaDao.findByDoctype(
           doctype,
         );
@@ -314,6 +328,8 @@ class AuthService {
             serverModifiedAt: mfn.doctypeMetaModifiedAt,
             isMobileForm: true,
             metaJson: existingMeta.metaJson,
+            groupName: mfn.groupName,
+            sortOrder: i,
           );
           await _database!.doctypeMetaDao.updateDoctypeMeta(updatedMeta);
         } else {
@@ -323,6 +339,8 @@ class AuthService {
             serverModifiedAt: mfn.doctypeMetaModifiedAt,
             isMobileForm: true,
             metaJson: '{}',
+            groupName: mfn.groupName,
+            sortOrder: i,
           );
           await _database!.doctypeMetaDao.insertDoctypeMeta(newMeta);
         }
@@ -378,8 +396,11 @@ class AuthService {
           );
           return true;
         }
-      } catch (_) {
-        // Continue to other auth methods
+      } catch (e, st) {
+        dev.log(
+          'restoreSession: mobile auth token read failed — $e\n$st',
+          name: 'Auth',
+        );
       }
     }
 
@@ -418,7 +439,11 @@ class AuthService {
           _client!.rest.setBearerToken(refreshed.accessToken);
           _isAuthenticated = true;
           return true;
-        } catch (_) {
+        } catch (e, st) {
+          dev.log(
+            'restoreSession: OAuth refresh failed, clearing tokens — $e\n$st',
+            name: 'Auth',
+          );
           await _clearOAuthTokens();
         }
       }
@@ -431,7 +456,11 @@ class AuthService {
         _client!.auth.setApiKey(apiKey, apiSecret);
         _isAuthenticated = true;
         return true;
-      } catch (_) {
+      } catch (e, st) {
+        dev.log(
+          'restoreSession: API key restore failed — $e\n$st',
+          name: 'Auth',
+        );
         return false;
       }
     }
@@ -589,7 +618,12 @@ class AuthService {
   Future<void> logout({bool clearDatabase = true}) async {
     try {
       await _client?.auth.logout();
-    } catch (_) {}
+    } catch (e, st) {
+      dev.log(
+        'logout: server logout failed (continuing local cleanup) — $e\n$st',
+        name: 'Auth',
+      );
+    }
     _client?.rest.setBearerToken(null);
     _isAuthenticated = false;
     _cachedUserInfo = null;
@@ -670,14 +704,20 @@ class AuthService {
                   _isAuthenticated = true;
                   return true;
                 }
-              } catch (_) {
-                // Refresh failed, clear tokens
+              } catch (e, st) {
+                dev.log(
+                  '_tryRefreshMobileAuthToken: refresh call failed, clearing tokens — $e\n$st',
+                  name: 'Auth',
+                );
                 await _database!.authTokenDao.deleteAll();
               }
             }
           }
-        } catch (_) {
-          // Continue to OAuth refresh
+        } catch (e, st) {
+          dev.log(
+            '_tryRefreshMobileAuthToken: token DAO read failed, falling back to OAuth — $e\n$st',
+            name: 'Auth',
+          );
         }
       }
 
@@ -718,7 +758,11 @@ class AuthService {
       );
       _client?.rest.setBearerToken(refreshed.accessToken);
       return true;
-    } catch (_) {
+    } catch (e, st) {
+      dev.log(
+        '_tryRefreshOAuthToken failed, clearing tokens — $e\n$st',
+        name: 'Auth',
+      );
       await _clearOAuthTokens();
       return false;
     }
