@@ -278,4 +278,94 @@ void main() {
       expect(DependsOnEvaluator.evaluate('eval:doc.x>=3', {'x': 2}), isFalse);
     });
   });
+
+  group('leading ! (JS logical NOT)', () {
+    test('negates a falsy field to true', () {
+      expect(DependsOnEvaluator.evaluate('eval:!doc.flag', {'flag': 0}), isTrue);
+      expect(DependsOnEvaluator.evaluate('eval:!doc.flag', {}), isTrue);
+      expect(
+        DependsOnEvaluator.evaluate('eval:!doc.flag', {'flag': ''}),
+        isTrue,
+      );
+      expect(
+        DependsOnEvaluator.evaluate('eval:!doc.flag', {'flag': false}),
+        isTrue,
+      );
+    });
+
+    test('negates a truthy field to false', () {
+      expect(
+        DependsOnEvaluator.evaluate('eval:!doc.flag', {'flag': 1}),
+        isFalse,
+      );
+      expect(
+        DependsOnEvaluator.evaluate('eval:!doc.flag', {'flag': true}),
+        isFalse,
+      );
+      expect(
+        DependsOnEvaluator.evaluate('eval:!doc.flag', {'flag': 'x'}),
+        isFalse,
+      );
+    });
+
+    test('resolves the framework __islocal flag both ways', () {
+      // `read_only_depends_on: eval:!doc.__islocal` is the common Frappe idiom
+      // for "lock this field once the document has been saved".
+      expect(
+        DependsOnEvaluator.evaluate('eval:!doc.__islocal', {'__islocal': 1}),
+        isFalse, // unsaved -> not read-only -> editable
+      );
+      expect(
+        DependsOnEvaluator.evaluate('eval:!doc.__islocal', {'__islocal': 0}),
+        isTrue, // saved -> read-only
+      );
+    });
+
+    test('composes with && and ||', () {
+      expect(
+        DependsOnEvaluator.evaluate('eval:!doc.verified && doc.docstatus === 0', {
+          'verified': 0,
+          'docstatus': 0,
+        }),
+        isTrue,
+      );
+      expect(
+        DependsOnEvaluator.evaluate('eval:!doc.verified && doc.docstatus === 0', {
+          'verified': 1,
+          'docstatus': 0,
+        }),
+        isFalse,
+      );
+      expect(
+        DependsOnEvaluator.evaluate('eval:!doc.a || doc.b', {'a': 1, 'b': 1}),
+        isTrue,
+      );
+    });
+
+    test('!= and !== still reach their own comparison branches', () {
+      expect(
+        DependsOnEvaluator.evaluate('eval:doc.status !== "Open"', {
+          'status': 'Closed',
+        }),
+        isTrue,
+      );
+      expect(
+        DependsOnEvaluator.evaluate('eval:doc.status != "Open"', {
+          'status': 'Open',
+        }),
+        isFalse,
+      );
+      // Unspaced forms go through operator-spacing normalization first.
+      expect(
+        DependsOnEvaluator.evaluate('eval:doc.x!=1', {'x': 2}),
+        isTrue,
+      );
+    });
+
+    test('referencedFields sees through a negation', () {
+      expect(DependsOnEvaluator.referencedFields('eval:!doc.__islocal'), {
+        '__islocal',
+      });
+    });
+  });
 }

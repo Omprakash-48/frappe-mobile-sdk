@@ -147,6 +147,21 @@ class DependsOnEvaluator {
         return orParts.any((part) => evaluate(part.trim(), formData));
       }
 
+      // Handle a leading `!` (JS logical NOT), e.g. `!doc.__islocal` — the
+      // standard Frappe idiom for `read_only_depends_on` meaning "lock this
+      // field once the document has been saved". Without this branch the
+      // expression fell through to the truthy fallback below, which looked up
+      // the literal key `"!doc.__islocal"`, found nothing, and returned false —
+      // so such fields never became read-only.
+      //
+      // Placed AFTER the && / || splits so `!doc.a && doc.b` splits first, and
+      // guarded against `!=` / `!==` so those still reach their own branches.
+      if (expr.startsWith('!') &&
+          !expr.startsWith('!=') &&
+          !expr.startsWith('!==')) {
+        return !evaluate(expr.substring(1).trim(), formData);
+      }
+
       // Handle [values].includes(doc.field) pattern
       final includesMatch = RegExp(
         r"^\[(.*)?\]\.includes\(doc\.(\w+)\)$",
