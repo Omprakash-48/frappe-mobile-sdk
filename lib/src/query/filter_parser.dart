@@ -63,10 +63,19 @@ class FilterParser {
   /// `parent_schema.dart` / `serverAuditColumnNames`. Added to the whitelist
   /// when `!meta.isTable`.
   ///
-  /// These used to be dropped from the filter list entirely (they were not
-  /// materialized offline), which made an offline result a SUPERSET of the
-  /// server query — an `owner = <current user>` clause became a no-op and
-  /// surfaced rows belonging to other users. They now emit real, bound SQL.
+  /// Historically these columns were not materialized at all, so `toSql`
+  /// REJECTED a filter referencing one with `Unknown column` — such a filter
+  /// was unusable offline rather than permissive, and callers worked around it
+  /// by omitting the clause. An intermediate revision dropped the clause
+  /// silently instead, which is strictly worse: dropping an AND clause makes
+  /// an offline result a SUPERSET of the server query, degrading
+  /// `owner = <current user>` to a no-op. Both are gone — the clauses now
+  /// emit real, bound SQL.
+  ///
+  /// Note the NULL semantics that follow: comparisons go through
+  /// `IFNULL(<col>, '')`, so a row whose audit column is still NULL (a mirror
+  /// created before these columns existed, not yet re-pulled) does NOT match
+  /// an `owner = <user>` clause.
   ///
   /// Deliberately NOT added for child tables: `child_schema.dart` emits no
   /// such columns, so whitelisting them there would generate SQL against a
