@@ -368,4 +368,37 @@ void main() {
       });
     });
   });
+
+  group('missing docstatus defaults to 0 (Draft)', () {
+    test('draft-only comparisons hold when the key is absent', () {
+      // In Frappe a document always has a docstatus — 0 while it is a draft —
+      // so desk treats eval:doc.docstatus === 0 as true on a new doc. Client
+      // form data does not always carry the key.
+      expect(DependsOnEvaluator.evaluate('eval:doc.docstatus === 0', {}), isTrue);
+      expect(DependsOnEvaluator.evaluate('eval:doc.docstatus == 0', {}), isTrue);
+      expect(
+        DependsOnEvaluator.evaluate('eval:doc.docstatus !== 0', {}),
+        isFalse,
+      );
+    });
+
+    test('an explicit docstatus still wins', () {
+      expect(
+        DependsOnEvaluator.evaluate('eval:doc.docstatus === 0', {
+          'docstatus': 1,
+        }),
+        isFalse,
+      );
+      expect(
+        DependsOnEvaluator.evaluate('eval:doc.docstatus === 1', {
+          'docstatus': 1,
+        }),
+        isTrue,
+      );
+    });
+
+    test('other missing fields are NOT defaulted', () {
+      expect(DependsOnEvaluator.evaluate('eval:doc.other === 0', {}), isFalse);
+    });
+  });
 }

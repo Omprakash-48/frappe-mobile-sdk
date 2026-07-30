@@ -170,7 +170,7 @@ class DependsOnEvaluator {
         final arrayContent = includesMatch.group(1) ?? '';
         final fieldName = includesMatch.group(2)!;
         final values = _parseArrayValues(arrayContent);
-        final actual = formData[fieldName];
+        final actual = _fieldValue(formData, fieldName);
         if (actual == null) return false;
         return values.contains(actual.toString());
       }
@@ -182,7 +182,7 @@ class DependsOnEvaluator {
         if (parts.length == 2) {
           final fieldName = _extractFieldName(parts[0]);
           final expectedValue = _extractValue(parts[1]);
-          final actualValue = formData[fieldName];
+          final actualValue = _fieldValue(formData, fieldName);
           return _compareValues(actualValue, expectedValue, '==');
         }
       }
@@ -194,7 +194,7 @@ class DependsOnEvaluator {
         if (parts.length == 2) {
           final fieldName = _extractFieldName(parts[0]);
           final expectedValue = _extractValue(parts[1]);
-          final actualValue = formData[fieldName];
+          final actualValue = _fieldValue(formData, fieldName);
           return _compareValues(actualValue, expectedValue, '!=');
         }
       }
@@ -205,7 +205,7 @@ class DependsOnEvaluator {
         if (parts.length == 2) {
           final fieldName = _extractFieldName(parts[0]);
           final expectedValue = _extractValue(parts[1]);
-          final actualValue = formData[fieldName];
+          final actualValue = _fieldValue(formData, fieldName);
           return _compareValues(actualValue, expectedValue, '==');
         }
       }
@@ -216,7 +216,7 @@ class DependsOnEvaluator {
         if (parts.length == 2) {
           final fieldName = _extractFieldName(parts[0]);
           final expectedValue = _extractValue(parts[1]);
-          final actualValue = formData[fieldName];
+          final actualValue = _fieldValue(formData, fieldName);
           return _compareValues(actualValue, expectedValue, '!=');
         }
       }
@@ -227,7 +227,7 @@ class DependsOnEvaluator {
         if (parts.length == 2) {
           final fieldName = _extractFieldName(parts[0]);
           final expectedValue = _extractValue(parts[1]);
-          final actualValue = formData[fieldName];
+          final actualValue = _fieldValue(formData, fieldName);
           return _compareValues(actualValue, expectedValue, '>=');
         }
       }
@@ -238,7 +238,7 @@ class DependsOnEvaluator {
         if (parts.length == 2) {
           final fieldName = _extractFieldName(parts[0]);
           final expectedValue = _extractValue(parts[1]);
-          final actualValue = formData[fieldName];
+          final actualValue = _fieldValue(formData, fieldName);
           return _compareValues(actualValue, expectedValue, '<=');
         }
       }
@@ -249,7 +249,7 @@ class DependsOnEvaluator {
         if (parts.length == 2) {
           final fieldName = _extractFieldName(parts[0]);
           final expectedValue = _extractValue(parts[1]);
-          final actualValue = formData[fieldName];
+          final actualValue = _fieldValue(formData, fieldName);
           return _compareValues(actualValue, expectedValue, '>');
         }
       }
@@ -260,7 +260,7 @@ class DependsOnEvaluator {
         if (parts.length == 2) {
           final fieldName = _extractFieldName(parts[0]);
           final expectedValue = _extractValue(parts[1]);
-          final actualValue = formData[fieldName];
+          final actualValue = _fieldValue(formData, fieldName);
           return _compareValues(actualValue, expectedValue, '<');
         }
       }
@@ -277,6 +277,16 @@ class DependsOnEvaluator {
       return true;
     }
   }
+
+  /// Reads a field for comparison, defaulting a MISSING `docstatus` to 0.
+  ///
+  /// In Frappe a document always has a `docstatus` — 0 while it is a draft — so
+  /// desk expressions like `eval:doc.docstatus === 0` are true on a new doc.
+  /// Form data assembled client-side does not always carry the key, and reading
+  /// it as null made those expressions false, mis-gating every draft-only
+  /// visibility / mandatory / read-only rule.
+  static dynamic _fieldValue(Map<String, dynamic> formData, String fieldName) =>
+      formData[fieldName] ?? (fieldName == 'docstatus' ? 0 : null);
 
   static String _extractFieldName(String expr) {
     // Remove doc. prefix if present
