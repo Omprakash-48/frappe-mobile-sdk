@@ -1,6 +1,6 @@
 name: frappe_mobile_sdk
 description: Flutter SDK for offline-first Frappe/ERPNext mobile apps with auth, API access, dynamic forms, and sync-aware local data operations.
-version: 2.0.0
+version: 2.0.0-beta
 homepage: https://github.com/dhwani-ris/frappe-mobile-sdk
 repository: https://github.com/dhwani-ris/frappe-mobile-sdk
 issue_tracker: https://github.com/dhwani-ris/frappe-mobile-sdk/issues
@@ -15,6 +15,11 @@ environment:
   # `DropdownButtonFormField(initialValue:)`, which only exists from Flutter
   # 3.35 onward (3.32 and earlier expose `value`, now deprecated). Flutter
   # 3.35.0 ships Dart 3.9.0, hence the sdk pair.
+  #
+  # Supersedes the `flutter: ">=1.10.0"` placeholder added to unblock publish
+  # validation: that value satisfied the validator but claimed support back to
+  # Flutter 1.x, which was never true. This bound is measured, and it satisfies
+  # the same validator.
   #
   # No upper bound on `flutter`: a ceiling breaks the moment a newer Flutter
   # ships, and pub.dev penalises a constraint that excludes the latest stable.
@@ -113,6 +118,9 @@ dev_dependencies:
   flutter_test:
     sdk: flutter
   flutter_lints: ^6.0.0
+
+  # imported by test/api/attachment_service_test.dart
+  path_provider_platform_interface: ^2.1.2
 
   # Pre-commit: format + analyze before commit (run: dart run flutter_pre_commit)
   flutter_pre_commit: ^0.2.4
