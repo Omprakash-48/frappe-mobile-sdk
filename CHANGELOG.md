@@ -5,6 +5,28 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- **Swift Package Manager support (iOS).** The plugin's Swift source now lives at `ios/frappe_mobile_sdk/Sources/frappe_mobile_sdk/`, alongside a new `ios/frappe_mobile_sdk/Package.swift`; the podspec's `source_files` points there. Both build systems work — CocoaPods reads the podspec, SPM reads `Package.swift`. `Package.swift` deliberately declares no dependencies rather than a `FlutterFramework` path dependency, which would impose a Flutter 3.44 floor on every consumer.
+- **The declared SDK range is now measured rather than nominal: `sdk: ">=3.9.0 <4.0.0"`, `flutter: ">=3.35.0"`.** The floor is set by a framework API, not a language feature — `lib/` uses `DropdownButtonFormField(initialValue:)`, which exists only from Flutter 3.35 (3.32 and earlier expose `value`). Verified by running `pub get`, `analyze` and the full test suite against Flutter 3.35.7, 3.38.10 and 3.41.5. This replaces the `flutter: ">=1.10.0"` placeholder, which satisfied publish validation but claimed support back to Flutter 1.x. There is deliberately no upper bound.
+- **Dependency ranges widened, not bumped** — `geolocator` → `>=13.0.2 <15.0.0`, `package_info_plus` → `>=9.0.0 <11.0.0`, `app_links` → `>=6.4.1 <8.0.0`, `flutter_form_builder` → `>=10.1.0 <11.0.0`. All four are strict supersets of the previous constraints, so **no consumer is forced to upgrade**: an app on an older Flutter keeps resolving the older plugin versions while a current app resolves the newest. `package_info_plus 10.x` and `geolocator 14.0.3` are not yet reachable — `file_picker 11.0.2` pins `win32 ^5.9.0` while they require `win32 ^6` — but the ranges allow them, so they are picked up automatically once `file_picker` moves.
+
+### Fixed
+
+- **`depends_on` expressions with a leading `!` never evaluated.** A leading logical NOT fell through to the truthy fallback, which looked the whole expression up as a literal fieldname (e.g. `'!doc.__islocal'`), found nothing, and returned `false`. **Behaviour change:** fields using the standard `read_only_depends_on: eval:!doc.__islocal` idiom — "lock this field once the document is saved" — previously stayed editable after save and now correctly become read-only. The branch runs after the `&&` / `||` splits so `!a && b` still splits first, and is guarded against `!=` / `!==`.
+- **A missing `docstatus` compared as `null` instead of `0`.** In Frappe a document always has a `docstatus` — `0` while it is a draft — so desk treats `eval:doc.docstatus === 0` as true on a new document, but client-assembled form data does not always carry the key. **Behaviour change:** draft-only `depends_on` / `mandatory_depends_on` / `read_only_depends_on` rules previously evaluated `false` and now fire, so affected fields may newly appear, hide, or become mandatory. Only `docstatus` is defaulted; every other missing field still reads as `null`, and the truthy fallback is unchanged.
+
+### Added
+
+- **`PermissionService` reports permission cache misses.** Every `canRead` / `canWrite` / `canCreate` / `canDelete` / `canSubmit` defaulted to `true` when no synced row existed for a doctype, with no signal. A miss means the UI is gating on an assumption rather than the server's matrix, and because the server still enforces the real permission the symptom is a 403 *after* the user has filled in a form. All five checks now route through one resolver that logs the doctype and invokes an optional `onCacheMiss` callback. **The default is deliberately unchanged — still allow** — so this can be measured before a stricter default is considered. The constructor gains a trailing optional named parameter, so existing call sites are unaffected.
+
+### Removed
+
+- **`device_info_plus` dependency** — dropped, no replacement needed. Nothing in `lib/` or `test/` imported it; `DeviceTier` reads `Platform.numberOfProcessors` from `dart:io`. This also removes a native plugin from every consumer's build.
+- **`sqlite3` direct dependency** — dropped. It was declared only for explicitness and was never imported; `sqflite_common_ffi` still brings it in transitively. Note that its resolved version is now governed by that transitive constraint rather than by `^3.0.0`, so a consumer importing `package:sqlite3` **without declaring it** may resolve an older major — declare it directly if you depend on it.
+
 ## [2.0.0-beta] - 2026-07-30
 
 Major release: offline-first foundation, server-driven offline-mode toggle, and a new query/sync surface. Upgrades from `1.x` use a single transactional migration from database schema v2 to v3.
