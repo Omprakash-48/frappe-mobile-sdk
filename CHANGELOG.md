@@ -5,7 +5,7 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [2.0.0] - Unreleased
+## [2.0.0-beta] - 2026-07-30
 
 Major release: offline-first foundation, server-driven offline-mode toggle, and a new query/sync surface. Upgrades from `1.x` use a single transactional migration from database schema v2 to v3.
 
@@ -87,7 +87,7 @@ Major release: offline-first foundation, server-driven offline-mode toggle, and 
 - `extractErrorMessage` / `toUserFriendlyMessage` — shared helpers for error-string normalization across the SDK.
 - `LinkFieldPickerMode` enum (`inline` and `dialog` modes) to support alternative full-modal lookup dialogs for Link and Table MultiSelect fields, configurable globally via `FrappeFormStyle`.
 - `SearchableSelectDialog` widget rendering a modal dialog with a dedicated search filter, checkboxes for multi-select, and checkmarks for single-select.
-- `FrappeFormBuilder.cascadeProgrammaticChanges` (default `false`) — when enabled, a value written programmatically by an `onFieldChange` patch (e.g. a computed value, or a value the handler fetched from a linked document and returned as a patch) re-fires that field's own change pipeline, so dependent fields recompute. Mirrors Frappe Desk's `frm.set_value` → trigger behaviour. Loop-safe via value-equality plus a depth cap; the synchronous `patchValue` echo is suppressed so each handler fires once (no double-run for typed fields whose representation `FieldNormalizer` changes). Covers handler-returned patches only: the SDK's native `DocField.fetchFrom` patches use a separate internal path and do not cascade (see `doc/COMPUTED_FIELD_CASCADE.md`, "Known limitation").
+- `FrappeFormBuilder.cascadeProgrammaticChanges` (default `false`) — when enabled, a value written programmatically by an `onFieldChange` patch (e.g. a computed value, or a value the handler fetched from a linked document and returned as a patch) re-fires that field's own change pipeline, so dependent fields recompute. Mirrors Frappe Desk's `frm.set_value` → trigger behaviour. Loop-safe via value-equality plus a depth cap; the synchronous `patchValue` echo is suppressed so each handler fires once (no double-run for typed fields whose representation `FieldNormalizer` changes). Covers handler-returned patches only: the SDK's native `DocField.fetchFrom` patches use a separate internal path and do not cascade (see `doc/COMPUTED_FIELD_CASCADE.md`, "Known limitation"). Cascade re-fires now pass `ChangeSource.reaction` to `onFieldChange` (the originating user edit stays `ChangeSource.user`), so a handler can gate one-shot side effects on `source == ChangeSource.user`; with the flag off every invocation remains `ChangeSource.user`.
 
 **Translation pipeline (PR #76)**
 
@@ -141,7 +141,7 @@ Major release: offline-first foundation, server-driven offline-mode toggle, and 
 
 - `FrappeFormBuilder` — a `onFieldChange` handler patching the **same field that is changing** with a rewritten value (e.g. normalising `'hi'` → `'HI'`) crashed with an unbounded synchronous recursion (`StackOverflowError`) through the text field's controller notifications; independent of `cascadeProgrammaticChanges`. The self-key's widget patch is now deferred one frame (form data still updates immediately). Regression-tested for both flag states.
 - `FrappeFormBuilder` — the deferred self-key echo now suppresses its `patchValue` → `onChanged` re-fire **regardless of `cascadeProgrammaticChanges`**. Previously the guard was raised only when cascading, so with the flag off a self-referential handler on a typed field (Check/Date/Rating, where `FieldNormalizer` changes the value's representation) re-fired every frame with no depth cap — an uncapped infinite hang (pre-fix a `StackOverflowError`). The synchronous cross-field echo stays cascade-gated. Regression-tested with a cascade-off Check field.
-- `FrappeFormBuilder` — programmatic-cascade value-equality now compares operands numerically when both parse as numbers, so a representation-only change (e.g. `10` vs `"10.0"`) no longer triggers a spurious self-terminating re-fire; non-numeric values (Link ids, Select text, null) still compare as trimmed strings.
+- `FrappeFormBuilder` — programmatic-cascade value-equality now compares operands numerically **on numeric fieldtypes** (`Int` / `Float` / `Currency` / `Percent` / `Rating`), so a representation-only change (e.g. `10` vs `"10.0"`) no longer triggers a spurious self-terminating re-fire. Non-numeric fieldtypes keep trimmed-string equality, so an opaque id like `"007"` is still a real change against `"7"`.
 - `system_tables.dart` — all `CREATE TABLE` statements use `IF NOT EXISTS`; `sdk_meta` seed uses `INSERT OR IGNORE` for migration idempotency.
 - `pull_apply.dart` — conflict flag now only fires when the server `modified` timestamp is strictly after the local `modified` (previously flagged any dirty row unconditionally).
 - `SyncController.pause()` / `resume()` — `syncNow` now checks the `isPaused` flag before running.

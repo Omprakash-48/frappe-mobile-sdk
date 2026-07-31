@@ -63,9 +63,18 @@ class FieldNormalizer {
           return _normalizeMultiSelect(value);
         }
         final stringValue = value?.toString();
-        return (stringValue == null || stringValue.isEmpty)
-            ? null
-            : stringValue;
+        if (stringValue == null || stringValue.isEmpty) return null;
+        // Coerce a value that is no longer one of the field's options to null.
+        // A removed/renamed option (or a stale saved value on an old record)
+        // would otherwise reach FormBuilderDropdown, which asserts on an
+        // out-of-options value. SelectField surfaces a hint when this drops a
+        // non-empty value, so the coercion is visible rather than silent.
+        final opts = field.options!
+            .split('\n')
+            .map((e) => e.trim())
+            .where((e) => e.isNotEmpty)
+            .toList();
+        return opts.contains(stringValue) ? stringValue : null;
 
       case FieldTypes.link:
       case FieldTypes.data:

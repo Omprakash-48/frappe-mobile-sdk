@@ -6,14 +6,22 @@ import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 /// Builds a DocTypeMeta with [tabCount] Tab Break / Data field pairs.
 /// All metas share the same [name] so the name-only guard does NOT fire.
 DocTypeMeta _tabMeta(String name, int tabCount) => DocTypeMeta(
-      name: name,
-      fields: [
-        for (var i = 0; i < tabCount; i++) ...[
-          DocField(fieldname: 'tab_$i', fieldtype: 'Tab Break', label: 'Tab ${i + 1}'),
-          DocField(fieldname: 'field_$i', fieldtype: 'Data', label: 'Field ${i + 1}'),
-        ],
-      ],
-    );
+  name: name,
+  fields: [
+    for (var i = 0; i < tabCount; i++) ...[
+      DocField(
+        fieldname: 'tab_$i',
+        fieldtype: 'Tab Break',
+        label: 'Tab ${i + 1}',
+      ),
+      DocField(
+        fieldname: 'field_$i',
+        fieldtype: 'Data',
+        label: 'Field ${i + 1}',
+      ),
+    ],
+  ],
+);
 
 void main() {
   setUpAll(() {
@@ -42,9 +50,7 @@ void main() {
                       }),
                       child: const Text('Swap'),
                     ),
-                    Expanded(
-                      child: FrappeFormBuilder(meta: currentMeta),
-                    ),
+                    Expanded(child: FrappeFormBuilder(meta: currentMeta)),
                   ],
                 );
               },
@@ -78,22 +84,25 @@ void main() {
       // detects — without it the TabController(length:3) would outlive a
       // TabBar rendering 2 tabs and assert.
       DocField tab(int i, {bool hidden = false}) => DocField(
-            fieldname: 'tab_$i',
-            fieldtype: 'Tab Break',
-            label: 'Tab ${i + 1}',
-            hidden: hidden,
-          );
+        fieldname: 'tab_$i',
+        fieldtype: 'Tab Break',
+        label: 'Tab ${i + 1}',
+        hidden: hidden,
+      );
       DocField data(int i) =>
           DocField(fieldname: 'field_$i', fieldtype: 'Data', label: 'F$i');
 
       DocTypeMeta meta({required bool hideMiddle}) => DocTypeMeta(
-            name: 'SameDoc',
-            fields: [
-              tab(0), data(0),
-              tab(1, hidden: hideMiddle), data(1),
-              tab(2), data(2),
-            ],
-          );
+        name: 'SameDoc',
+        fields: [
+          tab(0),
+          data(0),
+          tab(1, hidden: hideMiddle),
+          data(1),
+          tab(2),
+          data(2),
+        ],
+      );
 
       DocTypeMeta currentMeta = meta(hideMiddle: false); // 3 effective tabs
 

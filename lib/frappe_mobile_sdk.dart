@@ -94,6 +94,8 @@ export 'src/ui/document_list_screen.dart';
 export 'src/ui/sync_status_screen.dart';
 export 'src/ui/form_renderer_helper.dart';
 export 'src/ui/widgets/form_builder.dart'; // Exports FrappeFormStyle, ButtonPressedCallback, OnButtonPressedCallback
+export 'src/ui/form/form_controller.dart'
+    show ChangeSource; // reactive source tag
 export 'src/ui/widgets/default_form_style.dart'; // Exports DefaultFormStyle
 export 'src/ui/widgets/fields/field_factory.dart';
 export 'src/ui/widgets/fields/base_field.dart'; // Exports FieldStyle

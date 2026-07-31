@@ -23,9 +23,12 @@ import 'widgets/form_builder.dart'
     show
         FrappeFormBuilder,
         FrappeFormStyle,
+        FormBuilderMode,
         OnButtonPressedCallback,
         FieldChangeHandler,
         FormValidator;
+import 'form/form_controller.dart' show FormController;
+import 'widgets/fields/field_factory.dart' show FieldFactory;
 import '../utils/sdk_log.dart';
 
 /// Visual customization for [FormScreen] action area.
@@ -92,6 +95,12 @@ class FormScreen extends StatefulWidget {
   final LinkFilterBuilder? Function(String doctype, String fieldname)?
   getLinkFilterBuilder;
 
+  /// LEGACY mode only — forwarded to [FrappeFormBuilder.cascadeProgrammaticChanges].
+  /// When true, a value set by an [onFieldChange] handler's patch re-fires that
+  /// field's own change pipeline (Frappe `set_value` parity). Ignored in
+  /// [FormBuilderMode.reactive]. Default `false`.
+  final bool cascadeProgrammaticChanges;
+
   /// When true (default), use LinkFieldCoordinator for sequenced link option loading.
   final bool useLinkFieldCoordinator;
 
@@ -108,9 +117,31 @@ class FormScreen extends StatefulWidget {
 
   final void Function(void Function() submit)? registerSubmit;
   final bool hideAppBarActions;
+
+  /// When false, the workflow header shows the state chip only (no Actions
+  /// button) and workflow transitions are not loaded. Default true.
+  final bool showWorkflowActions;
   final void Function(bool isSaving)? onSaveStateChanged;
   final void Function(bool isDirty)? onFormDirtyChanged;
   final Widget? bottomNavigationBar;
+
+  /// State-management path passed to the underlying [FrappeFormBuilder].
+  /// Defaults to legacy; set [FormBuilderMode.reactive] for per-field rebuilds.
+  final FormBuilderMode mode;
+
+  /// Optional app-owned [FormController] (reactive mode). If null in reactive
+  /// mode, FormScreen creates one, exposes it via [onControllerReady], and
+  /// disposes it. If provided, the app owns + disposes it.
+  final FormController? controller;
+
+  /// Called once with the resolved controller (reactive mode) so the app can
+  /// read/listen/mutate form state directly.
+  final void Function(FormController controller)? onControllerReady;
+
+  /// Optional factory for rendering custom field widgets, forwarded to the
+  /// underlying [FrappeFormBuilder] (which already supports it). Lets hosts
+  /// supply an app-specific [FieldFactory] subclass to override field types.
+  final FieldFactory? customFieldFactory;
 
   const FormScreen({
     super.key,
@@ -133,14 +164,20 @@ class FormScreen extends StatefulWidget {
     this.onFieldChange,
     this.validator,
     this.getLinkFilterBuilder,
+    this.cascadeProgrammaticChanges = false,
     this.useLinkFieldCoordinator = true,
     this.screenStyle,
     this.syncController,
     this.registerSubmit,
     this.hideAppBarActions = false,
+    this.showWorkflowActions = true,
     this.onSaveStateChanged,
     this.onFormDirtyChanged,
     this.bottomNavigationBar,
+    this.mode = FormBuilderMode.legacy,
+    this.controller,
+    this.onControllerReady,
+    this.customFieldFactory,
   });
 
   @override
@@ -248,14 +285,45 @@ class _FormScreenState extends State<FormScreen> with WidgetsBindingObserver {
     _loadWorkflowTransitions();
     _loadSyncErrors();
     widget.onFormDirtyChanged?.call(false);
+
+    if (widget.mode == FormBuilderMode.reactive) {
+      _formController =
+          widget.controller ??
+          FormController(
+            meta: widget.meta,
+            initialData: widget.document?.data ?? widget.initialData,
+          );
+      _ownsFormController = widget.controller == null;
+      widget.onControllerReady?.call(_formController!);
+    }
   }
+
+  // Reactive mode: resolved controller (app-provided or FormScreen-created).
+  FormController? _formController;
+  bool _ownsFormController = false;
+
+  // Enclosing route, captured in didChangeDependencies() where the element is
+  // guaranteed active. App-lifecycle callbacks read this cached reference
+  // instead of calling ModalRoute.of(context): `mounted` stays true during the
+  // inactive phase (after deactivate(), before unmount()), so an ancestor
+  // lookup there can assert "Looking up a deactivated widget's ancestor".
+  ModalRoute<dynamic>? _route;
 
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     _isFormDirty.dispose();
     _isSyncing.dispose();
+    if (_ownsFormController) _formController?.dispose();
     super.dispose();
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    // Cache the enclosing route while the element is active so lifecycle
+    // callbacks never look it up on a deactivated context.
+    _route = ModalRoute.of(context);
   }
 
   @override
@@ -268,7 +336,12 @@ class _FormScreenState extends State<FormScreen> with WidgetsBindingObserver {
     // times per foreground. Cap to the form the user is actually
     // looking at. (PR#36 round-2 M14)
     if (!mounted) return;
-    final route = ModalRoute.of(context);
+    // Use the route cached in didChangeDependencies — NOT ModalRoute.of(context)
+    // here. `mounted` is still true while an element is inactive (deactivated
+    // but not yet unmounted), and an ancestor lookup on such a context asserts
+    // "Looking up a deactivated widget's ancestor is unsafe", destabilising the
+    // element tree (the cascade then surfaces as `_dependents.isEmpty`).
+    final route = _route;
     if (route != null && !route.isCurrent) return;
     _loadSyncErrors();
   }
@@ -325,7 +398,9 @@ class _FormScreenState extends State<FormScreen> with WidgetsBindingObserver {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
-            content: Text(sdkTr('Retry failed: {0}', [toUserFriendlyMessage(e)])),
+            content: Text(
+              sdkTr('Retry failed: {0}', [toUserFriendlyMessage(e)]),
+            ),
             backgroundColor: Colors.red,
           ),
         );
@@ -368,6 +443,7 @@ class _FormScreenState extends State<FormScreen> with WidgetsBindingObserver {
 
   Future<void> _loadWorkflowTransitions() async {
     if (!widget.meta.hasWorkflow ||
+        !widget.showWorkflowActions ||
         widget.api == null ||
         widget.document?.serverId == null) {
       return;
@@ -474,7 +550,9 @@ class _FormScreenState extends State<FormScreen> with WidgetsBindingObserver {
                         ? widget.translate!(
                             'No workflow actions available for this state.',
                           )
-                        : sdkTr('No workflow actions available for this state.'),
+                        : sdkTr(
+                            'No workflow actions available for this state.',
+                          ),
                     style: Theme.of(context).textTheme.bodyMedium,
                   ),
                 )
@@ -991,12 +1069,15 @@ class _FormScreenState extends State<FormScreen> with WidgetsBindingObserver {
                   loading: _workflowLoading,
                   translate: widget.translate,
                   onShowActions: _showWorkflowActionsSheet,
+                  showActions: widget.showWorkflowActions,
                 ),
               Expanded(
                 child: FrappeFormBuilder(
                   key: widget.document != null
                       ? ValueKey('form_${widget.document!.localId}')
                       : const ValueKey('form_new'),
+                  mode: widget.mode,
+                  controller: _formController,
                   meta: widget.meta,
                   initialData:
                       _workflowUpdatedDocData ??
@@ -1007,6 +1088,7 @@ class _FormScreenState extends State<FormScreen> with WidgetsBindingObserver {
                   onFormDataChanged: _onFormDataChanged,
                   linkOptionService: widget.linkOptionService,
                   useLinkFieldCoordinator: widget.useLinkFieldCoordinator,
+                  customFieldFactory: widget.customFieldFactory,
                   uploadFile: widget.api != null
                       ? (file) async {
                           final res = await widget.api!.attachment.uploadFile(
@@ -1037,6 +1119,7 @@ class _FormScreenState extends State<FormScreen> with WidgetsBindingObserver {
                   translate: widget.translate,
                   onFieldChange: widget.onFieldChange,
                   getLinkFilterBuilder: widget.getLinkFilterBuilder,
+                  cascadeProgrammaticChanges: widget.cascadeProgrammaticChanges,
                 ),
               ),
             ],
@@ -1084,6 +1167,7 @@ class _WorkflowHeader extends StatelessWidget {
     required this.loading,
     this.translate,
     required this.onShowActions,
+    required this.showActions,
   });
 
   final DocTypeMeta meta;
@@ -1091,6 +1175,7 @@ class _WorkflowHeader extends StatelessWidget {
   final bool loading;
   final String Function(String)? translate;
   final VoidCallback onShowActions;
+  final bool showActions;
 
   @override
   Widget build(BuildContext context) {
@@ -1131,7 +1216,7 @@ class _WorkflowHeader extends StatelessWidget {
               width: 20,
               child: CircularProgressIndicator(strokeWidth: 2),
             )
-          else
+          else if (showActions)
             TextButton.icon(
               onPressed: onShowActions,
               icon: const Icon(Icons.playlist_play),

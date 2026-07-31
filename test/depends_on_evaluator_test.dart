@@ -332,4 +332,39 @@ void main() {
       });
     });
   });
+
+  group('referencedFields', () {
+    test('extracts single doc.field reference', () {
+      expect(
+        DependsOnEvaluator.referencedFields(
+          'eval:doc.marital_status == "Married"',
+        ),
+        {'marital_status'},
+      );
+    });
+    test('extracts multiple references across && / ||', () {
+      expect(
+        DependsOnEvaluator.referencedFields(
+          'eval:doc.a == 1 && doc.b != 2 || doc.c',
+        ),
+        {'a', 'b', 'c'},
+      );
+    });
+    test('extracts from [..].includes(doc.field)', () {
+      expect(
+        DependsOnEvaluator.referencedFields(
+          'eval:["A","B"].includes(doc.kind)',
+        ),
+        {'kind'},
+      );
+    });
+    test('null/empty -> empty set', () {
+      expect(DependsOnEvaluator.referencedFields(null), isEmpty);
+      expect(DependsOnEvaluator.referencedFields(''), isEmpty);
+    });
+    test('bare fieldname (no eval:, no doc.) -> that field', () {
+      // Frappe allows depends_on = "field_name" (truthy check).
+      expect(DependsOnEvaluator.referencedFields('some_flag'), {'some_flag'});
+    });
+  });
 }

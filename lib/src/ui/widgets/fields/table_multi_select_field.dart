@@ -168,6 +168,7 @@ class _LoaderState extends State<_Loader> {
       multiSelect: true,
       enabled: widget.enabled,
       loading: _loading,
+      hintText: widget.field.placeholder,
       labelText: widget.labelText,
       pickerMode:
           widget.style?.linkFieldPickerMode ?? LinkFieldPickerMode.inline,

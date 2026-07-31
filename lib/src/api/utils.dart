@@ -2,7 +2,7 @@
 // For license information, please see license.txt
 
 import 'dart:convert';
-import 'package:flutter/foundation.dart' show debugPrint;
+import '../utils/sdk_log.dart';
 
 /// Frappe wraps API responses inconsistently: most `frappe.client.*` and
 /// `frappe.*.method` calls return `{"message": ...}` while REST resource
@@ -55,9 +55,7 @@ String extractErrorMessage(dynamic body) {
         raw = serverMsg;
       }
     } catch (e, st) {
-      debugPrint(
-        'extractErrorMessage: _server_messages parse failed — $e\n$st',
-      );
+      sdkLog('extractErrorMessage: _server_messages parse failed — $e\n$st');
     }
   }
 
@@ -121,7 +119,7 @@ String? _extractServerMessage(dynamic body) {
       }
     }
   } catch (e, st) {
-    debugPrint('_extractServerMessage: parse failed — $e\n$st');
+    sdkLog('_extractServerMessage: parse failed — $e\n$st');
   }
   return null;
 }

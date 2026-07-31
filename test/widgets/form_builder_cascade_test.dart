@@ -3,6 +3,8 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:frappe_mobile_sdk/src/models/doc_field.dart';
 import 'package:frappe_mobile_sdk/src/models/doc_type_meta.dart';
 import 'package:frappe_mobile_sdk/src/ui/widgets/form_builder.dart';
+import 'package:frappe_mobile_sdk/src/ui/form/form_controller.dart'
+    show ChangeSource;
 
 /// Tests for [FrappeFormBuilder.cascadeProgrammaticChanges] — Frappe
 /// `frm.set_value` parity: a value set programmatically by [onFieldChange]
@@ -26,8 +28,9 @@ void main() {
   Map<String, dynamic>? chainHandler(
     String name,
     dynamic value,
-    Map<String, dynamic> data,
-  ) {
+    Map<String, dynamic> data, {
+    ChangeSource source = ChangeSource.user,
+  }) {
     if (name == 'a' && value == 'hello') return {'b': 'B:hello'};
     if (name == 'b') return {'c': 'C:$value'};
     return null;
@@ -90,6 +93,52 @@ void main() {
   });
 
   testWidgets(
+    'cascade ON: the user edit is ChangeSource.user, cascade re-fires are '
+    'ChangeSource.reaction (so hosts can gate side-effects)',
+    (tester) async {
+      // #2 regression: because each cascade hop re-runs onFieldChange, a
+      // side-effecting handler must be able to tell the originating user edit
+      // apart from a re-fire. The legacy path used to pass no source (defaulting
+      // to ChangeSource.user for EVERY hop); it now tags re-fires as .reaction,
+      // matching the reactive controller.
+      final sources = <String, List<ChangeSource>>{};
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: FrappeFormBuilder(
+              meta: metaABC(),
+              cascadeProgrammaticChanges: true,
+              onFieldChange: (name, value, data, {source = ChangeSource.user}) {
+                (sources[name] ??= <ChangeSource>[]).add(source);
+                if (name == 'a' && value == 'hello') return {'b': 'B:hello'};
+                if (name == 'b') return {'c': 'C:$value'};
+                return null;
+              },
+            ),
+          ),
+        ),
+      );
+
+      await tester.enterText(find.byKey(const ValueKey('data_a')), 'hello');
+      await tester.pumpAndSettle();
+
+      expect(sources['a'], [
+        ChangeSource.user,
+      ], reason: 'the field the user typed into is ChangeSource.user');
+      expect(
+        sources['b'],
+        [ChangeSource.reaction],
+        reason: "b was set by a's handler → its re-fire is a reaction",
+      );
+      expect(
+        sources['c'],
+        [ChangeSource.reaction],
+        reason: 'a cascade hop deeper is still a reaction, never .user',
+      );
+    },
+  );
+
+  testWidgets(
     'cascade ON: a typed (Check) computed field re-fires EXACTLY once',
     (tester) async {
       // Regression guard for the double-fire risk: the handler returns `1`
@@ -110,7 +159,7 @@ void main() {
                 ],
               ),
               cascadeProgrammaticChanges: true,
-              onFieldChange: (name, value, data) {
+              onFieldChange: (name, value, data, {source = ChangeSource.user}) {
                 if (name == 'trigger') return {'flag': 1};
                 if (name == 'flag') {
                   flagHandlerCalls++;
@@ -150,7 +199,7 @@ void main() {
               ],
             ),
             cascadeProgrammaticChanges: true,
-            onFieldChange: (name, value, data) {
+            onFieldChange: (name, value, data, {source = ChangeSource.user}) {
               calls++;
               // b keeps setting itself to a NEW value ⇒ value-equality never
               // stops it; only the depth cap can. Proves the backstop.
@@ -200,7 +249,7 @@ void main() {
               ],
             ),
             // cascadeProgrammaticChanges defaults to false
-            onFieldChange: (name, value, data) {
+            onFieldChange: (name, value, data, {source = ChangeSource.user}) {
               if (name == 'a') {
                 aHandlerCalls++;
                 return {'a': value.toString().toUpperCase()};
@@ -250,7 +299,7 @@ void main() {
                 ],
               ),
               cascadeProgrammaticChanges: true,
-              onFieldChange: (name, value, data) {
+              onFieldChange: (name, value, data, {source = ChangeSource.user}) {
                 if (name == 'a') {
                   aHandlerCalls++;
                   final normalized = value.toString().toUpperCase();
@@ -308,7 +357,7 @@ void main() {
                 ],
               ),
               // cascadeProgrammaticChanges defaults to false
-              onFieldChange: (name, value, data) {
+              onFieldChange: (name, value, data, {source = ChangeSource.user}) {
                 if (name == 'flag') {
                   flagHandlerCalls++;
                   if (flagHandlerCalls > 5) {
@@ -369,7 +418,7 @@ void main() {
               ),
               initialData: const {'b': 10},
               cascadeProgrammaticChanges: true,
-              onFieldChange: (name, value, data) {
+              onFieldChange: (name, value, data, {source = ChangeSource.user}) {
                 if (name == 'a') return {'b': '10.0'};
                 if (name == 'b') bHandlerCalls++;
                 return null;
@@ -388,6 +437,51 @@ void main() {
         reason:
             'a numerically-equal patch (10 vs "10.0") must not re-fire b\'s '
             'handler',
+      );
+    },
+  );
+
+  testWidgets(
+    'cascade ON: numeric equality does NOT apply to non-numeric fieldtypes '
+    '("007" vs "7" on a Link/Data field is a real change)',
+    (tester) async {
+      // Counterpart to the test above: numeric comparison is gated on the
+      // field's fieldtype. A Data/Link id is an opaque string, so "007" and
+      // "7" must compare UNEQUAL and the cascade must re-fire — an
+      // unconditional numeric compare would swallow this legitimate change.
+      var bHandlerCalls = 0;
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: FrappeFormBuilder(
+              meta: DocTypeMeta(
+                name: 'TestDoctype',
+                fields: <DocField>[
+                  DocField(fieldname: 'a', fieldtype: 'Data', label: 'A'),
+                  DocField(fieldname: 'b', fieldtype: 'Data', label: 'B'),
+                ],
+              ),
+              initialData: const {'b': '007'},
+              cascadeProgrammaticChanges: true,
+              onFieldChange: (name, value, data, {source = ChangeSource.user}) {
+                if (name == 'a') return {'b': '7'};
+                if (name == 'b') bHandlerCalls++;
+                return null;
+              },
+            ),
+          ),
+        ),
+      );
+
+      await tester.enterText(find.byKey(const ValueKey('data_a')), 'go');
+      await tester.pumpAndSettle();
+
+      expect(
+        bHandlerCalls,
+        1,
+        reason:
+            'on a non-numeric field "007" → "7" is a real change and must '
+            'cascade exactly once',
       );
     },
   );
