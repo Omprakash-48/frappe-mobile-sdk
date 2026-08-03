@@ -38,8 +38,10 @@ class FormController extends ChangeNotifier {
   FormController({
     required DocTypeMeta meta,
     Map<String, dynamic>? initialData,
+    Map<String, dynamic>? parentData,
     DateTime Function()? now,
   }) : _meta = meta,
+       _parentData = parentData,
        _now = now ?? DateTime.now {
     _graph = DependencyGraph.build(meta);
     assert(() {
@@ -54,13 +56,40 @@ class FormController extends ChangeNotifier {
   final DateTime Function() _now;
   late DependencyGraph _graph;
 
+  /// Parent document values, supplying `parent` to depends_on expressions on a
+  /// child-row form. Null on a top-level form, where Frappe aliases `parent`
+  /// to `doc`.
+  final Map<String, dynamic>? _parentData;
+
   final Map<String, dynamic> _rawValues = {};
   final Map<String, ValueNotifier<dynamic>> _valueNotifiers = {};
   final Map<String, ValueNotifier<FieldUiState>> _uiNotifiers = {};
   late Map<String, dynamic> _baseline;
 
+  /// Frappe standard fields that are not in `DocType.fields` but are routinely
+  /// referenced from `depends_on` (`eval:doc.docstatus == 0`,
+  /// `eval:doc.__islocal`). They are seeded into [_rawValues] so expressions
+  /// resolve them, and excluded from [buildSubmitData]'s companion-key sweep so
+  /// the save payload is unchanged. The legacy `FrappeFormBuilder._formData`
+  /// path already carries them via `addAll(initialData)`; this keeps reactive
+  /// mode consistent with it and with Desk.
+  static const _stdEvalFields = <String>{
+    'docstatus',
+    'name',
+    'owner',
+    'doctype',
+    'idx',
+    '__islocal',
+    '__unsaved',
+  };
+
   // ── construction helpers ────────────────────────────────────────────────
   void _seedDefaults(Map<String, dynamic>? initialData) {
+    if (initialData != null) {
+      for (final k in _stdEvalFields) {
+        if (initialData.containsKey(k)) _rawValues[k] = initialData[k];
+      }
+    }
     for (final f in _meta.fields) {
       final name = f.fieldname;
       if (name == null || name.isEmpty) continue;
@@ -376,13 +405,27 @@ class FormController extends ChangeNotifier {
       orElse: () => DocField(fieldtype: '_missing_'),
     );
     if (!_isDynamic(f) && !f.reqd && !f.readOnly) return FieldUiState.editable;
-    final visible = DependsOnEvaluator.evaluate(f.dependsOn, _rawValues);
+    final visible = DependsOnEvaluator.evaluate(
+      f.dependsOn,
+      _rawValues,
+      parentData: _parentData,
+    );
     final required =
         f.reqd ||
-        DependsOnEvaluator.evaluate2(f.mandatoryDependsOn, _rawValues, false);
+        DependsOnEvaluator.evaluate2(
+          f.mandatoryDependsOn,
+          _rawValues,
+          false,
+          parentData: _parentData,
+        );
     final readOnly =
         f.readOnly ||
-        DependsOnEvaluator.evaluate2(f.readOnlyDependsOn, _rawValues, false);
+        DependsOnEvaluator.evaluate2(
+          f.readOnlyDependsOn,
+          _rawValues,
+          false,
+          parentData: _parentData,
+        );
     return FieldUiState(
       visible: visible,
       required: required,
@@ -532,9 +575,10 @@ class FormController extends ChangeNotifier {
               ? <dynamic>[]
               : (f.defaultValue ?? ''));
     }
-    // also carry non-null companion/extra keys present in raw values
+    // also carry non-null companion/extra keys present in raw values, minus the
+    // std fields seeded purely so depends_on can read them (see _stdEvalFields)
     _rawValues.forEach((k, v) {
-      if (v != null) complete[k] = v;
+      if (v != null && !_stdEvalFields.contains(k)) complete[k] = v;
     });
 
     // drop hidden-by-own-depends_on and hidden-by-container
@@ -552,9 +596,19 @@ class FormController extends ChangeNotifier {
       }
       if (f.fieldtype == 'Column Break' || f.fieldname == null) continue;
       final tabHidden =
-          tabDeps != null && !DependsOnEvaluator.evaluate(tabDeps, complete);
+          tabDeps != null &&
+          !DependsOnEvaluator.evaluate(
+            tabDeps,
+            complete,
+            parentData: _parentData,
+          );
       final secHidden =
-          secDeps != null && !DependsOnEvaluator.evaluate(secDeps, complete);
+          secDeps != null &&
+          !DependsOnEvaluator.evaluate(
+            secDeps,
+            complete,
+            parentData: _parentData,
+          );
       if (tabHidden || secHidden) hiddenByContainer.add(f.fieldname!);
     }
     complete.removeWhere((name, _) {
@@ -565,7 +619,11 @@ class FormController extends ChangeNotifier {
       );
       if (f.fieldtype == '_missing_') return false;
       if (f.dependsOn == null || f.dependsOn!.isEmpty) return false;
-      return !DependsOnEvaluator.evaluate(f.dependsOn, complete);
+      return !DependsOnEvaluator.evaluate(
+        f.dependsOn,
+        complete,
+        parentData: _parentData,
+      );
     });
     return complete;
   }

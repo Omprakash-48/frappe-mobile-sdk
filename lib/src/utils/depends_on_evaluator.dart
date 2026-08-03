@@ -1,14 +1,29 @@
 // Copyright (c) 2026, Bhushan Barbuddhe and contributors
 // For license information, please see license.txt
 
-import 'package:flutter/foundation.dart';
+import 'js_expression.dart';
+import 'sdk_log.dart';
 
-/// Evaluates Frappe `depends_on` / `mandatory_depends_on` expressions.
+/// Evaluates Frappe `depends_on` / `mandatory_depends_on` /
+/// `read_only_depends_on` expressions.
 ///
-/// **Trust boundary:** expressions evaluated here come from server-side
-/// DocType meta configured by Frappe admins, not from end-user input. This
-/// evaluator is NOT sandboxed — do not pass user-supplied strings to
-/// [evaluate].
+/// Mirrors `evaluate_depends_on_value` in
+/// `frappe/public/js/frappe/form/layout.js`:
+///
+/// * `eval:<js>` — evaluated as a real JavaScript expression with `doc` and
+///   `parent` in scope, via [evalJsExpression]. Frappe uses
+///   `new Function(...)` here, so JS truthiness and JS operator semantics
+///   apply. Notably `[]` is TRUTHY, and `['A'] == 'A'` is true.
+/// * `<fieldname>` — the bare shorthand. Frappe applies a special array rule:
+///   `$.isArray(value) ? !!value.length : !!value`. An empty multi-select is
+///   therefore falsy in this form but truthy in the `eval:` form.
+/// * `fn:<handler>` — a client-script trigger. Not available offline;
+///   evaluates to the caller's default.
+///
+/// **Trust boundary:** expressions come from server-side DocType meta
+/// configured by Frappe admins, not from end-user input. [evaluate] parses a
+/// restricted grammar (see `js_expression.dart`) rather than executing
+/// arbitrary code, but it is not a sandbox for untrusted strings.
 class DependsOnEvaluator {
   /// Returns the set of fieldnames an expression references. Used to build the
   /// reverse-dependency graph. Returns an EMPTY set for a non-null, non-empty
@@ -20,8 +35,26 @@ class DependsOnEvaluator {
     var expr = expression.trim();
     if (expr.startsWith('eval:')) expr = expr.substring(5).trim();
 
+    // Preferred path: walk the AST, which correctly excludes arrow-function
+    // parameters (`r` in `rows.some(r => r.season == "X")`).
+    try {
+      final refs = jsReferencedFields(expr);
+      if (refs.isNotEmpty) return refs;
+    } on JsEvalException {
+      // Falls through to the token scan below.
+    }
+
+    // Fallback token scan. DependencyGraph also passes `link_filters` here,
+    // which is JSON rather than a JS expression (e.g.
+    // `{"district": "eval:doc.state"}`) and never parses — but its embedded
+    // `doc.<field>` references still have to wire up.
+    //
+    // The lookbehind keeps a qualified root out: in `cur_frm.doc.x` the `doc`
+    // is not the form document, so `x` is not one of its fields. `parent.` is
+    // excluded for the same reason as in the AST walk — parent fields never
+    // appear in this document's change stream.
     final docRefs = RegExp(
-      r'doc\.(\w+)',
+      r'(?<![\w.])doc\.(\w+)',
     ).allMatches(expr).map((m) => m.group(1)!).toSet();
     if (docRefs.isNotEmpty) return docRefs;
 
@@ -35,176 +68,98 @@ class DependsOnEvaluator {
   /// Like [evaluate] but returns [defaultWhenEmpty] for a null/empty expression.
   /// `depends_on` defaults visible=true; `mandatory_depends_on` /
   /// `read_only_depends_on` must default false when absent.
+  ///
+  /// [defaultWhenEmpty] is ALSO the fallback when a non-empty expression fails
+  /// to evaluate. Defaulting an unparseable `mandatory_depends_on` to true
+  /// would make a field permanently mandatory with no way to satisfy it.
   static bool evaluate2(
     String? expr,
     Map<String, dynamic> data,
-    bool defaultWhenEmpty,
-  ) => (expr == null || expr.isEmpty) ? defaultWhenEmpty : evaluate(expr, data);
+    bool defaultWhenEmpty, {
+    Map<String, dynamic>? parentData,
+  }) => (expr == null || expr.isEmpty)
+      ? defaultWhenEmpty
+      : evaluate(
+          expr,
+          data,
+          parentData: parentData,
+          defaultOnError: defaultWhenEmpty,
+        );
 
-  /// Evaluate depends_on expression
-  /// Supports: eval:doc.field == value, eval:doc.field != value, etc.
-  static bool evaluate(String? expression, Map<String, dynamic> formData) {
+  /// Evaluate a `depends_on` expression against [formData].
+  ///
+  /// [parentData] supplies `parent` for child-row expressions. When omitted,
+  /// `parent` aliases `doc` — matching Frappe, where `parent` is
+  /// `this.frm ? this.frm.doc : this.doc`.
+  ///
+  /// Returns [defaultOnError] (true by default, i.e. "show the field") if the
+  /// expression falls outside the supported grammar or throws.
+  static bool evaluate(
+    String? expression,
+    Map<String, dynamic> formData, {
+    Map<String, dynamic>? parentData,
+    bool defaultOnError = true,
+  }) {
     if (expression == null || expression.isEmpty) return true;
 
-    // Remove eval: prefix if present
-    String expr = expression.trim();
-    if (expr.startsWith('eval:')) {
-      expr = expr.substring(5).trim();
-    }
-    // Strip outer parens left over from grouped expressions like
-    // `(A && B) || (C && D)` — after the && / || split each fragment
-    // arrives wrapped in its own parens and would otherwise leak `(`/`)`
-    // into _extractFieldName / _extractValue.
-    expr = _stripOuterParens(expr);
+    final raw = expression.trim();
 
-    // Simple evaluation for common patterns
-    // eval:doc.field == value
-    // eval:doc.field != value
-    // eval:doc.field > value
-    // eval:doc.field < value
-    // eval:doc.field >= value
-    // eval:doc.field <= value
+    // `fn:` triggers a client script through frm.script_manager. There is no
+    // equivalent offline, so defer to the caller's default.
+    if (raw.startsWith('fn:')) {
+      sdkLog(
+        'DependsOnEvaluator: "fn:" expressions are not supported offline — '
+        'defaulting to $defaultOnError for "$expression"',
+      );
+      return defaultOnError;
+    }
+
+    // Bare (non-`eval:`) shorthand: Frappe's final `else` branch is a plain
+    // `doc[expression]` lookup with the array rule
+    // `$.isArray(value) ? !!value.length : !!value`. An empty child table /
+    // multi-select is therefore falsy here, unlike in the `eval:` form.
+    //
+    // This deliberately does NOT fall back to evaluating the text as JS. Desk
+    // treats `depends_on: "doc.a == 'X'"` (missing prefix) as a lookup of a key
+    // literally named `doc.a == 'X'`, finds nothing, and hides the field.
+    // Evaluating it would show a field Desk hides — the exact class of
+    // divergence this evaluator exists to remove.
+    if (!raw.startsWith('eval:')) {
+      final value = formData[raw];
+      if (value is List) return value.isNotEmpty;
+      return jsTruthy(value);
+    }
+
+    final expr = raw.substring(5).trim();
+    if (expr.isEmpty) return true;
 
     try {
-      // Handle && (AND) operator — split outside brackets to avoid breaking .includes([...])
-      final andParts = _splitOutsideBrackets(expr, ' && ');
-      if (andParts.length > 1) {
-        return andParts.every((part) => evaluate(part.trim(), formData));
-      }
-
-      // Handle || (OR) operator — same bracket-aware splitting
-      final orParts = _splitOutsideBrackets(expr, ' || ');
-      if (orParts.length > 1) {
-        return orParts.any((part) => evaluate(part.trim(), formData));
-      }
-
-      // Handle [values].includes(doc.field) pattern
-      final includesMatch = RegExp(
-        r"^\[(.*)?\]\.includes\(doc\.(\w+)\)$",
-      ).firstMatch(expr);
-      if (includesMatch != null) {
-        final arrayContent = includesMatch.group(1) ?? '';
-        final fieldName = includesMatch.group(2)!;
-        final values = _parseArrayValues(arrayContent);
-        final actual = formData[fieldName];
-        if (actual == null) return false;
-        return values.contains(actual.toString());
-      }
-
-      // Handle === comparison (JS strict equality — semantically same as == in Dart).
-      // Must be checked BEFORE == since === contains == as a substring.
-      if (expr.contains(' === ')) {
-        final parts = expr.split(' === ');
-        if (parts.length == 2) {
-          final fieldName = _extractFieldName(parts[0]);
-          final expectedValue = _extractValue(parts[1]);
-          final actualValue = formData[fieldName];
-          return _compareValues(actualValue, expectedValue, '==');
-        }
-      }
-
-      // Handle !== comparison (JS strict inequality — semantically same as != in Dart).
-      // Must be checked BEFORE != since !== contains != as a substring.
-      if (expr.contains(' !== ')) {
-        final parts = expr.split(' !== ');
-        if (parts.length == 2) {
-          final fieldName = _extractFieldName(parts[0]);
-          final expectedValue = _extractValue(parts[1]);
-          final actualValue = formData[fieldName];
-          return _compareValues(actualValue, expectedValue, '!=');
-        }
-      }
-
-      // Handle == comparison
-      if (expr.contains(' == ')) {
-        final parts = expr.split(' == ');
-        if (parts.length == 2) {
-          final fieldName = _extractFieldName(parts[0]);
-          final expectedValue = _extractValue(parts[1]);
-          final actualValue = formData[fieldName];
-          return _compareValues(actualValue, expectedValue, '==');
-        }
-      }
-
-      // Handle != comparison
-      if (expr.contains(' != ')) {
-        final parts = expr.split(' != ');
-        if (parts.length == 2) {
-          final fieldName = _extractFieldName(parts[0]);
-          final expectedValue = _extractValue(parts[1]);
-          final actualValue = formData[fieldName];
-          return _compareValues(actualValue, expectedValue, '!=');
-        }
-      }
-
-      // Handle >= comparison (before > to avoid false match)
-      if (expr.contains(' >= ')) {
-        final parts = expr.split(' >= ');
-        if (parts.length == 2) {
-          final fieldName = _extractFieldName(parts[0]);
-          final expectedValue = _extractValue(parts[1]);
-          final actualValue = formData[fieldName];
-          return _compareValues(actualValue, expectedValue, '>=');
-        }
-      }
-
-      // Handle <= comparison (before < to avoid false match)
-      if (expr.contains(' <= ')) {
-        final parts = expr.split(' <= ');
-        if (parts.length == 2) {
-          final fieldName = _extractFieldName(parts[0]);
-          final expectedValue = _extractValue(parts[1]);
-          final actualValue = formData[fieldName];
-          return _compareValues(actualValue, expectedValue, '<=');
-        }
-      }
-
-      // Handle > comparison
-      if (expr.contains(' > ')) {
-        final parts = expr.split(' > ');
-        if (parts.length == 2) {
-          final fieldName = _extractFieldName(parts[0]);
-          final expectedValue = _extractValue(parts[1]);
-          final actualValue = formData[fieldName];
-          return _compareValues(actualValue, expectedValue, '>');
-        }
-      }
-
-      // Handle < comparison
-      if (expr.contains(' < ')) {
-        final parts = expr.split(' < ');
-        if (parts.length == 2) {
-          final fieldName = _extractFieldName(parts[0]);
-          final expectedValue = _extractValue(parts[1]);
-          final actualValue = formData[fieldName];
-          return _compareValues(actualValue, expectedValue, '<');
-        }
-      }
-
-      // Default: check if field exists and is truthy
-      final fieldName = _extractFieldName(expr);
-      final value = formData[fieldName];
-      return value != null && value != '' && value != 0 && value != false;
-    } catch (e, st) {
-      // If evaluation fails, default to true (show field)
-      debugPrint(
-        'DependsOnEvaluator.evaluate failed for "$expression" — $e\n$st',
+      return evalJsExpressionAsBool(expr, {
+        'doc': formData,
+        'parent': parentData ?? formData,
+      });
+    } on JsEvalException catch (e) {
+      sdkLog(
+        'DependsOnEvaluator: cannot evaluate "$expression" — $e; '
+        'defaulting to $defaultOnError',
       );
-      return true;
+      return defaultOnError;
+    } catch (e, st) {
+      sdkLog(
+        'DependsOnEvaluator: unexpected failure for "$expression" — $e\n$st; '
+        'defaulting to $defaultOnError',
+      );
+      return defaultOnError;
     }
   }
 
-  static String _extractFieldName(String expr) {
-    // Remove doc. prefix if present
-    expr = expr.trim();
-    if (expr.startsWith('doc.')) {
-      expr = expr.substring(4).trim();
-    }
-    return expr;
-  }
-
-  /// Extract `doc.fieldname` from an eval expression like `eval:doc.x` or `eval: doc.x`.
-  /// Returns the field name, or null if the value is not an eval:doc expression.
+  /// Extract `doc.fieldname` from an eval expression like `eval:doc.x` or
+  /// `eval: doc.x`. Returns the field name, or null if the value is not an
+  /// `eval:doc` expression.
+  ///
+  /// Used by `LinkOptionService` to resolve `link_filters` values; kept as a
+  /// string operation because those values are single field references, not
+  /// general expressions.
   static String? extractEvalDocField(String value) {
     String expr = value.trim();
     if (value.startsWith('eval:')) {
@@ -214,141 +169,11 @@ class DependsOnEvaluator {
     return expr == fieldName ? null : fieldName;
   }
 
-  static dynamic _extractValue(String expr) {
+  static String _extractFieldName(String expr) {
     expr = expr.trim();
-    // Remove quotes if present
-    if ((expr.startsWith('"') && expr.endsWith('"')) ||
-        (expr.startsWith("'") && expr.endsWith("'"))) {
-      expr = expr.substring(1, expr.length - 1);
-    }
-    // Try to parse as number
-    if (RegExp(r'^-?\d+$').hasMatch(expr)) {
-      return int.tryParse(expr);
-    }
-    if (RegExp(r'^-?\d+\.\d+$').hasMatch(expr)) {
-      return double.tryParse(expr);
+    if (expr.startsWith('doc.')) {
+      expr = expr.substring(4).trim();
     }
     return expr;
-  }
-
-  /// Split [expr] by [delimiter], but only at top level — i.e. not inside
-  /// `[...]` array literals or `(...)` grouped subexpressions. Without paren
-  /// awareness, a Frappe expression like `(A && B) || (C && D)` would split
-  /// on the inner `&&`s first and produce fragments with unmatched parens.
-  static List<String> _splitOutsideBrackets(String expr, String delimiter) {
-    final parts = <String>[];
-    int bracketDepth = 0;
-    int parenDepth = 0;
-    int lastSplit = 0;
-
-    for (int i = 0; i < expr.length; i++) {
-      final ch = expr[i];
-      if (ch == '[') {
-        bracketDepth++;
-      } else if (ch == ']') {
-        bracketDepth--;
-      } else if (ch == '(') {
-        parenDepth++;
-      } else if (ch == ')') {
-        parenDepth--;
-      } else if (bracketDepth == 0 &&
-          parenDepth == 0 &&
-          i + delimiter.length <= expr.length &&
-          expr.substring(i, i + delimiter.length) == delimiter) {
-        parts.add(expr.substring(lastSplit, i));
-        lastSplit = i + delimiter.length;
-        i += delimiter.length - 1;
-      }
-    }
-    parts.add(expr.substring(lastSplit));
-    return parts;
-  }
-
-  /// Strip balanced outermost parens — but only when they wrap the whole
-  /// expression (the matching `)` is at the end). `(A) || (B)` keeps both
-  /// pairs because neither pair spans the whole string. Repeats so
-  /// `((A))` flattens fully.
-  static String _stripOuterParens(String expr) {
-    String s = expr.trim();
-    while (s.length >= 2 && s.startsWith('(') && s.endsWith(')')) {
-      int depth = 0;
-      bool wholeExpr = false;
-      for (int i = 0; i < s.length; i++) {
-        if (s[i] == '(') {
-          depth++;
-        } else if (s[i] == ')') {
-          depth--;
-          if (depth == 0) {
-            wholeExpr = (i == s.length - 1);
-            break;
-          }
-        }
-      }
-      if (!wholeExpr) break;
-      s = s.substring(1, s.length - 1).trim();
-    }
-    return s;
-  }
-
-  /// Parse comma-separated quoted values from inside array brackets.
-  static List<String> _parseArrayValues(String arrayContent) {
-    final values = <String>[];
-    final regex = RegExp(r"""['"]([^'"]*?)['"]""");
-    for (final match in regex.allMatches(arrayContent)) {
-      values.add(match.group(1)!);
-    }
-    return values;
-  }
-
-  static bool _compareValues(
-    dynamic actual,
-    dynamic expected,
-    String operator,
-  ) {
-    switch (operator) {
-      case '==':
-        if (actual == expected) return true;
-        // Fallback: compare as strings to handle type mismatches
-        // (e.g. int 1 vs String "1" from Frappe form data)
-        return actual?.toString() == expected?.toString();
-      case '!=':
-        if (actual == expected) return false;
-        return actual?.toString() != expected?.toString();
-      case '>':
-      case '<':
-      case '>=':
-      case '<=':
-        // Relational comparisons need numeric operands. Frappe form data often
-        // carries numeric field values as strings (e.g. a Float field read back
-        // as "10.0"), and JS `depends_on` coerces those before comparing. Mirror
-        // that by parsing both sides; if either isn't numeric, the comparison is
-        // undefined → false (same as the old num-only guard for non-numbers).
-        final a = _toNum(actual);
-        final b = _toNum(expected);
-        if (a == null || b == null) return false;
-        switch (operator) {
-          case '>':
-            return a > b;
-          case '<':
-            return a < b;
-          case '>=':
-            return a >= b;
-          case '<=':
-            return a <= b;
-        }
-        return false;
-      default:
-        return false;
-    }
-  }
-
-  /// Coerce a value to [num] for relational comparisons: passes numbers
-  /// through, parses numeric strings (trimmed), and returns null for anything
-  /// non-numeric (null, bool, non-numeric text) so the caller treats it as an
-  /// unsatisfiable comparison rather than throwing.
-  static num? _toNum(dynamic v) {
-    if (v is num) return v;
-    if (v is String) return num.tryParse(v.trim());
-    return null;
   }
 }

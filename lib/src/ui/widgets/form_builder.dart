@@ -483,7 +483,11 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
     if (widget.mode == FormBuilderMode.reactive) {
       _controller =
           widget.controller ??
-          FormController(meta: widget.meta, initialData: widget.initialData);
+          FormController(
+            meta: widget.meta,
+            initialData: widget.initialData,
+            parentData: widget.parentFormData,
+          );
       _ownsController = widget.controller == null;
       _controller!.fetchLinkedDocument = widget.fetchLinkedDocument;
       // no-clobber: only wire the bridge hook if the controller has none.
@@ -715,7 +719,14 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
 
   bool _evaluateDepends(String? expr, bool defaultValue) {
     if (expr == null || expr.isEmpty) return defaultValue;
-    return DependsOnEvaluator.evaluate(expr, _evalData);
+    // defaultValue doubles as the on-error fallback: an unparseable
+    // mandatory_depends_on must not make the field permanently mandatory.
+    return DependsOnEvaluator.evaluate(
+      expr,
+      _evalData,
+      parentData: effectiveParentFormData,
+      defaultOnError: defaultValue,
+    );
   }
 
   bool _shouldShowField(DocField field) =>
@@ -1727,7 +1738,11 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
         if (field.dependsOn != null && field.dependsOn!.isNotEmpty) {
           // Evaluate against the merged formValues so the latest user
           // changes drive the visibility decision.
-          if (!DependsOnEvaluator.evaluate(field.dependsOn, formValues)) {
+          if (!DependsOnEvaluator.evaluate(
+            field.dependsOn,
+            formValues,
+            parentData: effectiveParentFormData,
+          )) {
             continue;
           }
         }
@@ -1784,10 +1799,18 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
       if (f.fieldname == null) continue;
       final tabHidden =
           currentTabDeps != null &&
-          !DependsOnEvaluator.evaluate(currentTabDeps, dataForDepends);
+          !DependsOnEvaluator.evaluate(
+            currentTabDeps,
+            dataForDepends,
+            parentData: effectiveParentFormData,
+          );
       final secHidden =
           currentSectionDeps != null &&
-          !DependsOnEvaluator.evaluate(currentSectionDeps, dataForDepends);
+          !DependsOnEvaluator.evaluate(
+            currentSectionDeps,
+            dataForDepends,
+            parentData: effectiveParentFormData,
+          );
       if (tabHidden || secHidden) {
         hiddenByContainer.add(f.fieldname!);
       }
@@ -1800,7 +1823,11 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
       );
       if (field.fieldtype == '_missing_') return false;
       if (field.dependsOn == null || field.dependsOn!.isEmpty) return false;
-      return !DependsOnEvaluator.evaluate(field.dependsOn, dataForDepends);
+      return !DependsOnEvaluator.evaluate(
+        field.dependsOn,
+        dataForDepends,
+        parentData: effectiveParentFormData,
+      );
     });
 
     widget.onSubmit?.call(completeFormData);
