@@ -281,9 +281,19 @@ void main() {
         }),
         isFalse,
       );
-      // Had `=>` been torn into `= >`, the parse would fail and the expression
-      // would fall back to defaultOnError (true) rather than returning false.
       expect(DependsOnEvaluator.evaluate(expr, {'items': []}), isFalse);
+      // Direct guard on the arrow itself: a self-contained array literal, so
+      // the result depends only on whether `=>` parsed. Mangling it into
+      // `= >` fails the parse, and BOTH cases would then fall back to
+      // defaultOnError (true) — so the isFalse case cannot pass by accident.
+      expect(
+        DependsOnEvaluator.evaluate('eval:[1,2].some(r => r > 1)', {}),
+        isTrue,
+      );
+      expect(
+        DependsOnEvaluator.evaluate('eval:[1,2].some(r => r > 5)', {}),
+        isFalse,
+      );
       // The arrow parameter is not a document field, so it stays out of the
       // reverse-dependency graph.
       expect(DependsOnEvaluator.referencedFields(expr), {'items'});
