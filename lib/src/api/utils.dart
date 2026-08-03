@@ -2,7 +2,7 @@
 // For license information, please see license.txt
 
 import 'dart:convert';
-import 'package:flutter/foundation.dart' show debugPrint;
+import '../utils/sdk_log.dart';
 
 /// Frappe wraps API responses inconsistently: most `frappe.client.*` and
 /// `frappe.*.method` calls return `{"message": ...}` while REST resource
@@ -55,9 +55,7 @@ String extractErrorMessage(dynamic body) {
         raw = serverMsg;
       }
     } catch (e, st) {
-      debugPrint(
-        'extractErrorMessage: _server_messages parse failed — $e\n$st',
-      );
+      sdkLog('extractErrorMessage: _server_messages parse failed — $e\n$st');
     }
   }
 
@@ -92,21 +90,36 @@ String _stripHtmlTags(String html) {
       .trim();
 }
 
-/// Extract exception message from _server_messages JSON if present.
+/// Extract exception message from _server_messages if present.
+///
+/// Frappe's `_server_messages` is double-encoded and reaches us in a few
+/// shapes depending on how far the response has already been decoded:
+///   • a JSON string:  `"[\"{\\\"message\\\": \\\"...\\\"}\"]"`
+///   • an already-decoded list of JSON strings: `["{\"message\": \"...\"}"]`
+///   • a list of maps: `[{message: ...}]`
+/// The previous implementation only handled the first shape *and* assumed the
+/// list element was already a Map, so real payloads (list-of-json-strings)
+/// fell through to null and the caller surfaced a bare "Unknown Error".
+/// Normalise every shape here: decode the container if it's a string, then
+/// decode each element if it's a string, then read `message`.
 String? _extractServerMessage(dynamic body) {
-  if (body is Map && body.containsKey('_server_messages')) {
-    try {
-      final serverMsgs = body['_server_messages'];
-      if (serverMsgs is String) {
-        final decoded = jsonDecode(serverMsgs) as List;
-        if (decoded.isNotEmpty && decoded.first is Map) {
-          final msg = decoded.first as Map;
-          return msg['message']?.toString();
-        }
-      }
-    } catch (e, st) {
-      debugPrint('_extractServerMessage: jsonDecode failed — $e\n$st');
+  if (body is! Map || !body.containsKey('_server_messages')) return null;
+  try {
+    var serverMsgs = body['_server_messages'];
+    if (serverMsgs is String) {
+      serverMsgs = jsonDecode(serverMsgs);
     }
+    if (serverMsgs is List && serverMsgs.isNotEmpty) {
+      var first = serverMsgs.first;
+      if (first is String) {
+        first = jsonDecode(first);
+      }
+      if (first is Map) {
+        return first['message']?.toString();
+      }
+    }
+  } catch (e, st) {
+    sdkLog('_extractServerMessage: parse failed — $e\n$st');
   }
   return null;
 }

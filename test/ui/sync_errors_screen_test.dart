@@ -106,7 +106,9 @@ void main() {
       await tester.pumpWidget(
         MaterialApp(
           home: SyncErrorsScreen(
-            rows: [row(7, 'X', ErrorCode.VALIDATION, state: OutboxState.paused)],
+            rows: [
+              row(7, 'X', ErrorCode.VALIDATION, state: OutboxState.paused),
+            ],
             onRetry: (id) async => retried = id,
             onRetryAll: () async {},
             onStop: () async {},

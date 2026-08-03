@@ -150,6 +150,12 @@ class ErrorLogCollector {
 /// — dependency-free and deterministic; collisions are negligible at this
 /// cardinality.
 String computeSignature(MobileErrorRecord r) {
+  // M2 (reviewer suggested dropping errorUser; pushed back): errorUser is
+  // INTENTIONALLY part of the key. Per-user error attribution is a product
+  // requirement — the same failing endpoint hit by different field workers
+  // must surface as separate rows so each worker's failures are tracked
+  // independently (the user is the differentiating factor). occurrence_count
+  // still collapses repeats by the same user.
   final structural =
       '${r.excType}|${r.doctype}|${r.operation}|${r.httpStatus}|${r.errorUser}';
   final tiebreaker = _normalizeMessage(r.message);

@@ -101,7 +101,8 @@ class SelectField extends BaseField {
             style?.decoration ??
             InputDecoration(
               labelText:
-                  field.placeholder ?? sdkTr('Select {0}', [field.displayLabel]),
+                  field.placeholder ??
+                  sdkTr('Select {0}', [field.displayLabel]),
               border: const OutlineInputBorder(),
               filled: field.readOnly,
               fillColor: field.readOnly ? Colors.grey[200] : null,
@@ -141,21 +142,45 @@ class SelectField extends BaseField {
       });
     }
 
+    // A non-empty incoming value that is not one of the current options is a
+    // stale selection (option removed/renamed, or an old saved record). It is
+    // coerced to null (above) so FormBuilderDropdown never asserts; surface a
+    // hint so the dropped value is visible rather than silently lost.
+    final hasStaleValue =
+        initialValueStr != null &&
+        initialValueStr.isNotEmpty &&
+        validInitialValue == null;
+    final baseDecoration =
+        style?.decoration ??
+        InputDecoration(
+          hintText:
+              field.placeholder ?? sdkTr('Select {0}', [field.displayLabel]),
+          border: const OutlineInputBorder(),
+          filled: field.readOnly,
+          fillColor: field.readOnly ? Colors.grey[200] : null,
+        );
+    final effectiveDecoration = hasStaleValue
+        ? baseDecoration.copyWith(
+            helperText: sdkTr(
+              'Previously saved value is no longer an available option',
+            ),
+            helperMaxLines: 2,
+          )
+        : baseDecoration;
+    // Move the decoration's horizontal padding into the dropdown's own
+    // (clickable) padding so the entire bordered box opens the menu, not just
+    // the area inside the content padding. See [dropdownFullTap].
+    final tap = dropdownFullTap(effectiveDecoration);
+
     return FormBuilderDropdown<String>(
       autovalidateMode: AutovalidateMode.onUserInteraction,
       key: ValueKey('select_${field.fieldname}_${rawOptions.length}'),
       name: field.fieldname ?? '',
       initialValue: validInitialValue,
       enabled: enabled && !field.readOnly,
-      decoration:
-          style?.decoration ??
-          InputDecoration(
-            hintText:
-                field.placeholder ?? sdkTr('Select {0}', [field.displayLabel]),
-            border: const OutlineInputBorder(),
-            filled: field.readOnly,
-            fillColor: field.readOnly ? Colors.grey[200] : null,
-          ),
+      isExpanded: true,
+      decoration: tap.decoration,
+      padding: tap.padding,
       // value: raw English key (stored value); child: translated display label.
       items: rawOptions.asMap().entries.map((entry) {
         return DropdownMenuItem<String>(

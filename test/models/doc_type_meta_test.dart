@@ -307,4 +307,38 @@ void main() {
       expect(layout.map((f) => f.fieldname), isNot(contains('dat')));
     });
   });
+
+  group('DocTypeMeta.translatedDoctype', () {
+    test('translated_doctype=1 (int) → true', () {
+      final m = DocTypeMeta.fromJson({
+        'name': 'X',
+        'fields': [],
+        'translated_doctype': 1,
+      });
+      expect(m.translatedDoctype, isTrue);
+    });
+
+    test('translated_doctype=true (bool) → true', () {
+      final m = DocTypeMeta.fromJson({
+        'name': 'X',
+        'fields': [],
+        'translated_doctype': true,
+      });
+      expect(m.translatedDoctype, isTrue);
+    });
+
+    test('translated_doctype=0 → false', () {
+      final m = DocTypeMeta.fromJson({
+        'name': 'X',
+        'fields': [],
+        'translated_doctype': 0,
+      });
+      expect(m.translatedDoctype, isFalse);
+    });
+
+    test('translated_doctype absent → false', () {
+      final m = DocTypeMeta.fromJson({'name': 'X', 'fields': []});
+      expect(m.translatedDoctype, isFalse);
+    });
+  });
 }

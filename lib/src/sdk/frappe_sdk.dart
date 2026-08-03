@@ -274,6 +274,7 @@ class FrappeSDK {
       client: _client,
       metaFetcher: testMetaFn,
     );
+    _wireMetaRefreshInvalidation();
     _permissionService = PermissionService(_client!, _database!);
     final translationDao = TranslationDao(database.rawDatabase);
     _translationService = TranslationService(_client!)
@@ -300,6 +301,7 @@ class FrappeSDK {
       testResolver,
       testMetaFn,
       syncComplete$: _syncCompleteController?.stream,
+      translate: (s) => _translationService?.translate(s) ?? s,
     );
     _offlineTransitionService = OfflineTransitionService(
       database: _database!,
@@ -321,6 +323,17 @@ class FrappeSDK {
       restartGapMs: tamperProtectionRestartGapMs,
     );
     _initialized = true;
+  }
+
+  /// Wires a server meta refresh to offline-cache invalidation: whenever
+  /// [MetaService] rewrites a doctype's meta (boot sync, reconnect resync,
+  /// config refresh) it evicts [OfflineRepository]'s per-doctype cache so the
+  /// next saveDocument reads the fresh schema rather than a session-stale
+  /// snapshot that would silently drop newly-added fields. Called from BOTH
+  /// [_doInitialize] (production) and [FrappeSDK.forTesting] so tests exercise
+  /// the exact production wiring.
+  void _wireMetaRefreshInvalidation() {
+    _metaService!.onMetaRefreshed = _repository!.invalidateMetaCacheFor;
   }
 
   /// Initialize SDK (call this first).
@@ -459,6 +472,7 @@ class FrappeSDK {
     _metaService!.onMetaSyncRecovered = (doctype) {
       _syncStateNotifier?.clearMetaSyncFailure(doctype);
     };
+    _wireMetaRefreshInvalidation();
 
     _syncService = SyncService(
       _client!,
@@ -512,6 +526,10 @@ class FrappeSDK {
       resolver,
       metaFn,
       syncComplete$: _syncCompleteController?.stream,
+      // Translate Link / Table MultiSelect option titles whose target
+      // doctype is a translated_doctype (Frappe `__()` parity). Reads the
+      // field at call time so a post-logout reset / locale change is honored.
+      translate: (s) => _translationService?.translate(s) ?? s,
     );
 
     // Build the offline-transition service. It owns its own broadcast
