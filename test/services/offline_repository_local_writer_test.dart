@@ -264,4 +264,56 @@ void main() {
       );
     },
   );
+
+  test('saveDocument skips an unsynced child (no in-txn hang) when its meta is '
+      'not available locally', () async {
+    final db2 = await AppDatabase.inMemoryDatabase();
+    // Only the parent meta is synced; 'Order Item' is absent.
+    await db2.doctypeMetaDao.upsertMetaJson(
+      'Order',
+      jsonEncode(parentMeta.toJson()),
+    );
+    for (final s in buildParentSchemaDDL(
+      parentMeta,
+      tableName: 'docs__order',
+    )) {
+      await db2.rawDatabase.execute(s);
+    }
+    // Resolver mimics production getMeta: reads the OUTER db handle. If
+    // writeParentInTxn re-resolved the missing child's meta in-txn (the old
+    // bug) this query queues behind the txn on sqflite's single non-reentrant
+    // lock and hangs forever → the 5s timeout fires. Post-fix the child is
+    // skipped, so the resolver is never called.
+    final writer = LocalWriter(db2.rawDatabase, (_) async {
+      await db2.rawDatabase.rawQuery('SELECT 1');
+      return childMeta;
+    });
+    final repo2 = OfflineRepository(db2, localWriter: writer);
+    // The unsynced child is deliberately skipped; the parent still saves
+    // (no hang — pre-fix the in-txn child resolver would deadlock here).
+    await repo2
+        .saveDocument(
+          doctype: 'Order',
+          data: {
+            'mobile_uuid': 'p-skip',
+            'title': 'parent only',
+            'items': [
+              {'item_name': 'dropped'},
+            ],
+          },
+        )
+        .timeout(const Duration(seconds: 5));
+    final parents = await db2.rawDatabase.query('docs__order');
+    expect(
+      parents.length,
+      1,
+      reason: 'parent row written despite skipped child',
+    );
+    final childTable = await db2.rawDatabase.rawQuery(
+      "SELECT name FROM sqlite_master WHERE type='table' AND "
+      "name='docs__order_item'",
+    );
+    expect(childTable, isEmpty, reason: 'unsynced child table never created');
+    await db2.close();
+  });
 }

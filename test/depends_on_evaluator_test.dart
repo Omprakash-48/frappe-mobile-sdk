@@ -268,5 +268,103 @@ void main() {
         );
       });
     });
+
+    group('relational comparisons coerce string operands', () {
+      // Frappe often carries numeric field values as strings (a Float field
+      // read back as "10.0", a computed value round-tripped through a text
+      // field). JS depends_on coerces those; these guard that the Dart
+      // evaluator matches instead of silently returning false.
+
+      test('numeric-string > number is coerced (regression: qty_variance)', () {
+        // The exact shape that hid the "Rejection Details" child table:
+        // qty_variance arrived as the String "10.0", not double 10.0.
+        expect(
+          DependsOnEvaluator.evaluate('eval:doc.qty_variance > 0', {
+            'qty_variance': '10.0',
+          }),
+          isTrue,
+        );
+      });
+
+      test('num operands still compare (no behavior change)', () {
+        expect(
+          DependsOnEvaluator.evaluate('eval:doc.x > 0', {'x': 5.0}),
+          isTrue,
+        );
+        expect(
+          DependsOnEvaluator.evaluate('eval:doc.x > 0', {'x': 0}),
+          isFalse,
+        );
+      });
+
+      test('string "0.0" is not > 0 (boundary preserved)', () {
+        expect(
+          DependsOnEvaluator.evaluate('eval:doc.x > 0', {'x': '0.0'}),
+          isFalse,
+        );
+      });
+
+      test('<, >=, <= coerce strings symmetrically', () {
+        expect(
+          DependsOnEvaluator.evaluate('eval:doc.x < 20', {'x': '10.0'}),
+          isTrue,
+        );
+        expect(
+          DependsOnEvaluator.evaluate('eval:doc.x >= 10', {'x': '10'}),
+          isTrue,
+        );
+        expect(
+          DependsOnEvaluator.evaluate('eval:doc.x <= 5', {'x': '10.0'}),
+          isFalse,
+        );
+      });
+
+      test('non-numeric / null / missing operand → false, never throws', () {
+        expect(
+          DependsOnEvaluator.evaluate('eval:doc.x > 0', {'x': 'abc'}),
+          isFalse,
+        );
+        expect(
+          DependsOnEvaluator.evaluate('eval:doc.x > 0', {'x': null}),
+          isFalse,
+        );
+        expect(DependsOnEvaluator.evaluate('eval:doc.x > 0', {}), isFalse);
+      });
+    });
+  });
+
+  group('referencedFields', () {
+    test('extracts single doc.field reference', () {
+      expect(
+        DependsOnEvaluator.referencedFields(
+          'eval:doc.marital_status == "Married"',
+        ),
+        {'marital_status'},
+      );
+    });
+    test('extracts multiple references across && / ||', () {
+      expect(
+        DependsOnEvaluator.referencedFields(
+          'eval:doc.a == 1 && doc.b != 2 || doc.c',
+        ),
+        {'a', 'b', 'c'},
+      );
+    });
+    test('extracts from [..].includes(doc.field)', () {
+      expect(
+        DependsOnEvaluator.referencedFields(
+          'eval:["A","B"].includes(doc.kind)',
+        ),
+        {'kind'},
+      );
+    });
+    test('null/empty -> empty set', () {
+      expect(DependsOnEvaluator.referencedFields(null), isEmpty);
+      expect(DependsOnEvaluator.referencedFields(''), isEmpty);
+    });
+    test('bare fieldname (no eval:, no doc.) -> that field', () {
+      // Frappe allows depends_on = "field_name" (truthy check).
+      expect(DependsOnEvaluator.referencedFields('some_flag'), {'some_flag'});
+    });
   });
 }

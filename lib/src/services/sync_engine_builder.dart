@@ -77,12 +77,22 @@ PushError frappeToPushError({
     case 'DuplicateEntryError':
       return DuplicateEntryError();
     case 'LinkExistsError':
+      // H4 (reviewer asked to populate the linked-document list; verified
+      // INVALID): Frappe's LinkExistsError carries no structured linked map.
+      // `raise_link_exists_exception` (delete_doc.py) throws on the FIRST
+      // blocking link with a translated HTML message in `_server_messages` —
+      // there is no doctype→names list to parse, and only one reference is
+      // ever named. So `linked` stays empty; the human message reaches the UI
+      // via the engine's stored error_message / sync_error_banner.
       return LinkExistsError(linked: const {});
   }
-  // 409 with no exc_type: optimistic-lock mismatch is the common case.
-  if (excType == null && status == 409) {
-    return TimestampMismatchError();
-  }
+  // H3: a 409 WITHOUT exc_type is NOT necessarily an optimistic-lock mismatch
+  // — duplicate-name and custom-app conflicts also return 409 with no
+  // exc_type. Defaulting to TimestampMismatchError triggers a refresh+retry
+  // that just hits the same 409 and loops until the budget exhausts, then
+  // mislabels the cause. Genuine timestamp mismatches DO carry
+  // exc_type=TimestampMismatchError (handled above), so fall through to a
+  // generic ServerRejection here.
   return ServerRejection(status: status ?? 500, rawBody: rawBody);
 }
 
@@ -157,7 +167,16 @@ Future<Map<String, dynamic>> dispatchHttpSend(
       rawBody: e.responseBodyRaw ?? jsonEncode({'exc_type': 'ValidationError'}),
     );
   } on AuthException catch (e) {
-    // HTTP 401/403 — terminal permission rejection.
+    // B2: distinguish 401 (session expiry) from 403 (permission denial).
+    // A 401 reaches here only after RestHelper's token-refresh attempt has
+    // already failed. It is NOT terminal: once the user re-authenticates, the
+    // queued rows must still push. Classifying it as PermissionError would
+    // mark every pending row `paused`, silently killing the queue on any
+    // mid-sync session timeout. Route it to the retryable NetworkError bucket
+    // (retryAll re-attempts after re-auth). Only a genuine 403 is terminal.
+    if (e.statusCode == 401) {
+      throw NetworkError(message: e.message);
+    }
     onFailure?.call(e, method, payload);
     throw frappeToPushError(
       status: e.statusCode ?? 403,
@@ -167,7 +186,11 @@ Future<Map<String, dynamic>> dispatchHttpSend(
           jsonEncode({'exc_type': 'PermissionError', 'message': e.message}),
     );
   } on NetworkException catch (e) {
-    // Transient connectivity failure — retryable bucket, not logged (spec §6).
+    // Transient connectivity failure — retryable bucket. M1: deliberately
+    // does NOT call onFailure. Network errors are out of scope for the error
+    // log (spec §6); they have no HTTP status to classify and would otherwise
+    // flood the log on every offline blip. Do not add onFailure here for
+    // symmetry with the other branches — the omission is intentional.
     throw NetworkError(message: e.message);
   }
 }
@@ -356,6 +379,12 @@ class SyncEngineBuilder {
       attachmentUploader: attachmentUploader,
       writeQueueResolver: writeQueueResolver,
       payloadTransformer: payloadTransformer,
+      // M3: drain() materialises + clears the collector; if flush() then fails
+      // (e.g. network), those aggregated records are dropped, NOT re-queued.
+      // This loss-on-failure is intentional — error logs are best-effort
+      // telemetry, not a guaranteed audit log (spec §9). Do not add retry/
+      // re-queue logic here: it would counterproductively keep PII-bearing
+      // examples in memory and re-POST on every drain.
       onDrainComplete: () => errorLogPoster.flush(errorLogCollector.drain()),
     );
 

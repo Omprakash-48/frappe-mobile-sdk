@@ -5,7 +5,7 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [2.0.0] - Unreleased
+## [2.0.0-beta] - 2026-07-30
 
 Major release: offline-first foundation, server-driven offline-mode toggle, and a new query/sync surface. Upgrades from `1.x` use a single transactional migration from database schema v2 to v3.
 
@@ -87,6 +87,7 @@ Major release: offline-first foundation, server-driven offline-mode toggle, and 
 - `extractErrorMessage` / `toUserFriendlyMessage` — shared helpers for error-string normalization across the SDK.
 - `LinkFieldPickerMode` enum (`inline` and `dialog` modes) to support alternative full-modal lookup dialogs for Link and Table MultiSelect fields, configurable globally via `FrappeFormStyle`.
 - `SearchableSelectDialog` widget rendering a modal dialog with a dedicated search filter, checkboxes for multi-select, and checkmarks for single-select.
+- `FrappeFormBuilder.cascadeProgrammaticChanges` (default `false`) — when enabled, a value written programmatically by an `onFieldChange` patch (e.g. a computed value, or a value the handler fetched from a linked document and returned as a patch) re-fires that field's own change pipeline, so dependent fields recompute. Mirrors Frappe Desk's `frm.set_value` → trigger behaviour. Loop-safe via value-equality plus a depth cap; the synchronous `patchValue` echo is suppressed so each handler fires once (no double-run for typed fields whose representation `FieldNormalizer` changes). Covers handler-returned patches only: the SDK's native `DocField.fetchFrom` patches use a separate internal path and do not cascade (see `doc/COMPUTED_FIELD_CASCADE.md`, "Known limitation"). Cascade re-fires now pass `ChangeSource.reaction` to `onFieldChange` (the originating user edit stays `ChangeSource.user`), so a handler can gate one-shot side effects on `source == ChangeSource.user`; with the flag off every invocation remains `ChangeSource.user`.
 
 **Translation pipeline (PR #76)**
 
@@ -138,6 +139,7 @@ Major release: offline-first foundation, server-driven offline-mode toggle, and 
 
 ### Fixed
 
+- `FrappeFormBuilder` — a `onFieldChange` handler patching the **same field that is changing** with a rewritten value (e.g. normalising `'hi'` → `'HI'`) crashed with an unbounded synchronous recursion (`StackOverflowError`) through the text field's controller notifications; independent of `cascadeProgrammaticChanges`. The self-key's widget patch is now deferred one frame (form data still updates immediately). Regression-tested for both flag states.
 - `system_tables.dart` — all `CREATE TABLE` statements use `IF NOT EXISTS`; `sdk_meta` seed uses `INSERT OR IGNORE` for migration idempotency.
 - `pull_apply.dart` — conflict flag now only fires when the server `modified` timestamp is strictly after the local `modified` (previously flagged any dirty row unconditionally).
 - `SyncController.pause()` / `resume()` — `syncNow` now checks the `isPaused` flag before running.

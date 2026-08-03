@@ -104,11 +104,12 @@ class LocalWriter {
   /// Silently no-ops if the parent table doesn't exist yet (initial sync
   /// hasn't run).
   ///
-  /// [parentMeta] / [childMetasByDoctype] — when supplied, the metaResolver
-  /// is bypassed entirely. This is the production-recommended path for
-  /// in-txn callers, since [_metaResolver] typically queries `doctype_meta`
-  /// through the outer Database which would deadlock against the txn (the
-  /// sqflite write queue serializes outer reads behind in-flight txns).
+  /// [parentMeta] is REQUIRED and [childMetasByDoctype] SHOULD hold every
+  /// child doctype's meta — both MUST be pre-resolved by the caller OUTSIDE
+  /// this txn. Meta is never resolved here: [_metaResolver] queries
+  /// `doctype_meta` through the outer Database, which would hang on the
+  /// sqflite write queue if invoked while this txn holds it. Child doctypes
+  /// absent from [childMetasByDoctype] are skipped (rows not written).
   Future<void> writeParentInTxn({
     required Transaction txn,
     required String parentDoctype,
@@ -117,15 +118,13 @@ class LocalWriter {
     String? serverName,
     String? syncOp,
     String? pushBasePayload,
-    DocTypeMeta? parentMeta,
+    required DocTypeMeta parentMeta,
     Map<String, DocTypeMeta>? childMetasByDoctype,
   }) async {
-    // Resolve metas BEFORE doing any work inside the txn. The metaResolver
-    // typically queries `doctype_meta` through the outer Database, which
-    // would deadlock against our in-flight write txn (sqflite serializes
-    // reads/writes through one queue). Caller may pre-resolve and pass them
-    // in to skip the resolver entirely.
-    parentMeta ??= await _metaResolver(parentDoctype);
+    // [parentMeta] / [childMetasByDoctype] are pre-resolved by the caller
+    // (see doc above). NEVER resolve meta in-txn: querying the outer
+    // Database while this txn holds the sqflite write queue hangs forever
+    // on the non-reentrant lock (a Dart deadlock, not SQLITE_BUSY).
     final parentTable = normalizeDoctypeTableName(parentDoctype);
     if (!await sqliteTableExists(txn, parentTable)) return;
     final nowMs = DateTime.now().toUtc().millisecondsSinceEpoch;
@@ -139,17 +138,15 @@ class LocalWriter {
           fn != null &&
           opt != null &&
           opt.isNotEmpty) {
-        DocTypeMeta? cm = childMetasByDoctype?[opt];
+        final cm = childMetasByDoctype?[opt];
         if (cm == null) {
-          try {
-            cm = await _metaResolver(opt);
-          } catch (e, st) {
-            sdkLog(
-              'LocalWriter.writeParentInTxn: child meta resolve failed for '
-              '$opt — $e\n$st',
-            );
-            continue;
-          }
+          // Caller omitted this child's meta (not synced) — skip its rows.
+          // Resolving here would hang on the sqflite write queue (see above).
+          sdkLog(
+            'LocalWriter.writeParentInTxn: child meta not supplied for '
+            '$opt — skipping child rows',
+          );
+          continue;
         }
         childInfos[fn] = ChildTableInfo(opt, cm);
       }

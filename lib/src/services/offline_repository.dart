@@ -87,6 +87,35 @@ class OfflineRepository {
     _childMetasByParent.clear();
   }
 
+  /// Drops the in-memory meta state for a SINGLE [doctype] after its meta
+  /// was re-fetched from the server (see [MetaService.onMetaRefreshed]).
+  ///
+  /// Without this, a mid-session meta refresh — e.g. a reconnect resync
+  /// running `checkAndSyncDoctypes` / `resyncMobileConfiguration` after the
+  /// cache was already warmed at boot — updates the DAO + MetaService LRU
+  /// but leaves this repository's copy stale until logout. A subsequent
+  /// [saveDocument] would then read the old schema via [_loadMeta] and
+  /// silently drop any newly-added field. Evicting here forces the next
+  /// [_loadMeta] to re-read the fresh meta from the DAO.
+  ///
+  /// Clears three mirrors keyed on this doctype:
+  ///   * `_metaCache`        — so save/delete read fresh parent meta;
+  ///   * `_childMetasByParent` — so a changed child-table set is rebuilt;
+  ///   * `_ensuredTables`    — so the next closure pull re-reconciles the
+  ///     table schema (the save path already self-heals via
+  ///     [reconcileParentTableForMeta], but the pull path relies on this).
+  ///
+  /// NOTE: `_childMetasByParent` is keyed by the PARENT doctype, so refreshing
+  /// a CHILD doctype alone does not evict the parent's cached child-meta set —
+  /// it stays until the parent is refreshed. This only affects the pull path's
+  /// [_resolveChildMetas] cache; the save path rebuilds child metas via
+  /// [_loadMeta] (evicted above), so saves are unaffected.
+  void invalidateMetaCacheFor(String doctype) {
+    _metaCache.remove(doctype);
+    _childMetasByParent.remove(doctype);
+    _ensuredTables.remove(normalizeDoctypeTableName(doctype));
+  }
+
   /// Doctype names whose meta has at least one Table / Table MultiSelect
   /// field. Used by SyncService to decide whether to fetch full docs
   /// (with children) instead of bare `frappe.client.get_list` rows.
@@ -418,32 +447,61 @@ class OfflineRepository {
     // deadlocks (sqflite serializes ops through one queue, and the txn
     // holds it).
     final parentMeta = await _loadMeta(doctype);
+    if (parentMeta == null) {
+      // No local meta for this doctype — the form can't have rendered
+      // without it, so it was never synced. Fail clean BEFORE opening the
+      // write txn rather than letting LocalWriter resolve meta in-txn,
+      // which would hang on the sqflite write queue.
+      throw StateError(
+        'OfflineRepository.saveDocument: no local meta for "$doctype" — '
+        'sync the doctype before saving offline.',
+      );
+    }
+    // Pre-resolve every child-table meta BEFORE the write txn — LocalWriter
+    // never resolves meta in-txn (that would hang on the sqflite queue).
+    // A child whose meta isn't synced locally is deliberately SKIPPED here
+    // (its rows dropped, with a loud log) rather than resolved in-txn.
+    // NOTE: a mid-sync race where a child's meta AND table are both still
+    // absent (closure expansion vs. a save) drops those child rows; closing
+    // that fully needs a pre-txn meta + table backfill and is out of scope
+    // for this deadlock fix.
     final childMetasByDoctype = <String, DocTypeMeta>{};
-    if (parentMeta != null) {
-      for (final f in parentMeta.fields) {
-        final opt = f.options;
-        if ((f.fieldtype == 'Table' || f.fieldtype == 'Table MultiSelect') &&
-            opt != null &&
-            opt.isNotEmpty) {
-          final cm = await _loadMeta(opt);
-          if (cm != null) {
-            childMetasByDoctype[opt] = cm;
-          } else {
-            // Match LocalWriter.writeParent's loud-on-failure pattern —
-            // a missing child meta means the save will silently drop the
-            // child rows, and visibility into that is critical when
-            // debugging "child data went missing" reports.
-            developer.log(
-              'OfflineRepository.saveDocument: child meta missing for '
-              '$opt (skipping child rows for this fieldtype)',
-              name: 'OfflineRepository',
-            );
-          }
+    for (final f in parentMeta.fields) {
+      final opt = f.options;
+      if ((f.fieldtype == 'Table' || f.fieldtype == 'Table MultiSelect') &&
+          opt != null &&
+          opt.isNotEmpty) {
+        final cm = await _loadMeta(opt);
+        if (cm != null) {
+          childMetasByDoctype[opt] = cm;
+        } else {
+          // Child meta not synced — skip its rows (loud log: child data is
+          // dropped, critical for "child data went missing" reports).
+          developer.log(
+            'OfflineRepository.saveDocument: child meta missing for '
+            '$opt (skipping child rows for this fieldtype)',
+            name: 'OfflineRepository',
+          );
         }
       }
     }
 
     final tableName = normalizeDoctypeTableName(doctype);
+
+    // Heal parent-table schema drift BEFORE reading or writing the row.
+    // If the cached meta has gained a field since this docs__ table was
+    // created (e.g. a field added to the doctype server-side, picked up by
+    // a later meta refresh), the INSERT below would reference a column the
+    // table lacks and fail with "no such column". This mirrors the
+    // self-heal PullEngine already performs via [reconcileParentTableForMeta]
+    // before applying a pull page — the save path needs the same guard
+    // because meta refresh and the boot-time `ensureSchemaForClosure` run
+    // at different moments. No-ops when the table doesn't exist yet (the
+    // INSERT path provisions it). MUST run outside the write txn below: it
+    // does its own PRAGMA + ALTER on rawDatabase and would deadlock inside
+    // a transaction.
+    await reconcileParentTableForMeta(doctype, tableName, parentMeta);
+
     Map<String, Object?>? existing;
     try {
       final rows = await _database.rawDatabase.query(
@@ -472,7 +530,7 @@ class OfflineRepository {
       if (preserved != null) {
         // Don't overwrite a base captured by an earlier edit (Invariant 6).
         pushBase = preserved;
-      } else if (parentMeta != null) {
+      } else {
         pushBase = jsonEncode(
           PayloadSerializer.serializeForBase(existing, parentMeta),
         );
@@ -711,10 +769,7 @@ class OfflineRepository {
     required String serverName,
     required Map<String, dynamic> data,
   }) async {
-    await applyServerPage(
-      doctype: doctype,
-      rows: [data],
-    );
+    await applyServerPage(doctype: doctype, rows: [data]);
   }
 
   /// Applies a page of server-pulled snapshots via PullApply.
@@ -725,7 +780,7 @@ class OfflineRepository {
     bool isInitialSync = false,
   }) async {
     if (rows.isEmpty) return;
-    
+
     final meta = await _loadMeta(doctype);
     if (meta == null) {
       // Meta absent means the DocType schema was never synced — we cannot

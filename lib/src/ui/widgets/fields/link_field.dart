@@ -72,20 +72,26 @@ class LinkField extends BaseField {
         });
       }
 
-      return FormBuilderDropdown<String>(
-        autovalidateMode: AutovalidateMode.onUserInteraction,
-        key: ValueKey('link_${field.fieldname}_${options!.length}'),
-        name: field.fieldname ?? '',
-        initialValue: validInitialValue,
-        enabled: enabled && !field.readOnly,
-        decoration:
-            style?.decoration ??
+      // Full-box tap target: redistribute horizontal padding into the
+      // dropdown's clickable padding (see [dropdownFullTap]).
+      final tap = dropdownFullTap(
+        style?.decoration ??
             InputDecoration(
               hintText: field.placeholder ?? 'Select ${field.displayLabel}',
               border: const OutlineInputBorder(),
               filled: field.readOnly,
               fillColor: field.readOnly ? Colors.grey[200] : null,
             ),
+      );
+      return FormBuilderDropdown<String>(
+        autovalidateMode: AutovalidateMode.onUserInteraction,
+        key: ValueKey('link_${field.fieldname}_${options!.length}'),
+        name: field.fieldname ?? '',
+        initialValue: validInitialValue,
+        enabled: enabled && !field.readOnly,
+        isExpanded: true,
+        decoration: tap.decoration,
+        padding: tap.padding,
         items: options!
             .map(
               (option) => DropdownMenuItem(value: option, child: Text(option)),

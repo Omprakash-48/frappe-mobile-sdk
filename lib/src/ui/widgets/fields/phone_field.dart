@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_form_builder/flutter_form_builder.dart';
 import 'base_field.dart';
 
@@ -94,6 +95,7 @@ class PhoneField extends BaseField {
           storedValue: state.value,
           enabled: enabled && !field.readOnly,
           readOnly: field.readOnly,
+          inputFormatters: style?.inputFormatters,
           maxLength: (field.length != null && field.length! > 0)
               ? field.length!
               : 10,
@@ -137,6 +139,7 @@ class _PhoneNumberInput extends StatefulWidget {
     required this.maxLength,
     required this.decoration,
     required this.onNumberChanged,
+    this.inputFormatters,
   });
 
   final Key fieldKey;
@@ -146,6 +149,7 @@ class _PhoneNumberInput extends StatefulWidget {
   final int maxLength;
   final InputDecoration decoration;
   final ValueChanged<String> onNumberChanged;
+  final List<TextInputFormatter>? inputFormatters;
 
   @override
   State<_PhoneNumberInput> createState() => _PhoneNumberInputState();
@@ -188,6 +192,10 @@ class _PhoneNumberInputState extends State<_PhoneNumberInput> {
       enabled: widget.enabled && !widget.readOnly,
       keyboardType: TextInputType.phone,
       maxLength: widget.maxLength,
+      inputFormatters: [
+        FilteringTextInputFormatter.digitsOnly,
+        ...?widget.inputFormatters,
+      ],
       decoration: widget.decoration,
       onChanged: (text) {
         // Emit the digits the user typed; the wrapper converts to +91 stored.

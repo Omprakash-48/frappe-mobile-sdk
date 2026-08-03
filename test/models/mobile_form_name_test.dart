@@ -26,26 +26,23 @@ void main() {
     },
   );
 
-  test(
-    'fromJson reads the legacy misspelled key as a fallback (M6)',
-    () {
-      // A payload still emitting the old `doctype_meta_modifed_at` typo must
-      // still populate doctypeMetaModifiedAt; the corrected key wins when both
-      // are present.
-      final legacyOnly = MobileFormName.fromJson({
-        'mobile_workspace_item': 'X',
-        'doctype_meta_modifed_at': '2026-02-02',
-      });
-      expect(legacyOnly.doctypeMetaModifiedAt, '2026-02-02');
+  test('fromJson reads the legacy misspelled key as a fallback (M6)', () {
+    // A payload still emitting the old `doctype_meta_modifed_at` typo must
+    // still populate doctypeMetaModifiedAt; the corrected key wins when both
+    // are present.
+    final legacyOnly = MobileFormName.fromJson({
+      'mobile_workspace_item': 'X',
+      'doctype_meta_modifed_at': '2026-02-02',
+    });
+    expect(legacyOnly.doctypeMetaModifiedAt, '2026-02-02');
 
-      final both = MobileFormName.fromJson({
-        'mobile_workspace_item': 'X',
-        'doctype_meta_modified_at': '2026-03-03',
-        'doctype_meta_modifed_at': '2026-02-02',
-      });
-      expect(both.doctypeMetaModifiedAt, '2026-03-03');
-    },
-  );
+    final both = MobileFormName.fromJson({
+      'mobile_workspace_item': 'X',
+      'doctype_meta_modified_at': '2026-03-03',
+      'doctype_meta_modifed_at': '2026-02-02',
+    });
+    expect(both.doctypeMetaModifiedAt, '2026-03-03');
+  });
 
   test('toJson round-trips all fields', () {
     const m = MobileFormName(

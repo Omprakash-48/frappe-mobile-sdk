@@ -524,4 +524,41 @@ void main() {
     );
     expect(await onlineRepo.getDirtyDocuments(), isEmpty);
   });
+
+  test(
+    'saveDocument throws StateError (no in-txn hang) when the doctype has no '
+    'local meta',
+    () async {
+      final db2 = await AppDatabase.inMemoryDatabase();
+      // No upsertMetaJson for 'Customer' → _loadMeta returns null.
+      final localWriter = LocalWriter(
+        db2.rawDatabase,
+        // Mimics production getMeta: reads the OUTER db handle. If saveDocument
+        // re-resolved meta INSIDE the write txn (the old bug) this query would
+        // queue behind the txn on sqflite's single non-reentrant lock and hang
+        // forever → the 5s timeout below fires. Post-fix it is never reached.
+        (_) async {
+          await db2.rawDatabase.rawQuery('SELECT 1');
+          return _customerMeta();
+        },
+      );
+      final repo2 = OfflineRepository(
+        db2,
+        localWriter: localWriter,
+        offlineMode: const OfflineMode(enabled: true, isPersisted: true),
+        client: FrappeClient('http://localhost'),
+        // No metaFetcher → the missing parent meta cannot be backfilled.
+      );
+      // Clean StateError BEFORE the write txn. If saveDocument instead let
+      // LocalWriter resolve meta in-txn, the blocking resolver above would
+      // deadlock and this would surface as a TimeoutException, not StateError.
+      await expectLater(
+        repo2
+            .saveDocument(doctype: 'Customer', data: {'customer_name': 'X'})
+            .timeout(const Duration(seconds: 5)),
+        throwsA(isA<StateError>()),
+      );
+      await db2.close();
+    },
+  );
 }
