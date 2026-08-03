@@ -70,6 +70,107 @@ class LinkOptionService {
       _syncCompleteStream = null,
       _translate = null;
 
+  /// Max entries in [_titleCache]. A Link title is a short string, so 500 caps
+  /// the cache in the low tens of KB while still covering a long scroll through
+  /// a child-table grid. Chosen because the previous unbounded map was the
+  /// reason this method was removed once already.
+  static const int _titleCacheMaxEntries = 500;
+
+  /// Bounded LRU for [getLinkTitle], keyed `doctype::name`. Only SUCCESSFUL
+  /// resolutions are cached — a miss may just mean the target doctype has not
+  /// pulled yet, and must stay retryable.
+  ///
+  /// Insertion-ordered: a hit re-inserts the key to move it to the newest
+  /// position, and inserting past [_titleCacheMaxEntries] evicts the oldest.
+  final Map<String, String> _titleCache = <String, String>{};
+
+  /// In-flight lookups, so N grid cells referencing the SAME target await ONE
+  /// resolve instead of each firing its own (the N+1 that motivated the
+  /// original removal). Cleared when the lookup settles.
+  final Map<String, Future<String?>> _titleInFlight =
+      <String, Future<String?>>{};
+
+  /// Resolves a single Link VALUE (`name`) of [doctype] to its display title,
+  /// offline-first. Returns null when the value is empty or the target row is
+  /// not available locally.
+  ///
+  /// Needed because a Link cell stores the linked document's id, so a grid or
+  /// list rendering that value raw shows an opaque id where a human-readable
+  /// title belongs. Parent list rows get this for free — the resolver runs
+  /// `LinkDecorator.decorateBatch`, which adds a `<field>__display` companion
+  /// to each row map. Child-table rows do NOT: they are read straight out of
+  /// `docs__<child>` by `mergeChildRowsIntoData`, which never decorates. This
+  /// method is the only title path for those cells.
+  ///
+  /// Bounded by construction: an LRU cap ([_titleCacheMaxEntries]) and
+  /// single-flight dedupe ([_titleInFlight]). Prefer `<field>__display` when
+  /// reading rows through the resolver — it costs nothing extra there.
+  Future<String?> getLinkTitle(String doctype, String name) async {
+    if (name.isEmpty) return null;
+    final key = '$doctype::$name';
+
+    final cached = _titleCache.remove(key);
+    if (cached != null) {
+      // Re-insert to mark as most-recently-used.
+      _titleCache[key] = cached;
+      return cached;
+    }
+
+    final inFlight = _titleInFlight[key];
+    if (inFlight != null) return inFlight;
+
+    final future = _resolveLinkTitle(doctype, name, key);
+    _titleInFlight[key] = future;
+    try {
+      return await future;
+    } finally {
+      _titleInFlight.remove(key);
+    }
+  }
+
+  Future<String?> _resolveLinkTitle(
+    String doctype,
+    String name,
+    String key,
+  ) async {
+    final resolver = _resolver;
+    final metaResolver = _metaResolver;
+    if (resolver == null || metaResolver == null) return null;
+
+    final meta = await metaResolver(doctype);
+    // A Link VALUE is the target's Frappe `name`; locally that is
+    // `server_name` for synced rows or `mobile_uuid` for rows created on this
+    // device that have not pushed yet. `name` is not a local column, so filter
+    // on both identity columns.
+    final result = await resolver.resolve(
+      doctype: doctype,
+      orFilters: [
+        ['server_name', '=', name],
+        ['mobile_uuid', '=', name],
+      ],
+      page: 0,
+      pageSize: 1,
+    );
+    final entities = _rowsToEntities(
+      result.rows,
+      doctype,
+      meta.titleField,
+      translateLabels: meta.translatedDoctype,
+    );
+    if (entities.isEmpty) return null;
+    final label = entities.first.label;
+    if (label == null || label.isEmpty || label == name) {
+      // No distinct title available — do NOT cache; the target doctype may
+      // still be mid-pull and produce a real title later.
+      return label;
+    }
+    _titleCache[key] = label;
+    if (_titleCache.length > _titleCacheMaxEntries) {
+      _titleCache.remove(_titleCache.keys.first);
+    }
+    return label;
+  }
+
   /// Fetches link options via the resolver (DB-first + background refresh when online).
   Future<List<LinkOptionEntity>> getLinkOptions(
     String doctype, {

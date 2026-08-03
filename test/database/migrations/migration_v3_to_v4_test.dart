@@ -200,10 +200,10 @@ void main() {
       final colNames = kvCols.map((r) => r['name'] as String).toSet();
       expect(colNames, containsAll(<String>{'lang', 'src', 'tgt'}));
 
-      // 3d. sdk_meta.schema_version updated to 5 (full v3→v5 chain ran).
+      // 3d. sdk_meta.schema_version updated to 6 (full v3→v6 chain ran).
       final meta = await v4.query('sdk_meta', where: 'id = 1');
       expect(meta, hasLength(1));
-      expect(meta.first['schema_version'], 5);
+      expect(meta.first['schema_version'], 6);
 
       // 3e. Existing data preserved — auth_tokens still intact.
       final at = await v4.query('auth_tokens');

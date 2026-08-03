@@ -134,9 +134,10 @@ class DependsOnEvaluator {
     if (expr.isEmpty) return true;
 
     try {
+      final doc = _withDefaultDocstatus(formData);
       return evalJsExpressionAsBool(expr, {
-        'doc': formData,
-        'parent': parentData ?? formData,
+        'doc': doc,
+        'parent': parentData == null ? doc : _withDefaultDocstatus(parentData),
       });
     } on JsEvalException catch (e) {
       sdkLog(
@@ -153,6 +154,22 @@ class DependsOnEvaluator {
     }
   }
 
+  /// Supplies `docstatus: 0` when the key is absent.
+  ///
+  /// In Frappe a document always has a `docstatus` — 0 while it is a draft — so
+  /// desk expressions like `eval:doc.docstatus === 0` are true on a new doc.
+  /// Form data assembled client-side does not always carry the key, and reading
+  /// it as undefined made those expressions false, mis-gating every draft-only
+  /// visibility / mandatory / read-only rule.
+  ///
+  /// Copies only when the key is missing, and never mutates the caller's map —
+  /// [formData] is the live form state, not this evaluator's to write to.
+  static Map<String, dynamic> _withDefaultDocstatus(
+    Map<String, dynamic> formData,
+  ) => formData.containsKey('docstatus')
+      ? formData
+      : {...formData, 'docstatus': 0};
+
   /// Extract `doc.fieldname` from an eval expression like `eval:doc.x` or
   /// `eval: doc.x`. Returns the field name, or null if the value is not an
   /// `eval:doc` expression.
@@ -166,7 +183,14 @@ class DependsOnEvaluator {
       expr = value.substring(5).trimLeft();
     }
     String fieldName = _extractFieldName(expr);
-    return expr == fieldName ? null : fieldName;
+    if (expr != fieldName) return fieldName;
+    // The whole expression isn't a bare `doc.field` reference (e.g. it's
+    // wrapped in a JS call like `(doc.x||'').replace(/.../, '')`). Fall back
+    // to the first `doc.<field>` reference anywhere in the string so
+    // dependent-field detection (used for the link field's "select X first"
+    // UX) still works for these more complex link_filters expressions.
+    final match = RegExp(r'doc\.([A-Za-z_][A-Za-z0-9_]*)').firstMatch(expr);
+    return match?.group(1);
   }
 
   static String _extractFieldName(String expr) {

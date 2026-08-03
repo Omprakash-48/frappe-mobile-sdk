@@ -10,7 +10,7 @@ Pod::Spec.new do |s|
   s.license          = { :file => '../LICENSE' }
   s.author           = { 'Dhwani RIS' => 'info@dhwaniris.com' }
   s.source           = { :path => '.' }
-  s.source_files     = 'Classes/**/*'
+  s.source_files     = 'frappe_mobile_sdk/Sources/frappe_mobile_sdk/**/*.swift'
   s.dependency 'Flutter'
   s.platform         = :ios, '12.0'
   s.pod_target_xcconfig = {

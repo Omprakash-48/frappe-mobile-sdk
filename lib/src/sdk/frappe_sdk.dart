@@ -266,7 +266,13 @@ class FrappeSDK {
     _metaService = MetaService(_client!, _database!);
     final testMetaService = _metaService!;
     final testMetaFn = testMetaService.getMeta;
-    final testLocalWriter = LocalWriter(database.rawDatabase, testMetaFn);
+    // `currentUserId` is read lazily, so it is safe that `_sessionUserService`
+    // is created further down — same wiring as production (see _doInitialize).
+    final testLocalWriter = LocalWriter(
+      database.rawDatabase,
+      testMetaFn,
+      currentUserId: () => _sessionUserService?.current?.name,
+    );
     _repository = OfflineRepository(
       _database!,
       localWriter: testLocalWriter,
@@ -411,7 +417,16 @@ class FrappeSDK {
     await _sessionUserService!.restoreFromDb();
     final metaSvc = _metaService!;
     final metaFn = metaSvc.getMeta;
-    final localWriter = LocalWriter(rawDb, metaFn);
+    // `currentUserId` lets LocalWriter predict Frappe's `owner` / `creation` /
+    // `modified_by` for a document created on this device, so the creator's own
+    // `owner = <me>` list shows it before it ever syncs. Read through the
+    // service on every call (not captured once) so login / logout mid-session
+    // is reflected immediately.
+    final localWriter = LocalWriter(
+      rawDb,
+      metaFn,
+      currentUserId: () => _sessionUserService?.current?.name,
+    );
     _repository = OfflineRepository(
       _database!,
       localWriter: localWriter,
@@ -474,6 +489,16 @@ class FrappeSDK {
     };
     _wireMetaRefreshInvalidation();
 
+    // This server's `frappe.client.get_list` rejects a wildcard `fields:['*']`
+    // ("Field not permitted in query: *"). Expand '*' to the doctype's real
+    // columns via the meta cache (~free after first load). Covers foreground
+    // reads, generic list screens (query_builder / .doc().get()), and the
+    // flat-doctype pull engine — all route through DoctypeService.list.
+    _client!.doctype.starFieldsResolver = (doctype) async {
+      final m = await _metaService!.getMeta(doctype);
+      return listableFieldnamesForStar(m);
+    };
+
     _syncService = SyncService(
       _client!,
       _repository!,
@@ -494,11 +519,16 @@ class FrappeSDK {
     // `_cachedOnline` immediately. Downstream callers (resolver,
     // `_initialMetaAndDataSync`) read `_cachedOnline` instead of probing
     // again, keeping the hot path to a single field read.
+    // The same probe/edge also publishes onto the SyncStateNotifier —
+    // it is the ONLY publisher of SyncState.isOnline, which otherwise
+    // stays at its initial `false` and pins SyncStatusBar on "Offline".
     final watcher = await ConnectivityWatcher.production();
     _connectivityWatcher = watcher;
     _cachedOnline = watcher.isOnline;
+    _syncStateNotifier?.updateOnline(watcher.isOnline);
     _connectivitySub = watcher.onChange.listen((online) {
       _cachedOnline = online;
+      _syncStateNotifier?.updateOnline(online);
     });
     final syncSvc = _syncService!;
     final resolver = UnifiedResolver(
@@ -570,7 +600,12 @@ class FrappeSDK {
     _initialized = true;
 
     if (autoRestoreAndSync) {
-      final restored = await _authService!.restoreSession();
+      // Pass the connectivity signal so restoreSession never fires a proactive
+      // token refresh while offline (which would wipe the token on the
+      // guaranteed NetworkException and strand an offline user at login).
+      final restored = await _authService!.restoreSession(
+        isOnline: _cachedOnline,
+      );
       if (restored) {
         // Kick off the offline → online transition in the background
         // (do NOT await). Reasoning: initialize() runs before runApp()
@@ -740,6 +775,57 @@ class FrappeSDK {
     // also gets fresh field definitions / configuration.
     unawaited(_initialMetaAndDataSync());
     return response;
+  }
+
+  /// Persist a login response obtained OUTSIDE the SDK (a custom SSO /
+  /// `mobile_login` endpoint) into a full SDK session — token -> `auth_tokens`,
+  /// [SessionUser] -> `sdk_meta`, `offline_enabled`, permissions, locale.
+  /// Use this when the host authenticates through a non-standard endpoint but
+  /// still wants a real SDK session, so [initialize] with `autoRestoreAndSync`
+  /// rehydrates it on cold start (no re-login). Mirrors [login]'s post-response
+  /// bookkeeping but does NOT kick the initial sync — the caller MUST drive it,
+  /// otherwise the closure/upgrade pull is suppressed here (see
+  /// [_persistOfflineFlagFromLogin]) and never fires, leaving `docs__*` helper
+  /// tables empty until the next `autoRestoreAndSync` cold start. Drive it by
+  /// awaiting [retryInitialMetaAndDataSync] (which runs the full meta+data sync
+  /// AND the upgrade closure pull after hydrating mobile-form metas). Do NOT use
+  /// [forcePullAll] as a substitute — it excludes entry-point doctypes, so it
+  /// reports success while the form-entry data was never pulled.
+  Future<Map<String, dynamic>> persistExternalLogin(
+    Map<String, dynamic> response,
+  ) async {
+    if (!_initialized) await initialize();
+    await _authService!.persistExternalLoginResponse(response);
+    await _permissionService!.saveFromLoginResponse(response['permissions']);
+    final lang = response['language'] as String?;
+    if (lang != null && lang.isNotEmpty) {
+      await _translationService?.setLocale(lang);
+    }
+    _setSessionUserFromLoginResponse(response);
+    await _persistOfflineFlagFromLogin(response);
+    // Belt-and-suspenders: pull the AUTHORITATIVE full permission set
+    // (mobile_auth.permissions) so an external/SSO login that carried only a
+    // subset — or a quirky Check-flag shape — is normalised right after login.
+    // Online-gated + non-fatal; the login-response permissions are already
+    // persisted (and correctly coerced) above.
+    await _refreshPermissionsBestEffort();
+    return response;
+  }
+
+  /// Best-effort authoritative permission refresh: pulls the full set from
+  /// `mobile_auth.permissions` and full-replaces the local cache. Online-gated
+  /// and non-fatal — a failure never blocks login or pull-to-refresh, since the
+  /// login-response permissions are already persisted by [saveFromLoginResponse].
+  Future<void> _refreshPermissionsBestEffort() async {
+    final ps = _permissionService;
+    if (ps == null) return;
+    try {
+      final onlineCheck = _isOnlineOverrideForTesting ?? _syncService?.isOnline;
+      if (onlineCheck == null || !await onlineCheck()) return;
+      await ps.syncFromApi(timeout: const Duration(seconds: 10));
+    } catch (e, st) {
+      sdkLog('FrappeSDK: best-effort permission refresh failed — $e\n$st');
+    }
   }
 
   /// Login with API key
@@ -1471,10 +1557,15 @@ class FrappeSDK {
     for (final doctype in closure.doctypes) {
       if (entryPointSet != null && entryPointSet.contains(doctype)) continue;
       if (closure.childDoctypes.contains(doctype)) continue;
-      if (_permissionService != null &&
-          !await _permissionService!.canRead(doctype)) {
-        continue;
-      }
+      // NOTE: do NOT gate the closure pull on client-side canRead. The closure
+      // is exactly the set of doctypes the mobile forms need offline (entry
+      // points + their Link/Table targets). The backend decouples the
+      // mobile-form list from the DocPerm list, so reference masters (Gender,
+      // Language, Country, …) can carry an explicit can_read=0 yet are required
+      // for link pickers — gating here left them empty offline. The server still
+      // enforces real read permission on each pull; a genuinely forbidden
+      // doctype simply returns empty/403 (caught per-doctype) instead of
+      // starving every offline picker.
       pullable.add(doctype);
     }
     return pullable;
@@ -1520,6 +1611,9 @@ class FrappeSDK {
       return;
     }
     try {
+      // Force pull (pull-to-refresh) always reconciles permissions against the
+      // authoritative endpoint. Best-effort: never blocks the data pull.
+      await _refreshPermissionsBestEffort();
       final entryPoints = await _metaService!.getMobileFormDoctypeNames();
       final closure = await _metaService!.closure(entryPoints);
       final pullable = await _buildPullableDoctypes(
@@ -1640,4 +1734,51 @@ class FrappeSDK {
 
     _initialized = false;
   }
+}
+
+/// Concrete, `get_list`-safe column fieldnames for [meta] — used to expand a
+/// wildcard `['*']` request, which this server rejects. Skips layout-only and
+/// child-table field types plus virtual fields (none are real DB columns) and
+/// always includes the standard document columns. `workflow_state` / `status`
+/// are included automatically when present in the doctype's fields (workflow
+/// doctypes).
+List<String> listableFieldnamesForStar(DocTypeMeta meta) {
+  const skip = <String>{
+    'Section Break',
+    'Column Break',
+    'Tab Break',
+    'HTML',
+    'Button',
+    'Table',
+    'Table MultiSelect',
+    'Fold',
+    'Heading',
+    // 'Image' is one of Frappe's no_value_fields and is absent from
+    // data_fieldtypes, so no DB column is ever generated for it. Emitting it in
+    // a ['*'] expansion sends a nonexistent column to frappe.client.get_list
+    // (the exact unknown-column failure this expansion exists to avoid).
+    'Image',
+  };
+  final out = <String>{
+    'name',
+    'owner',
+    'creation',
+    'modified',
+    'modified_by',
+    'docstatus',
+    'idx',
+  };
+  for (final f in meta.fields) {
+    final fn = f.fieldname;
+    if (fn == null || fn.isEmpty) continue;
+    // A virtual DocField (`is_virtual=1`) is computed at runtime by a property
+    // setter / controller and gets NO DB column, whatever its fieldtype — so
+    // the fieldtype skip set above cannot catch it. Emitting it in a ['*']
+    // expansion sends a nonexistent column to frappe.client.get_list (the
+    // exact unknown-column failure this expansion exists to avoid).
+    if (f.isVirtual) continue;
+    if (skip.contains(f.fieldtype)) continue;
+    out.add(fn);
+  }
+  return out.toList();
 }

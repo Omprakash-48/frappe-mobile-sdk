@@ -9,6 +9,7 @@ import 'daos/auth_token_dao.dart';
 import 'daos/doctype_permission_dao.dart';
 import 'daos/security_event_dao.dart';
 import 'daos/security_state_dao.dart';
+import 'schema/system_columns.dart';
 import 'schema/system_tables.dart';
 import 'table_name.dart';
 
@@ -20,7 +21,7 @@ typedef DatabaseFactoryResolver =
     );
 
 class AppDatabase {
-  static const int _version = 5;
+  static const int _version = 6;
 
   /// Singleton instance for the production (on-disk) database. The in-memory
   /// factory does NOT touch this — each call returns an independent instance
@@ -197,6 +198,59 @@ class AppDatabase {
     if (oldVersion < 5) {
       await _migrateV4ToV5(db);
     }
+    if (oldVersion < 6) {
+      await _migrateV5ToV6(db);
+    }
+  }
+
+  /// v5 → v6: materialize Frappe's server-owned audit columns (`owner`,
+  /// `creation`, `modified_by`) on every existing `docs__<doctype>` PARENT
+  /// mirror table.
+  ///
+  /// Why this must be a versioned migration rather than relying on the
+  /// per-doctype reconcile: `FilterParser` now emits real SQL for these
+  /// columns instead of silently dropping the clause, so a table created by
+  /// an older SDK build fails any such query with `no such column: owner`.
+  /// The reconcile paths that could add them
+  /// (`OfflineRepository.ensureSchemaForClosure` / `reconcileParentTableForMeta`)
+  /// only run during a pull, and the closure pull is gated on connectivity —
+  /// an app that upgrades and then starts OFFLINE would query the old schema
+  /// first. `onUpgrade` runs on `openDatabase`, before any query can.
+  ///
+  /// Child mirrors share the `docs__` prefix but `child_schema.dart` does not
+  /// emit these columns, so they are identified by the absence of the
+  /// parent-only `sync_status` column and left untouched — otherwise an
+  /// upgraded install's child tables would drift from a fresh install's.
+  ///
+  /// Every column is nullable `TEXT` with no default: the server is their only
+  /// writer, and SQLite rejects `ADD COLUMN ... NOT NULL` without a default.
+  /// Wrapped in [_safeAddColumn] so an interrupted upgrade can re-run.
+  static Future<void> _migrateV5ToV6(Database db) async {
+    await db.transaction((txn) async {
+      final tables = await txn.rawQuery(
+        "SELECT name FROM sqlite_master WHERE type = 'table'",
+      );
+      for (final row in tables) {
+        final name = row['name'] as String;
+        if (!name.startsWith('docs__')) continue;
+        final info = await txn.rawQuery('PRAGMA table_info("$name")');
+        final cols = info.map((r) => r['name'] as String?).toSet();
+        // Parent-only marker — see `systemChildColumnNames`, which has no
+        // `sync_*` columns because children inherit the parent's state.
+        if (!cols.contains('sync_status')) continue;
+        for (final col in serverAuditColumnNames) {
+          if (cols.contains(col)) continue;
+          await _safeAddColumn(
+            txn,
+            'ALTER TABLE "$name" ADD COLUMN "$col" TEXT',
+          );
+        }
+      }
+
+      await txn.rawUpdate(
+        'UPDATE sdk_meta SET schema_version = 6 WHERE id = 1',
+      );
+    });
   }
 
   /// v3 → v4: add the `kv` translation-cache table that TranslationDao writes to.
@@ -407,7 +461,7 @@ class AppDatabase {
     // and _onUpgrade post-conditions identical.
     await exec.insert('sdk_meta', <String, Object?>{
       'id': 1,
-      'schema_version': 5,
+      'schema_version': 6,
     }, conflictAlgorithm: ConflictAlgorithm.replace);
   }
 

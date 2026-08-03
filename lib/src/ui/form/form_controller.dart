@@ -488,7 +488,18 @@ class FormController extends ChangeNotifier {
     }
     final v = _rawValues[field];
     final ui = uiStateOf(field).value;
-    if ((f.reqd || ui.required) && (v == null || v.toString().isEmpty)) {
+    // "Missing" semantics are shared with the legacy FrappeFormBuilder
+    // mandatory sweep and must agree with it, or reactive and legacy mode
+    // accept different payloads. Trim-aware: a whitespace-only string is
+    // missing (it is also blank server-side). `0` / `false` stay PRESENT
+    // (Frappe treats them as set), an empty List stays missing, and any other
+    // type keeps the original `toString().isEmpty` probe.
+    final missing =
+        v == null ||
+        (v is List && v.isEmpty) ||
+        (v is String && v.trim().isEmpty) ||
+        (v is! List && v is! String && v.toString().isEmpty);
+    if ((f.reqd || ui.required) && missing) {
       return '${f.label ?? field} is required';
     }
     for (final validator in _fieldValidators[field] ?? const []) {

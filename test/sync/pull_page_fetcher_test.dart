@@ -1,4 +1,5 @@
 import 'package:flutter_test/flutter_test.dart';
+import 'package:frappe_mobile_sdk/src/database/schema/system_columns.dart';
 import 'package:frappe_mobile_sdk/src/sync/pull_page_fetcher.dart';
 import 'package:frappe_mobile_sdk/src/sync/cursor.dart';
 import 'package:frappe_mobile_sdk/src/models/doc_type_meta.dart';
@@ -249,5 +250,27 @@ void main() {
     // requested by name; we still include them.
     expect(fields, contains('items'));
     expect(fields, contains('taxes'));
+  });
+
+  test('always requests the server-owned audit fields', () async {
+    // `owner` / `creation` / `modified_by` are real columns on every DocType
+    // table but are never declared in `meta.fields`, so they must be asked
+    // for explicitly — otherwise PullApply persists NULL and any offline
+    // filter on them matches nothing.
+    final cap = _Captured();
+    final fetcher = PullPageFetcher(
+      listHttp: (doctype, params) async {
+        cap.params = params;
+        return const [];
+      },
+    );
+    await fetcher.fetch(
+      doctype: 'X',
+      meta: DocTypeMeta(name: 'X', fields: const []),
+      cursor: Cursor.empty,
+      pageSize: 500,
+    );
+    final fields = (cap.params!['fields'] as List).cast<String>();
+    expect(fields, containsAll(serverAuditColumnNames));
   });
 }

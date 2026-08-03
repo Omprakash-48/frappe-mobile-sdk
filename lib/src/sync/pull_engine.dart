@@ -144,7 +144,32 @@ class PullEngine {
       return;
     }
 
-    final meta = await metaResolver(doctype);
+    final DocTypeMeta meta;
+    try {
+      meta = await metaResolver(doctype);
+    } catch (e, st) {
+      // A doctype whose meta can't be resolved — e.g. a server 500 from a
+      // doctype missing its controller module, or a permission failure — must
+      // be SKIPPED, never abort the whole closure pull. Without this the throw
+      // escapes _runDoctype, the pool task fails, Future.wait rethrows and
+      // run() aborts, stranding every OTHER doctype ("core data did not
+      // download"; retry re-hits the same failure and stalls).
+      sdkLog(
+        'PullEngine._runDoctype($doctype): meta resolve failed, skipping — $e\n$st',
+      );
+      // Record on the release-visible, host-observable channel
+      // (SyncState.failedMetaSyncs). The debug-only sdkLog above compiles out
+      // in release and the per-doctype `note` is read by no progress UI.
+      notifier.recordMetaSyncFailure(doctype, 'meta: $e');
+      notifier.value = notifier.value.updatePerDoctype(
+        doctype,
+        // deferred:true so the progress screen (which reads deferred +
+        // completedAt only) shows this as deferred, not perpetually
+        // in-progress.
+        DoctypeSyncState(deferred: true, note: 'failed (meta): $e'),
+      );
+      return;
+    }
 
     // Reconcile the on-disk schema against THIS meta snapshot before
     // applying any pages. Closes the SNF/SDK race where the table was
@@ -184,7 +209,41 @@ class PullEngine {
       for (final edge in graph.outgoing.where(
         (e) => e.kind == DepEdgeKind.child,
       )) {
-        final childMeta = await metaResolver(edge.targetDoctype);
+        final DocTypeMeta childMeta;
+        try {
+          childMeta = await metaResolver(edge.targetDoctype);
+        } catch (e, st) {
+          // Can't apply a parent's pages without its child schema — skip the
+          // parent doctype rather than aborting the entire pull.
+          sdkLog(
+            'PullEngine._runDoctype($doctype): child meta '
+            '${edge.targetDoctype} resolve failed, skipping — $e\n$st',
+          );
+          // Record the CHILD doctype's failure observably, then SKIP ONLY this
+          // child edge (continue) rather than aborting the whole parent
+          // (return): the parent's own scalar fields and its other child
+          // tables still pull. Dropping the entire parent for one broken child
+          // table silently zeroes what may be an entry-point form doctype.
+          //
+          // CONSEQUENCE — the skipped field's rows go STALE, they are NOT
+          // deleted. `edge.field` is simply never added to `childInfo`, and
+          // both of PullApply's apply paths iterate ONLY
+          // `childMetasByFieldname.entries`; each child wipe is keyed
+          // `parent_uuid = ? AND parentfield = ?`, so a fieldname absent from
+          // that map is never queried and never deleted. Whatever was cached
+          // for this child field on an earlier successful pull is therefore
+          // left in place unchanged — data-safe (no silent data loss), but the
+          // rows may be out of date until the child meta resolves again.
+          //
+          // Note the failure is attributed to the CHILD doctype below (the
+          // thing that actually failed to resolve), NOT to the parent, so the
+          // parent's own per-doctype sync state still reports success.
+          notifier.recordMetaSyncFailure(
+            edge.targetDoctype,
+            'child meta (parent $doctype): $e',
+          );
+          continue;
+        }
         childInfo[edge.field] = PullApplyChildInfo(
           edge.targetDoctype,
           childMeta,

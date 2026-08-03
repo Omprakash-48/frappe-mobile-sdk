@@ -202,4 +202,103 @@ void main() {
     expect(await svc.canWrite('Item'), isTrue);
     await db.close();
   });
+
+  test(
+    'syncFromApi coerces int flags and full-replaces (prunes stale)',
+    () async {
+      final db = await AppDatabase.inMemoryDatabase();
+      // Pre-seed a stale doctype not present in the refresh below.
+      final seed = PermissionService(FrappeClient('http://localhost'), db);
+      await seed.saveFromLoginResponse([
+        {'doctype': 'Stale', 'read': true},
+      ]);
+      // Server returns Frappe-native INT flags (frappe.get_all on DocPerm).
+      final mock = MockClient(
+        (req) async => http.Response(
+          jsonEncode({
+            'data': {
+              'permissions': [
+                {
+                  'doctype': 'Activity Logger',
+                  'read': 1,
+                  'write': 1,
+                  'create': 1,
+                },
+              ],
+            },
+          }),
+          200,
+        ),
+      );
+      final svc = PermissionService(
+        FrappeClient('http://localhost', httpClient: mock),
+        db,
+      );
+      await svc.syncFromApi();
+      // int flags coerced to bool:
+      expect(await svc.canCreate('Activity Logger'), isTrue);
+      // full-replace revoked the stale doctype → now DENIED (explicit all-false
+      // row), NOT deleted (which would re-grant it via the allow-by-default
+      // getter).
+      expect(await svc.canRead('Stale'), isFalse);
+      expect(await svc.canWrite('Stale'), isFalse);
+      await db.close();
+    },
+  );
+
+  test(
+    'saveFromLoginResponse (login) upserts — never prunes the cache',
+    () async {
+      final db = await AppDatabase.inMemoryDatabase();
+      final svc = PermissionService(FrappeClient('http://localhost'), db);
+      await svc.saveFromLoginResponse([
+        {'doctype': 'Customer', 'read': true},
+        {'doctype': 'Supplier', 'read': true},
+      ]);
+      // A later login response with only a subset must NOT drop Supplier.
+      await svc.saveFromLoginResponse([
+        {'doctype': 'Customer', 'read': true, 'write': true},
+      ]);
+      expect(await svc.canWrite('Customer'), isTrue);
+      expect(await svc.getDoctypePermission('Supplier'), isNotNull);
+      await db.close();
+    },
+  );
+
+  group('cache-miss reporting', () {
+    test('a miss still allows, and is reported once per check', () async {
+      final db = await AppDatabase.inMemoryDatabase();
+      final missed = <String>[];
+      final svc = PermissionService(
+        FrappeClient('http://localhost'),
+        db,
+        onCacheMiss: missed.add,
+      );
+
+      // Behaviour is unchanged — the default is still allow.
+      expect(await svc.canWrite('Never Synced'), isTrue);
+      expect(await svc.canCreate('Never Synced'), isTrue);
+
+      // ...but the UI is gating on an assumption, and now we can see it.
+      expect(missed, ['Never Synced', 'Never Synced']);
+      await db.close();
+    });
+
+    test('a synced row is NOT reported as a miss', () async {
+      final db = await AppDatabase.inMemoryDatabase();
+      final missed = <String>[];
+      final svc = PermissionService(
+        FrappeClient('http://localhost'),
+        db,
+        onCacheMiss: missed.add,
+      );
+      await svc.saveFromLoginResponse([
+        {'doctype': 'Customer', 'read': true, 'write': false},
+      ]);
+
+      expect(await svc.canWrite('Customer'), isFalse);
+      expect(missed, isEmpty);
+      await db.close();
+    });
+  });
 }
