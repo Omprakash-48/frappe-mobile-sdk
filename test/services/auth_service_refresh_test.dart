@@ -29,6 +29,44 @@ void main() {
       );
     });
 
+    test('a 401/403 carried by ApiException is still definitive', () {
+      // RestHelper only builds an AuthException when the error body parses as
+      // JSON. A non-JSON body — Frappe behind nginx, a proxy error page, an
+      // HTML login redirect — returns early as ApiException(msg, 401). Matching
+      // on the subtype missed exactly those, so the dead refresh token was KEPT
+      // and the client 401'd -> refreshed -> failed forever with no route to
+      // re-login.
+      expect(
+        isDefinitiveAuthRejection(
+          ApiException(
+            '<html><body>401 Authorization Required</body></html>',
+            401,
+          ),
+        ),
+        isTrue,
+      );
+      expect(
+        isDefinitiveAuthRejection(ApiException('<h1>403 Forbidden</h1>', 403)),
+        isTrue,
+      );
+    });
+
+    test('a FrappeException base instance is classified by status too', () {
+      expect(isDefinitiveAuthRejection(FrappeException('nope', 401)), isTrue);
+      expect(isDefinitiveAuthRejection(FrappeException('nope', 500)), isFalse);
+      expect(isDefinitiveAuthRejection(FrappeException('no status')), isFalse);
+    });
+
+    test('a NetworkException carrying a status is NOT treated as transport-'
+        'only — status wins', () {
+      // Defensive: no SDK site constructs one this way today (all six pass no
+      // status), but if one ever did, a 401 means the credential was rejected.
+      expect(
+        isDefinitiveAuthRejection(NetworkException('gateway said no', 401)),
+        isTrue,
+      );
+    });
+
     test('validation (417) and non-auth statuses never wipe the token', () {
       expect(
         isDefinitiveAuthRejection(ValidationException('bad payload')),
