@@ -211,11 +211,24 @@ class DependsOnEvaluator {
       expr = value.substring(5).trimLeft();
     }
     String fieldName = _extractFieldName(expr);
-    return expr == fieldName ? null : fieldName;
+    if (expr != fieldName) return fieldName;
+    // The whole expression isn't a bare `doc.field` reference (e.g. it's
+    // wrapped in a JS call like `(doc.x||'').replace(/.../, '')`). Fall back
+    // to finding the first `doc.<field>` reference anywhere in the string so
+    // dependent-field detection (used for the link field's "select X first"
+    // UX) still works for these more complex link_filters expressions.
+    final match = RegExp(r'doc\.([A-Za-z_][A-Za-z0-9_]*)').firstMatch(expr);
+    return match?.group(1);
   }
 
   static dynamic _extractValue(String expr) {
     expr = expr.trim();
+    // Strip a trailing statement terminator — Frappe depends_on expressions
+    // are sometimes authored as `eval:doc.x == 1;` with a trailing semicolon,
+    // which otherwise breaks the numeric-literal regexes below.
+    if (expr.endsWith(';')) {
+      expr = expr.substring(0, expr.length - 1).trim();
+    }
     // Remove quotes if present
     if ((expr.startsWith('"') && expr.endsWith('"')) ||
         (expr.startsWith("'") && expr.endsWith("'"))) {
