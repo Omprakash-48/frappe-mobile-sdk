@@ -259,7 +259,22 @@ class PullEngine {
           cursor: scratch,
           pageSize: pageSize,
         );
-        if (result.rows.isEmpty) break;
+        if (result.rows.isEmpty) {
+          // An empty page is normally end-of-stream. The exception is a page
+          // whose names were ALL dropped by the server's per-doc permission
+          // gate: treating that as drained would fall through to
+          // markComplete() below and record the doctype as fully pulled with
+          // every later page never fetched — silent, permanent data loss
+          // recoverable only by clearing the cursor. Skip past it instead.
+          //
+          // Only initial (offset) mode can skip: incremental mode pins
+          // limit_start at 0, so continuing would re-request the same page
+          // forever. Breaking there is safe and idempotent — the cursor stays
+          // put and the page is retried next cycle.
+          if (!result.pageFiltered || scratch.complete) break;
+          scratch = result.advancedCursor;
+          continue;
+        }
 
         if (writeQueueResolver != null) {
           final wq = _writeQueues.putIfAbsent(

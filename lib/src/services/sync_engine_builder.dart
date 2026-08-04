@@ -396,7 +396,7 @@ class SyncEngineBuilder {
     // (listFullDocs) to embed its children. PullApply already writes embedded
     // child arrays into docs__<child>; without this branch every child table
     // stays empty offline (broken form prefill / not truly offline-first).
-    Future<List<Map<String, dynamic>>> listHttp(
+    Future<ListHttpPage> listHttp(
       String doctype,
       Map<String, Object?> params,
     ) async {
@@ -425,26 +425,35 @@ class SyncEngineBuilder {
         rethrow;
       }
 
-      final List<dynamic> result = hasChildren
-          ? await client.doctype.listFullDocs(
-              doctype,
-              filters: filters,
-              limitStart: limitStart,
-              limitPageLength: limitPageLength,
-              orderBy: orderBy,
-            )
-          : await client.doctype.list(
-              doctype,
-              filters: filters,
-              fields: (params['fields'] as List?)?.cast<String>(),
-              orderBy: orderBy,
-              limitPageLength: limitPageLength,
-              limitStart: limitStart,
-            );
-      return result
-          .whereType<Map>()
-          .map((e) => Map<String, dynamic>.from(e))
-          .toList();
+      // The child-bearing path reports `namesScanned` so PullPageFetcher can
+      // advance the offset by names consumed and recognise a fully
+      // permission-filtered page as "skip", not "end of stream". The flat path
+      // returns every row it lists, so it leaves namesScanned null.
+      if (hasChildren) {
+        final page = await client.doctype.listFullDocsPage(
+          doctype,
+          filters: filters,
+          limitStart: limitStart,
+          limitPageLength: limitPageLength,
+          orderBy: orderBy,
+        );
+        return ListHttpPage(page.docs, namesScanned: page.namesScanned);
+      }
+
+      final result = await client.doctype.list(
+        doctype,
+        filters: filters,
+        fields: (params['fields'] as List?)?.cast<String>(),
+        orderBy: orderBy,
+        limitPageLength: limitPageLength,
+        limitStart: limitStart,
+      );
+      return ListHttpPage(
+        result
+            .whereType<Map>()
+            .map((e) => Map<String, dynamic>.from(e))
+            .toList(),
+      );
     }
 
     final pullEngine = PullEngine(

@@ -303,4 +303,127 @@ void main() {
       await expectLater(svc.listFullDocs('Customer'), throwsA(isException));
     });
   });
+
+  group('listFullDocsPage', () {
+    /// Serves [names] from `get_list` and [docs] from the bulk endpoint.
+    DoctypeService svcWith({
+      required List<String> names,
+      required List<Map<String, dynamic>> docs,
+    }) => _svc(
+      MockClient((req) async {
+        if (req.url.path.contains('get_list')) {
+          return _json({
+            'message': [
+              for (final n in names) {'name': n},
+            ],
+          });
+        }
+        if (req.url.path.contains('get_docs_with_children')) {
+          return _json({'message': docs});
+        }
+        return _json({});
+      }),
+    );
+
+    test('emits docs in the requested names order, not arrival order', () async {
+      // `bulkGetWithChildren` is a `names in (...)` fetch and nothing in the
+      // request obliges the server to honour the caller's `order_by`. The pull
+      // watermark is derived from the page's rows, so returning them in
+      // arrival order silently violated the `modified asc, name asc` contract.
+      final svc = svcWith(
+        names: ['CUST-1', 'CUST-2', 'CUST-3'],
+        docs: const [
+          {'name': 'CUST-3', 'modified': '2026-01-03 00:00:00'},
+          {'name': 'CUST-1', 'modified': '2026-01-01 00:00:00'},
+          {'name': 'CUST-2', 'modified': '2026-01-02 00:00:00'},
+        ],
+      );
+      final page = await svc.listFullDocsPage(
+        'Customer',
+        orderBy: 'modified asc',
+      );
+      expect(page.docs.map((d) => d['name']).toList(), [
+        'CUST-1',
+        'CUST-2',
+        'CUST-3',
+      ]);
+      expect(page.namesScanned, 3);
+    });
+
+    test('reports namesScanned when the permission gate drops names', () async {
+      // bulkGetWithChildren applies doc.check_permission("read"), which brings
+      // in document-level has_permission hooks that get_list never evaluates —
+      // so fewer docs than names is normal, not an error.
+      final svc = svcWith(
+        names: ['CUST-1', 'CUST-2', 'CUST-3'],
+        docs: const [
+          {'name': 'CUST-2', 'modified': '2026-01-02 00:00:00'},
+        ],
+      );
+      final page = await svc.listFullDocsPage('Customer');
+      expect(page.docs, hasLength(1));
+      expect(
+        page.namesScanned,
+        3,
+        reason:
+            'the caller must be able to advance its offset by names '
+            'consumed, not by docs returned',
+      );
+    });
+
+    test(
+      'a fully-filtered page reports zero docs but non-zero namesScanned',
+      () async {
+        // This is the H3 case: indistinguishable from end-of-stream without
+        // namesScanned, which made the pull mark the doctype fully drained and
+        // never fetch any later page.
+        final svc = svcWith(names: ['CUST-1', 'CUST-2'], docs: const []);
+        final page = await svc.listFullDocsPage('Customer');
+        expect(page.docs, isEmpty);
+        expect(page.namesScanned, 2);
+      },
+    );
+
+    test('a genuinely exhausted page reports namesScanned == 0', () async {
+      final svc = svcWith(names: const [], docs: const []);
+      final page = await svc.listFullDocsPage('Customer');
+      expect(page.docs, isEmpty);
+      expect(page.namesScanned, 0);
+    });
+
+    test(
+      'a doc the server returns but that was never requested is dropped',
+      () async {
+        final svc = svcWith(
+          names: ['CUST-1'],
+          docs: const [
+            {'name': 'CUST-1'},
+            {'name': 'CUST-99'},
+          ],
+        );
+        final page = await svc.listFullDocsPage('Customer');
+        expect(page.docs.map((d) => d['name']).toList(), ['CUST-1']);
+      },
+    );
+
+    test(
+      'listFullDocs delegates and preserves its List return contract',
+      () async {
+        final svc = svcWith(
+          names: ['CUST-2', 'CUST-1'],
+          docs: const [
+            {'name': 'CUST-1'},
+            {'name': 'CUST-2'},
+          ],
+        );
+        final out = await svc.listFullDocs('Customer');
+        expect(out, isA<List<Map<String, dynamic>>>());
+        expect(
+          out.map((d) => d['name']).toList(),
+          ['CUST-2', 'CUST-1'],
+          reason: 'names order, which here is deliberately not sorted order',
+        );
+      },
+    );
+  });
 }

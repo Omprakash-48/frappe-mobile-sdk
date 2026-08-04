@@ -17,6 +17,14 @@ import 'package:frappe_mobile_sdk/src/models/dep_graph.dart';
 import 'package:frappe_mobile_sdk/src/models/outbox_row.dart';
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 
+/// Adapts a plain-rows fake to the [ListHttpFn] page shape. `namesScanned` is
+/// left null, matching the flat `get_list` path where every listed row is
+/// returned.
+ListHttpFn rowsFake(
+  Future<List<Map<String, dynamic>>> Function(String, Map<String, Object?>) fn,
+) =>
+    (d, p) async => ListHttpPage(await fn(d, p));
+
 DocField f(String n, String t, {String? options}) =>
     DocField(fieldname: n, fieldtype: t, label: n, options: options);
 
@@ -71,7 +79,7 @@ void main() {
   test('pulls one doctype, one page, advances cursor on success', () async {
     var calls = 0;
     final fetcher = PullPageFetcher(
-      listHttp: (doctype, params) async {
+      listHttp: rowsFake((doctype, params) async {
         calls++;
         return calls == 1
             ? [
@@ -82,7 +90,7 @@ void main() {
                 },
               ]
             : const <Map<String, dynamic>>[];
-      },
+      }),
     );
     final closure = const ClosureResult(
       doctypes: ['Customer'],
@@ -133,9 +141,9 @@ void main() {
       operation: OutboxOperation.insert,
     );
     final fetcher = PullPageFetcher(
-      listHttp: (doctype, params) async {
+      listHttp: rowsFake((doctype, params) async {
         fail('fetcher should not be called for a deferred doctype');
-      },
+      }),
     );
     final closure = const ClosureResult(
       doctypes: ['Customer'],
@@ -170,7 +178,7 @@ void main() {
 
   test('PullEngine.run returns empty set when nothing was deferred', () async {
     final fetcher = PullPageFetcher(
-      listHttp: (doctype, params) async => const [],
+      listHttp: rowsFake((doctype, params) async => const []),
     );
     final closure = const ClosureResult(
       doctypes: ['Customer'],
@@ -215,10 +223,10 @@ void main() {
     );
     var called = false;
     final fetcher = PullPageFetcher(
-      listHttp: (doctype, params) async {
+      listHttp: rowsFake((doctype, params) async {
         called = true;
         return const [];
-      },
+      }),
     );
     final engine = PullEngine(
       db: db,
@@ -240,7 +248,7 @@ void main() {
     () async {
       var page = 0;
       final fetcher = PullPageFetcher(
-        listHttp: (doctype, params) async {
+        listHttp: rowsFake((doctype, params) async {
           page++;
           if (page == 1) {
             return [
@@ -248,7 +256,7 @@ void main() {
             ];
           }
           throw Exception('network');
-        },
+        }),
       );
       final closure = const ClosureResult(
         doctypes: ['Customer'],
@@ -310,7 +318,7 @@ void main() {
 
     final perDoctypeCalls = <String, int>{};
     final fetcher = PullPageFetcher(
-      listHttp: (doctype, params) async {
+      listHttp: rowsFake((doctype, params) async {
         perDoctypeCalls[doctype] = (perDoctypeCalls[doctype] ?? 0) + 1;
         // Spec §5.1: server returns rows then an empty page; the engine's
         // exit condition is the empty page.
@@ -326,7 +334,7 @@ void main() {
           }
         }
         return const <Map<String, dynamic>>[];
-      },
+      }),
     );
     final closure = const ClosureResult(
       doctypes: ['Customer', 'Lead'],
@@ -371,7 +379,7 @@ void main() {
       // skip the bad doctype and still pull the rest.
       var custCalls = 0;
       final fetcher = PullPageFetcher(
-        listHttp: (doctype, params) async {
+        listHttp: rowsFake((doctype, params) async {
           if (doctype == 'Customer') {
             custCalls++;
             return custCalls == 1
@@ -385,7 +393,7 @@ void main() {
                 : const <Map<String, dynamic>>[];
           }
           return const <Map<String, dynamic>>[];
-        },
+        }),
       );
       final closure = const ClosureResult(
         doctypes: ['Machinery Flow', 'Customer'],
@@ -450,7 +458,7 @@ void main() {
   test('WriteQueue is engaged when writeQueueResolver is provided', () async {
     var calls = 0;
     final fetcher = PullPageFetcher(
-      listHttp: (doctype, params) async {
+      listHttp: rowsFake((doctype, params) async {
         calls++;
         if (calls <= 2) {
           return [
@@ -462,7 +470,7 @@ void main() {
           ];
         }
         return const <Map<String, dynamic>>[];
-      },
+      }),
     );
     final closure = const ClosureResult(
       doctypes: ['Customer'],
@@ -555,7 +563,7 @@ void main() {
 
       var calls = 0;
       final fetcher = PullPageFetcher(
-        listHttp: (doctype, params) async {
+        listHttp: rowsFake((doctype, params) async {
           calls++;
           if (calls == 1) {
             return [
@@ -570,7 +578,7 @@ void main() {
             ];
           }
           return const <Map<String, dynamic>>[];
-        },
+        }),
       );
       final closure = const ClosureResult(
         doctypes: ['Order', 'Order Item'],
@@ -639,7 +647,7 @@ void main() {
       });
       var orderCalls = 0;
       final fetcher = PullPageFetcher(
-        listHttp: (doctype, params) async {
+        listHttp: rowsFake((doctype, params) async {
           if (doctype == 'Order') {
             orderCalls++;
             return orderCalls == 1
@@ -649,7 +657,7 @@ void main() {
                 : const <Map<String, dynamic>>[];
           }
           return const <Map<String, dynamic>>[];
-        },
+        }),
       );
       const closure = ClosureResult(
         doctypes: ['Order', 'Order Item'],
@@ -715,7 +723,7 @@ void main() {
       );
       var calls = 0;
       final fetcher = PullPageFetcher(
-        listHttp: (doctype, params) async {
+        listHttp: rowsFake((doctype, params) async {
           calls++;
           return calls == 1
               ? [
@@ -726,7 +734,7 @@ void main() {
                   },
                 ]
               : const <Map<String, dynamic>>[];
-        },
+        }),
       );
       final closure = const ClosureResult(
         doctypes: ['Customer'],
@@ -766,10 +774,10 @@ void main() {
     () async {
       final fetched = <String>[];
       final fetcher = PullPageFetcher(
-        listHttp: (doctype, params) async {
+        listHttp: rowsFake((doctype, params) async {
           fetched.add(doctype);
           return const <Map<String, dynamic>>[];
-        },
+        }),
       );
       const closure = ClosureResult(
         doctypes: ['Customer', 'Order'],
@@ -828,7 +836,7 @@ void main() {
       );
       var calls = 0;
       final fetcher = PullPageFetcher(
-        listHttp: (doctype, params) async {
+        listHttp: rowsFake((doctype, params) async {
           calls++;
           // Return the same 3 rows on every call — cursor never advances.
           // The stall guard must break the loop after the second fetch.
@@ -849,7 +857,7 @@ void main() {
               'customer_name': 'Gamma',
             },
           ];
-        },
+        }),
       );
       final closure = const ClosureResult(
         doctypes: ['Customer'],
@@ -892,6 +900,141 @@ void main() {
     },
   );
 
+  group('permission-filtered pages must not end the drain', () {
+    const closure = ClosureResult(
+      doctypes: ['Customer'],
+      graph: {
+        'Customer': DepGraph(
+          doctype: 'Customer',
+          tier: 0,
+          outgoing: [],
+          incoming: [],
+        ),
+      },
+      childDoctypes: {},
+      warnings: [],
+    );
+
+    PullEngine engineWith(PullPageFetcher fetcher) => PullEngine(
+      db: db,
+      metaDao: metaDao,
+      outboxDao: OutboxDao(db),
+      pool: ConcurrencyPool(maxConcurrent: 1),
+      fetcher: fetcher,
+      pageSize: 2,
+      notifier: SyncStateNotifier(),
+      metaResolver: (dt) async =>
+          DocTypeMeta(name: dt, fields: [f('customer_name', 'Data')]),
+    );
+
+    test('initial drain skips a fully-filtered page and keeps going', () async {
+      // The listFullDocs path resolves names through a per-doc permission gate
+      // that silently drops denied/missing names. A page whose names are ALL
+      // dropped returns zero docs — previously indistinguishable from
+      // end-of-stream, so the engine stopped here and marked the doctype fully
+      // drained. Every later page was then never fetched, and because the
+      // doctype flipped to incremental it would never re-drain: silent,
+      // permanent data loss.
+      var calls = 0;
+      final fetcher = PullPageFetcher(
+        listHttp: (doctype, params) async {
+          calls++;
+          switch (calls) {
+            case 1:
+              return const ListHttpPage([
+                {
+                  'name': 'C-1',
+                  'modified': '2026-01-01 00:00:00',
+                  'customer_name': 'Alpha',
+                },
+                {
+                  'name': 'C-2',
+                  'modified': '2026-01-02 00:00:00',
+                  'customer_name': 'Beta',
+                },
+              ], namesScanned: 2);
+            case 2:
+              // Whole page filtered out.
+              return const ListHttpPage([], namesScanned: 2);
+            case 3:
+              return const ListHttpPage([
+                {
+                  'name': 'C-5',
+                  'modified': '2026-01-05 00:00:00',
+                  'customer_name': 'Epsilon',
+                },
+              ], namesScanned: 1);
+            default:
+              return const ListHttpPage([], namesScanned: 0);
+          }
+        },
+      );
+      await engineWith(fetcher).run(closure);
+
+      expect(
+        calls,
+        4,
+        reason: 'the filtered page must be skipped, not treated as the end',
+      );
+      final names = (await db.query(
+        'docs__customer',
+        orderBy: 'server_name',
+      )).map((r) => r['server_name']).toList();
+      expect(names, [
+        'C-1',
+        'C-2',
+        'C-5',
+      ], reason: 'the row behind the filtered page must still be pulled');
+    });
+
+    test(
+      'the skipped page advances limit_start by names scanned, not docs returned',
+      () async {
+        final starts = <int?>[];
+        var calls = 0;
+        final fetcher = PullPageFetcher(
+          listHttp: (doctype, params) async {
+            starts.add(params['limit_start'] as int?);
+            calls++;
+            if (calls == 1) return const ListHttpPage([], namesScanned: 2);
+            return const ListHttpPage([], namesScanned: 0);
+          },
+        );
+        await engineWith(fetcher).run(closure);
+        expect(starts, [0, 2]);
+      },
+    );
+
+    test(
+      'incremental mode still stops on a filtered page (limit_start is pinned '
+      'at 0, so skipping forward is impossible)',
+      () async {
+        await metaDao.setLastOkCursor(
+          'Customer',
+          '{"modified":"2026-01-01 00:00:00","name":"C-1","complete":true}',
+        );
+        var calls = 0;
+        final fetcher = PullPageFetcher(
+          listHttp: (doctype, params) async {
+            calls++;
+            return const ListHttpPage([], namesScanned: 2);
+          },
+        );
+        await engineWith(fetcher).run(closure);
+        expect(
+          calls,
+          1,
+          reason: 'continuing here would re-request the same page forever',
+        );
+        // The watermark is left where it was, so the page retries next cycle.
+        final parsed =
+            jsonDecode((await metaDao.getLastOkCursor('Customer'))!)
+                as Map<String, dynamic>;
+        expect(parsed['modified'], '2026-01-01 00:00:00');
+      },
+    );
+  });
+
   test(
     'falls back to normalized table name when doctype_meta has no table_name',
     () async {
@@ -905,7 +1048,7 @@ void main() {
       );
       var calls = 0;
       final fetcher = PullPageFetcher(
-        listHttp: (doctype, params) async {
+        listHttp: rowsFake((doctype, params) async {
           calls++;
           return calls == 1
               ? [
@@ -916,7 +1059,7 @@ void main() {
                   },
                 ]
               : const <Map<String, dynamic>>[];
-        },
+        }),
       );
       final closure = const ClosureResult(
         doctypes: ['Customer'],
@@ -988,11 +1131,11 @@ void main() {
       var run1Calls = 0;
       await engineWith(
         PullPageFetcher(
-          listHttp: (doctype, params) async {
+          listHttp: rowsFake((doctype, params) async {
             run1Calls++;
             if (run1Calls >= 2) throw Exception('crash');
             return pageAt(params['limit_start'] as int);
-          },
+          }),
         ),
       ).run(closure);
 
@@ -1006,11 +1149,11 @@ void main() {
       final observedStarts = <int>[];
       await engineWith(
         PullPageFetcher(
-          listHttp: (doctype, params) async {
+          listHttp: rowsFake((doctype, params) async {
             final start = params['limit_start'] as int;
             observedStarts.add(start);
             return pageAt(start);
-          },
+          }),
         ),
       ).run(closure);
 
