@@ -225,6 +225,24 @@ class AppDatabase {
   /// Every column is nullable `TEXT` with no default: the server is their only
   /// writer, and SQLite rejects `ADD COLUMN ... NOT NULL` without a default.
   /// Wrapped in [_safeAddColumn] so an interrupted upgrade can re-run.
+  ///
+  /// Adding the columns is necessary but NOT sufficient, which is why this also
+  /// clears every pull cursor. The new columns start NULL on existing rows, and
+  /// once a doctype is `complete` all later pulls are incremental
+  /// (`modified >= cursor.modified`) — so an upgraded install would only ever
+  /// receive audit values for rows whose `modified` advances server-side, and
+  /// every pre-existing row would keep NULL indefinitely. Since equality
+  /// comparisons go through `IFNULL(<col>, '')`, `owner = <me>` would then match
+  /// none of them. The failure mode is a SILENTLY PARTIAL result — recently
+  /// touched rows appear, the rest do not — which is materially harder to
+  /// notice than the `no such column` throw this migration replaced.
+  ///
+  /// Nulling `last_ok_cursor` makes the next sync re-drain each doctype and
+  /// backfill the values. It is one statement, atomic with the ALTERs, and
+  /// costs one full re-pull once per upgraded install. `forceFullRepull` on
+  /// [FrappeSDK] is the host-callable equivalent for later re-drains —
+  /// `forcePullAll` is NOT, because it excludes entry-point doctypes, which are
+  /// exactly the mobile-form doctypes where `owner = <me>` is the point.
   static Future<void> _migrateV5ToV6(Database db) async {
     await db.transaction((txn) async {
       final tables = await txn.rawQuery(
@@ -245,6 +263,16 @@ class AppDatabase {
             'ALTER TABLE "$name" ADD COLUMN "$col" TEXT',
           );
         }
+      }
+
+      // `last_ok_cursor` is added by `doctypeMetaExtensionsDDL()` on the v2→v3
+      // leg, which `_onUpgrade` always runs before this one, so it is present on
+      // any DB reaching v6. Checked anyway: an unexpected throw here would roll
+      // back the ALTERs above and leave the schema unmigrated.
+      final metaCols = await txn.rawQuery('PRAGMA table_info(doctype_meta)');
+      final hasCursor = metaCols.any((r) => r['name'] == 'last_ok_cursor');
+      if (hasCursor) {
+        await txn.rawUpdate('UPDATE doctype_meta SET last_ok_cursor = NULL');
       }
 
       await txn.rawUpdate(
