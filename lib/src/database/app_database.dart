@@ -255,7 +255,15 @@ class AppDatabase {
         final cols = info.map((r) => r['name'] as String?).toSet();
         // Parent-only marker — see `systemChildColumnNames`, which has no
         // `sync_*` columns because children inherit the parent's state.
+        //
+        // Requiring `parent_uuid` to be ABSENT is not redundant: `sync_status`
+        // is not in `systemChildColumnNames`, and `child_schema.dart` emits
+        // every mappable DocField as a column, so a child doctype declaring a
+        // field literally named `sync_status` would otherwise be treated as a
+        // parent and have the audit columns ALTERed onto it — the exact
+        // child/fresh-install drift this check exists to prevent.
         if (!cols.contains('sync_status')) continue;
+        if (cols.contains('parent_uuid')) continue;
         for (final col in serverAuditColumnNames) {
           if (cols.contains(col)) continue;
           await _safeAddColumn(
