@@ -271,6 +271,16 @@ class AppDatabase {
             'ALTER TABLE "$name" ADD COLUMN "$col" TEXT',
           );
         }
+        // Match `buildParentSchemaDDL` so an upgraded install gets the same
+        // `owner` index a fresh one does — otherwise `owner = <me>` stays a full
+        // scan on exactly the installs that already hold the most rows.
+        // `IF NOT EXISTS` keeps the re-run safe.
+        final suffix = name.startsWith('docs__')
+            ? name.substring('docs__'.length)
+            : name;
+        await txn.execute(
+          'CREATE INDEX IF NOT EXISTS "ix_${suffix}_owner" ON "$name"(owner)',
+        );
       }
 
       // `last_ok_cursor` is added by `doctypeMetaExtensionsDDL()` on the v2→v3

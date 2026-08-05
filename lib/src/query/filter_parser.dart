@@ -1,5 +1,6 @@
 import '../database/field_type_mapping.dart';
 import '../database/normalize_for_search.dart';
+import '../database/schema/system_columns.dart';
 import '../models/doc_type_meta.dart';
 import 'filter_errors.dart';
 import 'frappe_timespan.dart';
@@ -219,6 +220,28 @@ class FilterParser {
 
     switch (op) {
       case '=':
+        // Server-owned audit columns get the BARE form so SQLite can use an
+        // index on them. `IFNULL(owner, '') = ?` is non-sargable, and
+        // `owner = <current user>` is the single most likely production filter
+        // on a large mirror table — with the wrapper it was a guaranteed full
+        // scan on the main isolate.
+        //
+        // Observably equivalent for every realistic query: a NULL column is
+        // excluded either way (`NULL = 'alice'` yields NULL, which is not true,
+        // exactly as `'' = 'alice'` is false). The only divergence is an
+        // explicit `= ''`, and Frappe never stores an empty string in `owner` /
+        // `creation` / `modified_by` — it stores NULL or a real value.
+        //
+        // Deliberately NOT applied to `!=`: there `IFNULL` is the more useful
+        // semantic (a NULL owner IS "not alice"), and dropping it would start
+        // excluding rows the current form includes.
+        if (serverAuditColumnNames.contains(col)) {
+          return ParsedQuery(sql: '$col = ?', params: [value]);
+        }
+        return ParsedQuery(
+          sql: '${_ifnullExpr(col, isNumeric)} = ?',
+          params: [value],
+        );
       case '!=':
         return ParsedQuery(
           sql: '${_ifnullExpr(col, isNumeric)} $op ?',
