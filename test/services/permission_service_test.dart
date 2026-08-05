@@ -266,7 +266,7 @@ void main() {
   );
 
   group('cache-miss reporting', () {
-    test('a miss still allows, and is reported once per check', () async {
+    test('a miss still allows, and is reported ONCE per doctype', () async {
       final db = await AppDatabase.inMemoryDatabase();
       final missed = <String>[];
       final svc = PermissionService(
@@ -275,11 +275,56 @@ void main() {
         onCacheMiss: missed.add,
       );
 
-      // Behaviour is unchanged — the default is still allow.
+      // Behaviour is unchanged — the default is still allow, on every call.
       expect(await svc.canWrite('Never Synced'), isTrue);
       expect(await svc.canCreate('Never Synced'), isTrue);
+      expect(await svc.canRead('Never Synced'), isTrue);
 
-      // ...but the UI is gating on an assumption, and now we can see it.
+      // ...but the report is deduped. canRead/canWrite/canCreate/canDelete/
+      // canSubmit each resolve independently and are called on list and form
+      // BUILD paths, so the previous one-report-per-call behaviour emitted five
+      // identical lines per gating build and drowned the signal it exists to
+      // provide. Allow-vs-deny is unaffected; only reporting is suppressed.
+      expect(missed, ['Never Synced']);
+      await db.close();
+    });
+
+    test('a second doctype is still reported', () async {
+      final db = await AppDatabase.inMemoryDatabase();
+      final missed = <String>[];
+      final svc = PermissionService(
+        FrappeClient('http://localhost'),
+        db,
+        onCacheMiss: missed.add,
+      );
+
+      expect(await svc.canWrite('Alpha'), isTrue);
+      expect(await svc.canWrite('Beta'), isTrue);
+      expect(await svc.canWrite('Alpha'), isTrue);
+
+      expect(missed, ['Alpha', 'Beta']);
+      await db.close();
+    });
+
+    test('a cache write re-arms reporting for a still-missing doctype', () async {
+      final db = await AppDatabase.inMemoryDatabase();
+      final missed = <String>[];
+      final svc = PermissionService(
+        FrappeClient('http://localhost'),
+        db,
+        onCacheMiss: missed.add,
+      );
+
+      expect(await svc.canWrite('Never Synced'), isTrue);
+      expect(missed, ['Never Synced']);
+
+      // Rows arrived, but not for this doctype — so it is genuinely still
+      // missing and worth surfacing again rather than staying silent for the
+      // rest of the process.
+      await svc.saveFromLoginResponse([
+        {'doctype': 'Customer', 'read': true},
+      ]);
+      expect(await svc.canWrite('Never Synced'), isTrue);
       expect(missed, ['Never Synced', 'Never Synced']);
       await db.close();
     });

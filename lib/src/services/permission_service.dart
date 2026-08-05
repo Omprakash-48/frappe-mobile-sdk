@@ -20,6 +20,16 @@ class PermissionService {
 
   final void Function(String doctype)? _onCacheMiss;
 
+  /// Doctypes already reported through [_onCacheMiss] / the log this session.
+  ///
+  /// `canRead`/`canCreate`/… are called on list and form BUILD paths, and each
+  /// of the five gates resolves independently — so a single unsynced doctype
+  /// emitted five identical log lines and five callbacks per gating build, which
+  /// made the signal unusable as the measurement tool it is meant to be.
+  /// Deduped per doctype per process; cleared whenever the cache is replaced so
+  /// a doctype that goes missing again is reported once more.
+  final Set<String> _reportedCacheMisses = <String>{};
+
   /// Save permissions from login response.
   /// [permissions] can be:
   /// - List: [ { "doctype": "X", "read": true, "write": false, ... }, ... ]
@@ -30,6 +40,9 @@ class PermissionService {
       // Login payloads may be a SUBSET (e.g. an SSO endpoint returning only
       // role-matched doctypes), so upsert — never wipe the fuller cached set.
       await _database.doctypePermissionDao.upsertAll(entities);
+      // Rows just arrived: allow a doctype that is STILL missing to be
+      // reported once more rather than staying silent for the process.
+      _reportedCacheMisses.clear();
     }
   }
 
@@ -49,10 +62,20 @@ class PermissionService {
     if (result is! Map<String, dynamic>) return null;
     final data = result['data'] as Map<String, dynamic>? ?? result;
     // Authoritative full set → full-replace so doctypes revoked server-side are
-    // pruned. `replaceAll` no-ops on empty, so a transient server error (which
-    // returns an empty permissions list) can never wipe a good cache.
+    // pruned. `replaceAll` no-ops on empty, and that guard is LOAD-BEARING
+    // rather than merely defensive: the server's `get_user_permissions` wraps
+    // its whole body in `try/except Exception` and returns
+    // `{"roles": [], "permissions": []}` on ANY failure, so an empty payload is
+    // ambiguous at the source — the server itself cannot distinguish "this user
+    // has no permissions" from "something broke". Without the guard a transient
+    // server-side error would wipe a good cache.
+    //
+    // Accepted consequence: a user whose permissions are genuinely revoked to
+    // zero keeps their cached grants. Low impact because the server enforces the
+    // real permission on every request; the client cache only drives UI gating.
     final entities = _parsePermissions(data['permissions']);
     await _database.doctypePermissionDao.replaceAll(entities);
+    if (entities.isNotEmpty) _reportedCacheMisses.clear();
     return data;
   }
 
@@ -110,11 +133,15 @@ class PermissionService {
   ) async {
     final p = await getDoctypePermission(doctype);
     if (p == null) {
-      _onCacheMiss?.call(doctype);
-      sdkLog(
-        'PermissionService: no synced permission row for "$doctype" '
-        '- defaulting to allow',
-      );
+      // Deduped: see [_reportedCacheMisses]. The default-allow below is
+      // unconditional — only the REPORTING is suppressed after the first hit.
+      if (_reportedCacheMisses.add(doctype)) {
+        _onCacheMiss?.call(doctype);
+        sdkLog(
+          'PermissionService: no synced permission row for "$doctype" '
+          '- defaulting to allow',
+        );
+      }
       return true;
     }
     return pick(p);
