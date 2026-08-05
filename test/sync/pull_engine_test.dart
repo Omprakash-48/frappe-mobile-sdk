@@ -1,7 +1,9 @@
 import 'dart:convert';
 
 import 'package:flutter_test/flutter_test.dart';
+import 'package:frappe_mobile_sdk/src/api/exceptions.dart';
 import 'package:frappe_mobile_sdk/src/sync/pull_engine.dart';
+import 'package:frappe_mobile_sdk/src/sync/sync_state.dart';
 import 'package:frappe_mobile_sdk/src/sync/sync_state_notifier.dart';
 import 'package:frappe_mobile_sdk/src/sync/pull_page_fetcher.dart';
 import 'package:frappe_mobile_sdk/src/concurrency/concurrency_pool.dart';
@@ -1033,6 +1035,68 @@ void main() {
         expect(parsed['modified'], '2026-01-01 00:00:00');
       },
     );
+  });
+
+  group('a server refusal is deferred, not a permanent failure', () {
+    const closure = ClosureResult(
+      doctypes: ['Customer'],
+      graph: {
+        'Customer': DepGraph(
+          doctype: 'Customer',
+          tier: 0,
+          outgoing: [],
+          incoming: [],
+        ),
+      },
+      childDoctypes: {},
+      warnings: [],
+    );
+
+    Future<DoctypeSyncState?> runWith(Object error) async {
+      final notifier = SyncStateNotifier();
+      final engine = PullEngine(
+        db: db,
+        metaDao: metaDao,
+        outboxDao: OutboxDao(db),
+        pool: ConcurrencyPool(maxConcurrent: 1),
+        fetcher: PullPageFetcher(listHttp: (_, _) async => throw error),
+        pageSize: 10,
+        notifier: notifier,
+        metaResolver: (dt) async =>
+            DocTypeMeta(name: dt, fields: [f('customer_name', 'Data')]),
+      );
+      await engine.run(closure);
+      return notifier.value.perDoctype['Customer'];
+    }
+
+    test('403 is reported as deferred', () async {
+      // The closure pull is intentionally no longer gated on client-side
+      // canRead, so a genuinely forbidden doctype is requested every cycle and
+      // refused every time. That is a steady state, not a fault — a host
+      // rendering per-doctype state must not show a permanent red "failed".
+      final st = await runWith(AuthException('not permitted', 403));
+      expect(st, isNotNull);
+      expect(st!.deferred, isTrue);
+      expect(st.note, contains('403'));
+    });
+
+    test('a 403 delivered as ApiException (non-JSON body) is also deferred',
+        () async {
+      final st = await runWith(ApiException('<h1>403</h1>', 403));
+      expect(st!.deferred, isTrue);
+    });
+
+    test('a real fault is still reported as failed', () async {
+      for (final e in <Object>[
+        ApiException('boom', 500),
+        NetworkException('No internet connection'),
+        Exception('schema mismatch'),
+      ]) {
+        final st = await runWith(e);
+        expect(st!.deferred, isFalse, reason: '$e must not be deferred');
+        expect(st.note, contains('failed'));
+      }
+    });
   });
 
   test(

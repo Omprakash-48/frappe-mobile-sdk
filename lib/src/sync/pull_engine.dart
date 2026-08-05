@@ -2,6 +2,7 @@ import 'dart:convert';
 
 import 'package:sqflite/sqflite.dart';
 
+import '../api/exceptions.dart';
 import '../concurrency/concurrency_pool.dart';
 import '../utils/sdk_log.dart';
 import '../concurrency/write_queue.dart';
@@ -379,13 +380,25 @@ class PullEngine {
       // current progress so the UI can show partial counts; full retry
       // happens on next pull cycle.
       sdkLog('PullEngine.pull($doctype) failed mid-pull — $e\n$st');
+      // A 403 is the server declining to read this doctype at all, which is an
+      // EXPECTED steady state rather than a fault: the closure pull is no longer
+      // gated on client-side `canRead` (reference masters can carry can_read=0
+      // yet still be required for link pickers), so a genuinely forbidden
+      // doctype is now requested on every cycle and refused every time. Reported
+      // as `deferred` so a host rendering per-doctype state does not show a
+      // permanent red "failed" for something working as designed. Real faults
+      // (5xx, transport, schema) keep the plain failed shape.
+      final refused = e is FrappeException && e.statusCode == 403;
       notifier.value = notifier.value.updatePerDoctype(
         doctype,
         DoctypeSyncState(
           pulledCount: pulledCount,
           lastPageSize: lastPageSize,
           startedAt: startedAt,
-          note: 'failed: $e',
+          deferred: refused,
+          note: refused
+              ? 'deferred: server refused read (403) for this doctype'
+              : 'failed: $e',
         ),
       );
     }
