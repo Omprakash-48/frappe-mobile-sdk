@@ -100,6 +100,26 @@ class LocalWriter {
   /// `.999999` or making the upper bound exclusive — a behaviour change, so it
   /// is deliberately not done here.
   ///
+  /// KNOWN DISCREPANCY — TIMEZONE BASIS. Callers pass `DateTime.now().toUtc()`,
+  /// so a locally-predicted `creation` is in **UTC**. Frappe's `now()` returns
+  /// the **site timezone**, and that is what lands in `creation` on pull and on
+  /// push writeback. On an IST site (+5:30) a document created offline at 02:00
+  /// is stamped `…T20:30` the previous day until the server's value replaces it,
+  /// so the row can visibly move between days on sync and a `timespan: "today"`
+  /// filter can exclude it before and include it after.
+  ///
+  /// Not corrected here because the fix needs the site's offset and the server
+  /// does not expose one: `frappe-mobile-control` returns no `time_zone` in any
+  /// login, permissions, or config payload, so there is nothing to carry. Doing
+  /// it properly requires a server change first.
+  ///
+  /// What IS guaranteed meanwhile is internal consistency: `FrappeTimespan`
+  /// (`_defaultNow`, `_startOfDay`, `_endOfDay`) uses the same UTC basis, so the
+  /// two SDK-local formatters always agree with each other. Both differ from
+  /// server-supplied values in the same column by the site's offset. A host on a
+  /// non-UTC site that needs exact parity should treat locally-created rows as
+  /// provisional until their first writeback.
+  ///
   /// Same shape as `FrappeTimespan._iso`. NOTE: that helper builds bounds for
   /// LOCAL SQLite comparison only — `FilterParser` is pure and does no I/O —
   /// so neither formatter is ever sent to Frappe.
