@@ -759,6 +759,19 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
   /// for them; editable fields keep `_formData` (so user edits/clears still win,
   /// and immutable callers are unaffected since `_formData` is seeded from
   /// `initialData` at init).
+  /// Per-build memo for the merged legacy overlay. Reset at the top of every
+  /// [build] (see [_resetEvalDataCache]).
+  ///
+  /// Only the merge path is memoised, and only that path allocates: reactive
+  /// mode returns `_controller!.values` and legacy mode returns `_formData`,
+  /// both by reference. The copy fires solely in legacy mode with non-empty
+  /// `initialData` AND at least one read-only field — where a form carrying
+  /// several `depends_on` / `mandatory_depends_on` / `read_only_depends_on`
+  /// expressions rebuilt the whole map once per expression per build.
+  Map<String, dynamic>? _evalDataMemo;
+
+  void _resetEvalDataCache() => _evalDataMemo = null;
+
   Map<String, dynamic> get _evalData {
     if (widget.mode == FormBuilderMode.reactive && _controller != null) {
       return _controller!.values;
@@ -766,11 +779,13 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
     final init = widget.initialData;
     final ro = _readOnlyFieldNames;
     if (init == null || init.isEmpty || ro.isEmpty) return _formData;
+    final memo = _evalDataMemo;
+    if (memo != null) return memo;
     final merged = Map<String, dynamic>.from(_formData);
     for (final n in ro) {
       if (init.containsKey(n)) merged[n] = init[n];
     }
-    return merged;
+    return _evalDataMemo = merged;
   }
 
   DocTypeMeta? _readOnlyNamesMeta;
@@ -2124,6 +2139,12 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
 
   @override
   Widget build(BuildContext context) {
+    // Drop the per-build eval-data memo. Safe as a build-scoped cache because
+    // every reader (`_shouldShowField` / `_isFieldRequired` /
+    // `_isFieldReadOnly`, via `_hasAnyVisibleField`, `_buildFieldWidget` and
+    // `_buildSectionContent`) runs inside this build; `_formData` mutations all
+    // go through setState, which lands here again before anything re-reads it.
+    _resetEvalDataCache();
     if (_tabs.isEmpty) {
       return const Center(child: Text('No fields to display'));
     }
