@@ -653,16 +653,21 @@ class JsInterpreter {
     if (obj == null || obj is JsUndefined) {
       throw JsEvalException('cannot read "$key" of ${obj ?? 'null'}', _src);
     }
+    // Own properties win over the `length` special case below. `doc` is a Map,
+    // and dimension fields named `length` / `width` / `height` are routine, so
+    // resolving `doc.length` to the array-length rule would read _undefined and
+    // hide the field forever. A plain JS object has no `length` either, so
+    // Map-first is also the more faithful reading.
+    if (obj is Map) {
+      // Absent key is `undefined`, mirroring JS — not an error.
+      return obj.containsKey(key) ? obj[key] : _undefined;
+    }
     if (key == 'length') {
       if (obj is List) return obj.length;
       if (obj is String) return obj.length;
       // JS: `(1).length` is undefined, not an error. Throwing here would send
       // `doc.x && doc.x.length` into the "show it" default instead of falsy.
       return _undefined;
-    }
-    if (obj is Map) {
-      // Absent key is `undefined`, mirroring JS — not an error.
-      return obj.containsKey(key) ? obj[key] : _undefined;
     }
     if (obj is List) {
       final idx = int.tryParse(key);
@@ -690,12 +695,10 @@ class JsInterpreter {
         return list.any((e) => _membershipEquals(e, argv[1]));
       case 'cint':
         if (argv.isEmpty) return 0;
-        final n = _toNumber(argv[0]);
-        return n.isNaN ? 0 : n.truncate();
+        return _frappeCint(argv[0]);
       case 'flt':
         if (argv.isEmpty) return 0.0;
-        final n = _toNumber(argv[0]);
-        return n.isNaN ? 0.0 : n.toDouble();
+        return _frappeFlt(argv[0]);
       case 'cstr':
         if (argv.isEmpty) return '';
         final v = argv[0];
@@ -933,6 +936,19 @@ class JsInterpreter {
     if (a is num && b is num) return a == b;
     if (a is String && b is String) return a == b;
     if (a is bool && b is bool) return a == b;
+    // Departure #4: bridge bool <-> 0/1. Frappe stores a Check as int 0/1 and
+    // `FieldNormalizer` turns it into a Dart bool, so the SAME field reads 1
+    // from initialData and `true` after the user toggles it. Desk holds 1 the
+    // whole time and says `doc.flag === 1` is true; strict JS would say true on
+    // load and false after the toggle — a field that vanishes mid-session.
+    // Verified in node: with flag=1, `doc.flag === 1` is true and
+    // `doc.flag === true` is false; with flag=true the answers swap. Bridging
+    // costs us the `=== true` direction, which the real corpus never uses
+    // (grep over this workspace's DocType JSON: `=== 1`/`=== 0` appears once,
+    // `=== true`/`=== false` never), and buys the direction Desk actually takes.
+    // Same normalizer-induced reasoning as the relational/membership bridges.
+    if (a is bool && b is num) return (a ? 1 : 0) == b;
+    if (a is num && b is bool) return a == (b ? 1 : 0);
     // Objects/arrays compare by identity in JS.
     if (a is List && b is List) return identical(a, b);
     if (a is Map && b is Map) return identical(a, b);
@@ -957,6 +973,18 @@ class JsInterpreter {
       return an == bn;
     }
 
+    // Two objects (arrays / maps) compare by REFERENCE, not by value: JS only
+    // calls ToPrimitive when the two operands have different types. Coercing
+    // both makes `[] == []` and `{} == {}` true (via '' == '' and
+    // '[object Object]' == '[object Object]'), and — the case that reaches real
+    // forms — `doc.ms_a == doc.ms_b` true for any two multi-selects holding the
+    // same options. Verified in node: `[] == []`, `{} == {}` and
+    // `['A'] == ['A']` are all false, while `doc.a == doc.a` is true.
+    // Object-vs-primitive still coerces below, so `['A'] == 'A'` stays true.
+    final aObj = a is List || a is Map;
+    final bObj = b is List || b is Map;
+    if (aObj && bObj) return identical(a, b);
+
     final ap = _toPrimitiveStatic(a);
     final bp = _toPrimitiveStatic(b);
 
@@ -968,6 +996,100 @@ class JsInterpreter {
     final bn = _toNumberStatic(bp);
     if (an.isNaN || bn.isNaN) return false;
     return an == bn;
+  }
+
+  // ── frappe.utils numeric helpers ──────────────────────────────────────────
+  //
+  // `cint` / `flt` are Frappe's own coercions, not JS ones, and they are
+  // parse*-based — they take the longest numeric PREFIX and discard the rest,
+  // where Dart's `num.tryParse` demands the whole string. Transcribed from
+  // frappe v16.13.0:
+  //   cint, cstr            frappe/public/js/frappe/utils/datatype.js
+  //   lstrip                frappe/public/js/frappe/utils/common.js
+  //   flt, strip_number_groups
+  //                         frappe/public/js/frappe/utils/number_format.js
+  // Verified against node running those verbatim: cint('12abc') == 12,
+  // cint('3.9') == 3, cint('-4.7') == -4, flt('1,200') == 1200,
+  // flt('12.5kg') == 12.5, flt(r'$ 500') == 500, flt('-2.5x') == -2.5.
+
+  /// JS `parseInt(s, 10)`: skip leading whitespace, optional sign, then the
+  /// longest run of decimal digits. Null where JS yields NaN.
+  static int? _jsParseInt(String s) {
+    var i = 0;
+    while (i < s.length && _isJsSpace(s.codeUnitAt(i))) {
+      i++;
+    }
+    final start = i;
+    if (i < s.length && (s[i] == '+' || s[i] == '-')) i++;
+    final digitsStart = i;
+    while (i < s.length && _isAsciiDigit(s.codeUnitAt(i))) {
+      i++;
+    }
+    if (i == digitsStart) return null; // no digits -> NaN
+    return int.tryParse(s.substring(start, i));
+  }
+
+  /// JS `parseFloat(s)`: skip leading whitespace, then the longest prefix that
+  /// is a valid decimal literal (sign, digits, `.`, exponent). Null for NaN.
+  static double? _jsParseFloat(String s) {
+    var i = 0;
+    while (i < s.length && _isJsSpace(s.codeUnitAt(i))) {
+      i++;
+    }
+    final m = RegExp(
+      r'^[+-]?(?:Infinity|(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?)',
+    ).firstMatch(s.substring(i));
+    if (m == null) return null;
+    final t = m.group(0)!;
+    if (t.endsWith('Infinity')) {
+      return t.startsWith('-') ? double.negativeInfinity : double.infinity;
+    }
+    return double.tryParse(t);
+  }
+
+  static bool _isAsciiDigit(int c) => c >= 0x30 && c <= 0x39;
+
+  static bool _isJsSpace(int c) =>
+      c == 0x20 || (c >= 0x09 && c <= 0x0d) || c == 0xa0 || c == 0xfeff;
+
+  /// `lstrip(s, ['0'])` — strips leading zeros only, as `cint` calls it.
+  static String _lstripZeros(String s) {
+    var i = 0;
+    while (i < s.length && s[i] == '0') {
+      i++;
+    }
+    return s.substring(i);
+  }
+
+  static int _frappeCint(Object? v) {
+    if (v is bool) return v ? 1 : 0; // cint: v === true / v === false
+    var s = _toStringJsStatic(v); // v = v + ""
+    if (s != '0') s = _lstripZeros(s);
+    return _jsParseInt(s) ?? 0;
+  }
+
+  static double _frappeFlt(Object? v) {
+    // `if (v == null || v == "")` is LOOSE in Frappe, so null, undefined, '',
+    // false, 0 and [] all short-circuit to 0 — same answer either way.
+    if (_isNullish(v)) return 0.0;
+    if (v is num) return v.toDouble(); // typeof v === "number"
+    var s = _toStringJsStatic(v);
+    if (s.isEmpty) return 0.0;
+    // Strip a currency symbol: if the part before the first space is not
+    // numeric, keep only the last space-separated part.
+    if (s.contains(' ')) {
+      final parts = s.split(' ');
+      if (_jsParseFloat(parts[0]) == null) {
+        s = parts.sublist(parts.length - 1).join(' ');
+      }
+    }
+    // strip_number_groups with Frappe's default number format (#,###.##), the
+    // fallback get_number_format_info returns when the format is unknown. The
+    // group separator is a site-level System Setting, so a site configured for
+    // #.###,## would want '.' stripped instead — not knowable from here, and
+    // the same assumption the rest of the SDK's parsing already makes.
+    s = s.replaceAll(',', '');
+    return _jsParseFloat(s) ?? 0.0;
   }
 
   // ── coercions ─────────────────────────────────────────────────────────────
@@ -1035,6 +1157,13 @@ class JsInterpreter {
 /// evaluator runs per field per change, so re-tokenizing on every keystroke of
 /// a large form is a measurable cost.
 final Map<String, JsNode> _astCache = {};
+
+/// Negative half of the cache. A parse failure is deterministic — the source is
+/// static DocType meta — but without this the tokenizer+parser re-ran and
+/// re-threw on every evaluation, which for one unparseable expression on a
+/// large form means per-field-per-keystroke work: exactly the cost [_astCache]
+/// exists to avoid.
+final Map<String, JsEvalException> _astFailureCache = {};
 const _astCacheLimit = 512;
 
 /// Parse [source] into an AST, memoised by source text.
@@ -1042,13 +1171,22 @@ const _astCacheLimit = 512;
 JsNode parseJsExpression(String source) {
   final cached = _astCache[source];
   if (cached != null) return cached;
+  final failed = _astFailureCache[source];
+  if (failed != null) throw failed;
   // Frappe wraps the condition as `let out = <code>; return out`, so a trailing
   // `;` (e.g. `eval:doc.x === "Report";`) is valid there and must not fail here.
   var src = source.trimRight();
   while (src.endsWith(';')) {
     src = src.substring(0, src.length - 1).trimRight();
   }
-  final ast = _Parser(_tokenize(src), src).parse();
+  final JsNode ast;
+  try {
+    ast = _Parser(_tokenize(src), src).parse();
+  } on JsEvalException catch (e) {
+    if (_astFailureCache.length >= _astCacheLimit) _astFailureCache.clear();
+    _astFailureCache[source] = e;
+    rethrow;
+  }
   if (_astCache.length >= _astCacheLimit) _astCache.clear();
   _astCache[source] = ast;
   return ast;

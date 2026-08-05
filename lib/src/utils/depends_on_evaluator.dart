@@ -1,6 +1,8 @@
 // Copyright (c) 2026, Bhushan Barbuddhe and contributors
 // For license information, please see license.txt
 
+import 'package:flutter/foundation.dart';
+
 import 'js_expression.dart';
 import 'sdk_log.dart';
 
@@ -100,14 +102,15 @@ class DependsOnEvaluator {
     Map<String, dynamic>? parentData,
     bool defaultOnError = true,
   }) {
-    if (expression == null || expression.isEmpty) return true;
+    if (expression == null || expression.isEmpty) return defaultOnError;
 
     final raw = expression.trim();
 
     // `fn:` triggers a client script through frm.script_manager. There is no
     // equivalent offline, so defer to the caller's default.
     if (raw.startsWith('fn:')) {
-      sdkLog(
+      _logOnce(
+        expression,
         'DependsOnEvaluator: "fn:" expressions are not supported offline — '
         'defaulting to $defaultOnError for "$expression"',
       );
@@ -131,7 +134,12 @@ class DependsOnEvaluator {
     }
 
     final expr = raw.substring(5).trim();
-    if (expr.isEmpty) return true;
+    // A bare `eval:` (or `eval: `) is non-empty, so evaluate2's null/empty guard
+    // lets it through. Desk would SyntaxError on `let out = ; return out`, so
+    // `true` is not the Desk answer either — and returning it makes a field with
+    // `mandatory_depends_on: "eval:"` permanently mandatory with no way to
+    // satisfy it, the exact failure mode the per-property defaults avoid.
+    if (expr.isEmpty) return defaultOnError;
 
     try {
       return evalJsExpressionAsBool(expr, {
@@ -139,19 +147,42 @@ class DependsOnEvaluator {
         'parent': parentData ?? formData,
       });
     } on JsEvalException catch (e) {
-      sdkLog(
+      _logOnce(
+        expression,
         'DependsOnEvaluator: cannot evaluate "$expression" — $e; '
         'defaulting to $defaultOnError',
       );
       return defaultOnError;
     } catch (e, st) {
-      sdkLog(
+      _logOnce(
+        expression,
         'DependsOnEvaluator: unexpected failure for "$expression" — $e\n$st; '
         'defaulting to $defaultOnError',
       );
       return defaultOnError;
     }
   }
+
+  /// Expressions already reported by [_logOnce].
+  static final Set<String> _loggedFailures = <String>{};
+
+  /// Report an evaluation failure once per expression per process.
+  ///
+  /// The expression is static DocType meta, so the failure is deterministic —
+  /// but `_computeUiState` runs per field per change, so an unparseable
+  /// `depends_on` on a 60-field form otherwise emits a log line (and, in the
+  /// generic catch, an interpolated stack trace) on every keystroke.
+  static void _logOnce(String expression, String message) {
+    if (!_loggedFailures.add(expression)) return;
+    // Bounded: DocType meta is finite, but a pathological host could synthesise
+    // expressions at runtime, so don't let the set grow without limit.
+    if (_loggedFailures.length > 512) _loggedFailures.clear();
+    sdkLog(message);
+  }
+
+  /// Clears the once-per-expression log gate. Test seam only.
+  @visibleForTesting
+  static void resetLogGateForTest() => _loggedFailures.clear();
 
   /// Extract `doc.fieldname` from an eval expression like `eval:doc.x` or
   /// `eval: doc.x`. Returns the field name, or null if the value is not an
@@ -166,7 +197,13 @@ class DependsOnEvaluator {
       expr = value.substring(5).trimLeft();
     }
     String fieldName = _extractFieldName(expr);
-    return expr == fieldName ? null : fieldName;
+    if (expr != fieldName) return fieldName;
+    // The whole expression isn't a bare `doc.field` reference (e.g. it's wrapped
+    // in a JS call like `(doc.x||'').replace(/.../, '')`). Fall back to the
+    // first `doc.<field>` reference anywhere in the string so dependent-field
+    // detection — the Link field's "select X first" hint — still works for these
+    // more complex link_filters values.
+    return RegExp(r'doc\.([A-Za-z_][A-Za-z0-9_]*)').firstMatch(expr)?.group(1);
   }
 
   static String _extractFieldName(String expr) {

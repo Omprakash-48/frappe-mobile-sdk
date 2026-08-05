@@ -712,6 +712,443 @@ void main() {
       // a field Desk hides.
       expect(DependsOnEvaluator.evaluate("doc.a == 'X'", {'a': 'X'}), isFalse);
     });
+
+    test('an empty eval: body honours the caller default, not true', () {
+      // `eval:` and `eval: ` are non-empty, so evaluate2's null/empty guard
+      // lets them through to evaluate. Returning a hardcoded `true` made
+      // `mandatory_depends_on: "eval:"` a permanently mandatory field with no
+      // way to satisfy it. Desk is no help as a precedent: it builds
+      // `let out = ; return out`, which is a SyntaxError (verified in node), so
+      // Desk raises 'Invalid "depends_on" expression' rather than answering
+      // true.
+      expect(DependsOnEvaluator.evaluate2('eval:', {}, false), isFalse);
+      expect(DependsOnEvaluator.evaluate2('eval: ', {}, false), isFalse);
+      expect(DependsOnEvaluator.evaluate2('eval:', {}, true), isTrue);
+      // The direct entry point must respect its own parameter too.
+      expect(
+        DependsOnEvaluator.evaluate('eval:', {}, defaultOnError: false),
+        isFalse,
+      );
+      expect(
+        DependsOnEvaluator.evaluate(null, {}, defaultOnError: false),
+        isFalse,
+      );
+      expect(
+        DependsOnEvaluator.evaluate('', {}, defaultOnError: false),
+        isFalse,
+      );
+      // Default stays "show the field" for the depends_on callers.
+      expect(DependsOnEvaluator.evaluate('eval:', {}), isTrue);
+      expect(DependsOnEvaluator.evaluate(null, {}), isTrue);
+    });
+  });
+
+  group('a field named `length` is not shadowed by the array rule', () {
+    // `doc.length` used to hit the `.length` special case before the own-key
+    // lookup, so a DocType with a field literally named `length` (this
+    // workspace has three; `width` has five) resolved it to undefined and hid
+    // the field forever. Verified in node: with doc = {length: '12'},
+    // `doc.length` is '12' and `doc.length > 0` is true.
+    test('doc.length reads the field value', () {
+      expect(
+        DependsOnEvaluator.evaluate('eval:doc.length', {'length': '12'}),
+        isTrue,
+      );
+      expect(
+        DependsOnEvaluator.evaluate("eval:doc.length == '12'", {
+          'length': '12',
+        }),
+        isTrue,
+      );
+      expect(
+        DependsOnEvaluator.evaluate('eval:doc.length > 0', {'length': '12'}),
+        isTrue,
+      );
+      expect(
+        DependsOnEvaluator.evaluate('eval:doc.length', {'length': ''}),
+        isFalse,
+      );
+    });
+
+    test('an absent length key is still undefined, as in JS', () {
+      expect(DependsOnEvaluator.evaluate('eval:doc.length', {'a': 1}), isFalse);
+    });
+
+    test('.length on an actual list/string still works', () {
+      expect(
+        DependsOnEvaluator.evaluate('eval:doc.rows.length > 1', {
+          'rows': [1, 2],
+        }),
+        isTrue,
+      );
+      expect(
+        DependsOnEvaluator.evaluate('eval:doc.code.length == 3', {
+          'code': 'abc',
+        }),
+        isTrue,
+      );
+    });
+  });
+
+  group('list methods over child rows (.some / .filter / index)', () {
+    // The 699-expression differential corpus contained ZERO uses of .some(), so
+    // it proves no-regression, not correctness of this capability. These pin the
+    // behaviour directly. Expectations verified in node against Frappe's own
+    // `let out = <code>; return out` wrapper.
+    final rows = {
+      'rows': [
+        {'season': 'Kharif', 'qty': 3},
+        {'season': 'Rabi'},
+      ],
+      'empty': <dynamic>[],
+      'label': 'hello',
+    };
+
+    test('.some() matches and misses over a list of row maps', () {
+      expect(
+        DependsOnEvaluator.evaluate(
+          "eval:doc.rows.some(r => r.season == 'Rabi')",
+          rows,
+        ),
+        isTrue,
+      );
+      expect(
+        DependsOnEvaluator.evaluate(
+          "eval:doc.rows.some(r => r.season == 'Zaid')",
+          rows,
+        ),
+        isFalse,
+      );
+    });
+
+    test('.some() over a row map missing the key is falsy, not an error', () {
+      // The second row has no `qty`; JS reads undefined, which is falsy.
+      expect(
+        DependsOnEvaluator.evaluate('eval:doc.rows.some(r => r.qty)', rows),
+        isTrue, // the FIRST row has qty 3
+      );
+      expect(
+        DependsOnEvaluator.evaluate('eval:doc.rows.some(r => r.missing)', rows),
+        isFalse,
+      );
+    });
+
+    test('.some() over an empty list is false', () {
+      expect(
+        DependsOnEvaluator.evaluate('eval:doc.empty.some(r => r.season)', rows),
+        isFalse,
+      );
+    });
+
+    test('a zero-arg arrow is accepted', () {
+      expect(
+        DependsOnEvaluator.evaluate('eval:doc.rows.some(() => true)', rows),
+        isTrue,
+      );
+    });
+
+    test('the index parameter is passed', () {
+      expect(
+        DependsOnEvaluator.evaluate(
+          'eval:doc.rows.some((r, i) => i == 1)',
+          rows,
+        ),
+        isTrue,
+      );
+      expect(
+        DependsOnEvaluator.evaluate(
+          'eval:doc.rows.some((r, i) => i == 9)',
+          rows,
+        ),
+        isFalse,
+      );
+    });
+
+    test('.filter() chains into .some()', () {
+      expect(
+        DependsOnEvaluator.evaluate(
+          "eval:doc.rows.filter(r => r.season).some(r => r.season == 'Rabi')",
+          rows,
+        ),
+        isTrue,
+      );
+    });
+
+    test('indexed row access resolves a member', () {
+      expect(
+        DependsOnEvaluator.evaluate(
+          "eval:doc.rows[0].season == 'Kharif'",
+          rows,
+        ),
+        isTrue,
+      );
+      // Out of range is undefined; reading through it is an error, so the
+      // depends_on caller falls back to "show the field".
+      expect(
+        DependsOnEvaluator.evaluate('eval:doc.rows[9].season', rows),
+        isTrue,
+      );
+      expect(
+        DependsOnEvaluator.evaluate2('eval:doc.rows[9].season', rows, false),
+        isFalse,
+      );
+    });
+
+    test(
+      '.some() on a String is an error, so the per-property default applies',
+      () {
+        // Desk throws too — verified in node: `'hello'.some` is not a function,
+        // TypeError. depends_on keeps the field visible; mandatory stays false.
+        expect(
+          DependsOnEvaluator.evaluate(
+            "eval:doc.label.some(c => c == 'h')",
+            rows,
+          ),
+          isTrue,
+        );
+        expect(
+          DependsOnEvaluator.evaluate2(
+            "eval:doc.label.some(c => c == 'h')",
+            rows,
+            false,
+          ),
+          isFalse,
+        );
+      },
+    );
+
+    test('the (doc.rows || []).some(...) guard works on a null field', () {
+      expect(
+        DependsOnEvaluator.evaluate(
+          "eval:(doc.rows || []).some(r => r.season == 'Rabi')",
+          const {'rows': null},
+        ),
+        isFalse,
+      );
+    });
+  });
+
+  group('object identity under == (JS compares references)', () {
+    // _looseEquals coerced both operands to primitives unconditionally, so two
+    // distinct arrays compared by VALUE. Verified in node: `[] == []`,
+    // `{} == {}` and `['A'] == ['A']` are all false; `doc.a == doc.a` is true;
+    // and object-vs-primitive still coerces, so `['A'] == 'A'` is true.
+    test('two distinct multi-selects with the same options are not equal', () {
+      expect(
+        DependsOnEvaluator.evaluate('eval:doc.ms_a == doc.ms_b', {
+          'ms_a': ['A'],
+          'ms_b': ['A'],
+        }),
+        isFalse,
+      );
+      expect(
+        DependsOnEvaluator.evaluate('eval:doc.ms_a == doc.ms_b', {
+          'ms_a': <dynamic>[],
+          'ms_b': <dynamic>[],
+        }),
+        isFalse,
+      );
+    });
+
+    test('the same reference IS equal to itself', () {
+      expect(
+        DependsOnEvaluator.evaluate('eval:doc.ms_a == doc.ms_a', {
+          'ms_a': ['A'],
+        }),
+        isTrue,
+      );
+    });
+
+    test('array-vs-primitive still coerces', () {
+      expect(
+        DependsOnEvaluator.evaluate("eval:doc.ms == 'A'", {
+          'ms': ['A'],
+        }),
+        isTrue,
+      );
+      expect(
+        DependsOnEvaluator.evaluate("eval:doc.ms == ''", {'ms': <dynamic>[]}),
+        isTrue,
+      );
+    });
+  });
+
+  group('cint / flt follow parseInt / parseFloat, not whole-string parsing', () {
+    // Frappe's own coercions take the longest numeric PREFIX and strip group
+    // separators; Dart's num.tryParse demands the whole string, so cint('12abc')
+    // was 0 where Desk says 12. Expectations verified in node running the
+    // verbatim v16.13.0 cint / lstrip / flt / strip_number_groups.
+    test('cint takes the numeric prefix', () {
+      expect(
+        DependsOnEvaluator.evaluate("eval:cint('12abc') == 12", {}),
+        isTrue,
+      );
+      expect(DependsOnEvaluator.evaluate("eval:cint('3.9') == 3", {}), isTrue);
+      expect(
+        DependsOnEvaluator.evaluate("eval:cint('-4.7') == -4", {}),
+        isTrue,
+      );
+      expect(
+        DependsOnEvaluator.evaluate("eval:cint('0012') == 12", {}),
+        isTrue,
+      );
+      expect(DependsOnEvaluator.evaluate("eval:cint('  7 ') == 7", {}), isTrue);
+      expect(DependsOnEvaluator.evaluate("eval:cint('abc') == 0", {}), isTrue);
+      expect(DependsOnEvaluator.evaluate("eval:cint('0') == 0", {}), isTrue);
+    });
+
+    test('flt strips group separators and takes the numeric prefix', () {
+      expect(
+        DependsOnEvaluator.evaluate("eval:flt('1,200') == 1200", {}),
+        isTrue,
+      );
+      expect(
+        DependsOnEvaluator.evaluate("eval:flt('1,234.56') == 1234.56", {}),
+        isTrue,
+      );
+      expect(
+        DependsOnEvaluator.evaluate("eval:flt('12.5kg') == 12.5", {}),
+        isTrue,
+      );
+      expect(
+        DependsOnEvaluator.evaluate("eval:flt('-2.5x') == -2.5", {}),
+        isTrue,
+      );
+      expect(DependsOnEvaluator.evaluate("eval:flt('abc') == 0", {}), isTrue);
+      expect(DependsOnEvaluator.evaluate("eval:flt('') == 0", {}), isTrue);
+    });
+
+    test('flt drops a leading currency symbol', () {
+      // `if (v.indexOf(" ") != -1)` keeps only the last space-separated part
+      // when the first is not numeric.
+      expect(
+        DependsOnEvaluator.evaluate("eval:flt('\$ 500') == 500", {}),
+        isTrue,
+      );
+    });
+
+    test('cint over a normalized numeric-string field', () {
+      // The realistic shape: FieldNormalizer stringifies Int/Float/Currency.
+      expect(
+        DependsOnEvaluator.evaluate('eval:cint(doc.qty) > 0', {'qty': '5'}),
+        isTrue,
+      );
+      expect(
+        DependsOnEvaluator.evaluate('eval:cint(doc.qty) > 0', {'qty': ''}),
+        isFalse,
+      );
+    });
+  });
+
+  group('Check fields: bool and 0/1 are the same value (departure #4)', () {
+    // Frappe stores a Check as 0/1 and Desk holds that int all session, so
+    // `eval:doc.flag === 1` is true there. FieldNormalizer turns a Check into a
+    // Dart bool, so the SAME field reads int 1 from initialData and `true`
+    // after the user toggles it — strict JS would show the field on load and
+    // hide it after the toggle. Verified in node: with flag=1, `=== 1` is true
+    // and `=== true` is false; with flag=true the answers swap. Bridging costs
+    // the `=== true` direction, which this workspace's DocType JSON never uses
+    // (`=== 1`/`=== 0` appears once, `=== true`/`=== false` never).
+    test('=== 1 holds for both representations', () {
+      expect(
+        DependsOnEvaluator.evaluate('eval:doc.flag === 1', {'flag': 1}),
+        isTrue,
+      );
+      expect(
+        DependsOnEvaluator.evaluate('eval:doc.flag === 1', {'flag': true}),
+        isTrue,
+      );
+    });
+
+    test('=== 0 holds for both representations', () {
+      expect(
+        DependsOnEvaluator.evaluate('eval:doc.flag === 0', {'flag': 0}),
+        isTrue,
+      );
+      expect(
+        DependsOnEvaluator.evaluate('eval:doc.flag === 0', {'flag': false}),
+        isTrue,
+      );
+      expect(
+        DependsOnEvaluator.evaluate('eval:doc.flag === 0', {'flag': true}),
+        isFalse,
+      );
+    });
+
+    test('the loose form was already consistent and stays so', () {
+      expect(
+        DependsOnEvaluator.evaluate('eval:doc.flag == 1', {'flag': 1}),
+        isTrue,
+      );
+      expect(
+        DependsOnEvaluator.evaluate('eval:doc.flag == 1', {'flag': true}),
+        isTrue,
+      );
+    });
+
+    test('bool-vs-string is NOT bridged', () {
+      expect(
+        DependsOnEvaluator.evaluate("eval:doc.flag === '1'", {'flag': true}),
+        isFalse,
+      );
+    });
+  });
+
+  group('extractEvalDocField', () {
+    test('a bare doc.field reference', () {
+      expect(DependsOnEvaluator.extractEvalDocField('eval:doc.state'), 'state');
+      expect(
+        DependsOnEvaluator.extractEvalDocField('eval: doc.state'),
+        'state',
+      );
+    });
+
+    test('a plain value is not a doc reference', () {
+      expect(DependsOnEvaluator.extractEvalDocField('Maharashtra'), isNull);
+    });
+
+    test('falls back to the first doc.<field> inside a larger expression', () {
+      // Regression guard for the fallback added on develop in PR #86, which the
+      // evaluator rewrite must not drop: LinkOptionService uses this for the
+      // Link field's "select X first" hint, and a wrapped link_filters value
+      // otherwise resolves to null and the hint disappears.
+      expect(
+        DependsOnEvaluator.extractEvalDocField(
+          "eval:(doc.state||'').replace(/ /g, '')",
+        ),
+        'state',
+      );
+      expect(
+        DependsOnEvaluator.extractEvalDocField('eval:cint(doc.block) > 0'),
+        'block',
+      );
+      expect(
+        DependsOnEvaluator.extractEvalDocField(
+          "eval:in_list(['A','B'], doc.kind)",
+        ),
+        'kind',
+      );
+    });
+
+    test('KNOWN LIMITATION: a compound expression that STARTS with doc. is not '
+        'reduced to a fieldname', () {
+      // Pre-existing on develop (verified against 58c6171, which carries
+      // PR #86): the fallback only runs when the whole string is unchanged by
+      // stripping the `doc.` prefix, so an expression that merely BEGINS with
+      // `doc.` returns the remainder verbatim instead of a fieldname or null.
+      // Not introduced or widened by the evaluator rewrite; recorded here so
+      // the next change to this method sees it rather than rediscovering it.
+      expect(
+        DependsOnEvaluator.extractEvalDocField(
+          "eval:doc.district == 'X' ? doc.block : ''",
+        ),
+        "district == 'X' ? doc.block : ''",
+      );
+    });
+
+    test('an expression with no doc.<field> at all is null', () {
+      expect(DependsOnEvaluator.extractEvalDocField("eval:'literal'"), isNull);
+    });
   });
 
   group('referencedFields', () {
