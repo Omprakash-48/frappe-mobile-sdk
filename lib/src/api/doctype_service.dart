@@ -108,7 +108,17 @@ class DoctypeService {
       }
     }
     if (effectiveFields != null) {
-      methodParams['fields'] = jsonEncode(effectiveFields);
+      // Never send a bare `*` the server is documented (three lines up) to
+      // reject. If expansion was unavailable or failed, strip it and let the
+      // remaining explicit fields stand; an empty result omits `fields`
+      // entirely, which Frappe answers with its default field set rather than
+      // an error. Keeping `*` guaranteed a failed request.
+      if (effectiveFields.contains('*')) {
+        effectiveFields = effectiveFields.where((f) => f != '*').toList();
+      }
+      if (effectiveFields.isNotEmpty) {
+        methodParams['fields'] = jsonEncode(effectiveFields);
+      }
     }
     if (filters != null) methodParams['filters'] = jsonEncode(filters);
     if (orFilters != null && orFilters.isNotEmpty) {
@@ -369,9 +379,13 @@ class DoctypeService {
       return (docs: const <Map<String, dynamic>>[], namesScanned: 0);
     }
 
-    // Match the server's MAX_BATCH cap. Each chunk is a single HTTP
-    // round-trip, so this typically reduces a 1000-row pull from
-    // ~1001 calls (1 list + 1000 per-name GETs) down to ~6 calls.
+    // Must equal `MAX_BATCH` in the server's
+    // `mobile_control/api/bulk_fetch.py` — exceeding it makes the endpoint
+    // throw ValidationError for the whole chunk. This is an UNENFORCED
+    // cross-repo invariant (no test on either side asserts they match), and the
+    // server file carries the reciprocal note. Each chunk is a single HTTP
+    // round-trip, so this typically reduces a 1000-row pull from ~1001 calls
+    // (1 list + 1000 per-name GETs) down to ~6 calls.
     const int chunkSize = 200;
     final byName = <String, Map<String, dynamic>>{};
     for (var i = 0; i < names.length; i += chunkSize) {
