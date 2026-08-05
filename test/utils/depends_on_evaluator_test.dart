@@ -401,4 +401,106 @@ void main() {
       expect(DependsOnEvaluator.evaluate('eval:doc.other === 0', {}), isFalse);
     });
   });
+
+  group('operator-spacing normalization leaves non-expression text alone', () {
+    test('an escaped quote does not end the literal early', () {
+      // Before: the loop closed on the backslash-escaped quote, so the rest of
+      // the string was treated as expression text and operator-spaced.
+      expect(
+        DependsOnEvaluator.evaluate(r'eval:doc.note == "it\"s ok"', {
+          'note': r'it\"s ok',
+        }),
+        isTrue,
+      );
+      // A value containing an operator inside an escaped-quote literal must not
+      // be re-spaced into a comparison.
+      expect(
+        DependsOnEvaluator.evaluate(r'eval:doc.note == "a\"b>c"', {
+          'note': r'a\"b>c',
+        }),
+        isTrue,
+      );
+    });
+
+    test('regex contents cannot change how the expression parses', () {
+      // The invariant, asserted without depending on the fallback's exact
+      // value: two expressions differing ONLY inside the regex must evaluate
+      // identically. Before the fix the operators inside the pattern were
+      // spaced into real ' < ' / ' > ' tokens, so editing the pattern changed
+      // which branch ran — a bogus comparison instead of the normal fallback.
+      const data = {'html': 'anything'};
+      final plain = DependsOnEvaluator.evaluate(
+        r"eval:doc.html.replace(/x/g, '')",
+        data,
+      );
+      for (final pattern in <String>['<br>', '[a-z>=<]+', '>>', '<=']) {
+        expect(
+          DependsOnEvaluator.evaluate(
+            "eval:doc.html.replace(/$pattern/g, '')",
+            data,
+          ),
+          plain,
+          reason: 'pattern "$pattern" must not steer the parse',
+        );
+      }
+    });
+
+    test('a division-position slash does not swallow the rest of the expression',
+        () {
+      // Only a value position opens a regex; after an identifier `/` is
+      // division. If it were treated as a regex opener it would consume through
+      // the ' == ', losing the comparison entirely and falling back to a
+      // truthiness check on `a` — which would be TRUE here. Asserting false
+      // proves the ' == ' survived. (The evaluator does no arithmetic, so
+      // `a/2` is simply not a resolvable field.)
+      expect(
+        DependsOnEvaluator.evaluate('eval:doc.a/2 == 5', {'a': 10}),
+        isFalse,
+      );
+    });
+
+    test('unspaced operators are still normalized', () {
+      // The behaviour this normalizer exists for must survive both guards.
+      expect(
+        DependsOnEvaluator.evaluate('eval:doc.x==1&&doc.y!=2', {
+          'x': 1,
+          'y': 3,
+        }),
+        isTrue,
+      );
+      expect(
+        DependsOnEvaluator.evaluate('eval:doc.x==1&&doc.y!=2', {
+          'x': 1,
+          'y': 2,
+        }),
+        isFalse,
+      );
+    });
+
+    test('a JS arrow is still not spaced into a comparison', () {
+      // Regression guard for the pre-existing `=>` handling, re-asserted here
+      // because the regex branch now runs before the operator scan. `r => r.x`
+      // must not become `r = > r.x`; the observable contract is that the
+      // expression stays unparseable and both data shapes agree.
+      const expr = 'eval:doc.rows.filter(r => r.qty > 0).length > 0';
+      expect(
+        DependsOnEvaluator.evaluate(expr, {'rows': <dynamic>[]}),
+        DependsOnEvaluator.evaluate(expr, {
+          'rows': [
+            {'qty': 5},
+          ],
+        }),
+        reason: 'neither shape should be read as a real comparison',
+      );
+    });
+
+    test('two consecutive spaces inside a literal still survive', () {
+      expect(
+        DependsOnEvaluator.evaluate('eval:doc.status == "In  Progress"', {
+          'status': 'In  Progress',
+        }),
+        isTrue,
+      );
+    });
+  });
 }

@@ -51,6 +51,26 @@ class DependsOnEvaluator {
   /// mis-gated visibility / mandatory / read-only everywhere. Normalize
   /// spacing once up front; the contents of a quoted value come out
   /// byte-identical to the way they went in.
+  /// True when a `/` at [i] opens a regex literal rather than acting as
+  /// division. Standard JS heuristic: a regex can only start where a value is
+  /// expected, i.e. at the beginning or right after an operator / opening
+  /// bracket / comma. After an identifier, `)`, `]` or a literal it is division.
+  ///
+  /// Needed because `_normalizeOperatorSpacing` would otherwise space the
+  /// operators INSIDE a pattern — `.replace(/<br>/g, '')` became
+  /// `.replace(/ < br > /g, '')`, which then matched the `' < '` comparison
+  /// branch and returned a definite wrong answer instead of falling through to
+  /// the truthy fallback. Frappe `link_filters` / `depends_on` expressions do
+  /// carry `.replace(/…/, …)` in practice, so this is reachable.
+  static bool _opensRegexLiteral(String expr, int i) {
+    for (var j = i - 1; j >= 0; j--) {
+      final c = expr[j];
+      if (c == ' ') continue;
+      return !(RegExp(r'[A-Za-z0-9_$)\]]').hasMatch(c));
+    }
+    return true; // start of expression
+  }
+
   static String _normalizeOperatorSpacing(String expr) {
     final buf = StringBuffer();
     String? quote;
@@ -68,6 +88,15 @@ class DependsOnEvaluator {
       if (quote != null) {
         // Inside a quoted literal: copy verbatim, runs of spaces included.
         buf.write(ch);
+        // A backslash escapes the next character, so `"it\"s"` does NOT close
+        // here. Without this the literal ended early and the remainder — real
+        // text, not an expression — got operator-spaced.
+        if (ch == r'\' && i + 1 < expr.length) {
+          buf.write(expr[i + 1]);
+          i++;
+          pendingSpace = false;
+          continue;
+        }
         if (ch == quote) quote = null;
         pendingSpace = false;
         continue;
@@ -75,6 +104,33 @@ class DependsOnEvaluator {
       if (ch == '"' || ch == "'") {
         quote = ch;
         buf.write(ch);
+        pendingSpace = false;
+        continue;
+      }
+      // Regex literal: copy through to the closing unescaped `/` (plus flags)
+      // so operators inside the pattern are left alone. A character class may
+      // contain an unescaped `/`, so track it.
+      if (ch == '/' && _opensRegexLiteral(expr, i)) {
+        buf.write(ch);
+        var inClass = false;
+        var j = i + 1;
+        for (; j < expr.length; j++) {
+          final rc = expr[j];
+          buf.write(rc);
+          if (rc == r'\' && j + 1 < expr.length) {
+            buf.write(expr[j + 1]);
+            j++;
+            continue;
+          }
+          if (rc == '[') {
+            inClass = true;
+          } else if (rc == ']') {
+            inClass = false;
+          } else if (rc == '/' && !inClass) {
+            break;
+          }
+        }
+        i = j;
         pendingSpace = false;
         continue;
       }
