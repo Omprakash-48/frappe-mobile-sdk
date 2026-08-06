@@ -497,4 +497,75 @@ void main() {
       );
     });
   });
+
+  group('.pop() (real erpnext Data Import metadata)', () {
+    // Verbatim from the erpnext Data Import doctype JSON.
+    const realExpr =
+        "eval:doc.google_sheets_url || (doc.import_file && doc.import_file.split('.').pop().toLowerCase() === 'csv')";
+
+    test('the real expression discriminates csv from xlsx', () {
+      expect(
+        DependsOnEvaluator.evaluate(realExpr, {
+          'google_sheets_url': null,
+          'import_file': 'data.CSV',
+        }),
+        isTrue,
+      );
+      // isFalse also proves it evaluated: defaultOnError is true, so a fallback
+      // here would read isTrue.
+      expect(
+        DependsOnEvaluator.evaluate(realExpr, {
+          'google_sheets_url': null,
+          'import_file': 'data.xlsx',
+        }),
+        isFalse,
+      );
+    });
+
+    test('pop returns the last element', () {
+      expect(
+        DependsOnEvaluator.evaluate('eval:doc.rows.pop() == 3', {
+          'rows': [1, 2, 3],
+        }),
+        isTrue,
+      );
+    });
+
+    test('pop on an empty list is undefined, not an error', () {
+      // undefined == 3 is false, and matching under both defaults proves no
+      // throw.
+      for (final d in [true, false]) {
+        expect(
+          DependsOnEvaluator.evaluate('eval:doc.rows.pop() == 3', {
+            'rows': <dynamic>[],
+          }, defaultOnError: d),
+          isFalse,
+        );
+      }
+    });
+
+    test("pop NEVER mutates the caller's list", () {
+      // The live child table. depends_on is re-evaluated per field per change,
+      // so a mutating pop would delete a row per keystroke.
+      final rows = <dynamic>[1, 2, 3];
+      final data = <String, dynamic>{'rows': rows};
+      DependsOnEvaluator.evaluate('eval:doc.rows.pop() == 3', data);
+      expect(rows, [1, 2, 3], reason: 'live form list must be untouched');
+      expect(data['rows'], same(rows));
+    });
+
+    test('doc and parent share ONE copy when parent is not supplied', () {
+      // Desk aliases parent to doc when there is no parent form, so the
+      // mutation must be visible through both names within one evaluation.
+      expect(
+        DependsOnEvaluator.evaluate(
+          'eval:doc.rows.pop() == 3 && parent.rows.length == 2',
+          {
+            'rows': [1, 2, 3],
+          },
+        ),
+        isTrue,
+      );
+    });
+  });
 }

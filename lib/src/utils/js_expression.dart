@@ -551,6 +551,7 @@ const _listMethods = <String>{
   'map',
   'join',
   'find',
+  'pop',
   'length',
 };
 
@@ -766,6 +767,12 @@ class JsInterpreter {
             if (truthy(_invoke(fn, [recv[i], i, recv]))) return recv[i];
           }
           return _undefined;
+        case 'pop':
+          // Real JS semantics: removes and returns the last element. Safe only
+          // because DependsOnEvaluator._evalScope hands the interpreter a copy
+          // of every list value, never the live form-data list.
+          if (recv.isEmpty) return _undefined;
+          return recv.removeLast();
       }
     }
 

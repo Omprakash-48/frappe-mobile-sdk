@@ -142,10 +142,13 @@ class DependsOnEvaluator {
     if (expr.isEmpty) return defaultOnError;
 
     try {
-      final doc = _withDefaultDocstatus(formData);
+      final doc = _evalScope(formData);
       return evalJsExpressionAsBool(expr, {
         'doc': doc,
-        'parent': parentData == null ? doc : _withDefaultDocstatus(parentData),
+        // Desk aliases `parent` to `doc` when there is no parent form
+        // (`this.frm ? this.frm.doc : this.doc`), so these must be the SAME
+        // object: a mutating expression has to see one shared copy, not two.
+        'parent': parentData == null ? doc : _evalScope(parentData),
       });
     } on JsEvalException catch (e) {
       _logOnce(
@@ -164,21 +167,31 @@ class DependsOnEvaluator {
     }
   }
 
-  /// Supplies `docstatus: 0` when the key is absent.
+  /// Builds the `doc` / `parent` scope for an `eval:` expression.
   ///
-  /// In Frappe a document always has a `docstatus` — 0 while it is a draft — so
-  /// desk expressions like `eval:doc.docstatus === 0` are true on a new doc.
-  /// Form data assembled client-side does not always carry the key, and reading
-  /// it as undefined made those expressions false, mis-gating every draft-only
-  /// visibility / mandatory / read-only rule.
+  /// ALWAYS returns a new map — unlike the `_withDefaultDocstatus` this
+  /// replaces, which returned [src] itself whenever `docstatus` was present.
   ///
-  /// Copies only when the key is missing, and never mutates the caller's map —
-  /// [formData] is the live form state, not this evaluator's to write to.
-  static Map<String, dynamic> _withDefaultDocstatus(
-    Map<String, dynamic> formData,
-  ) => formData.containsKey('docstatus')
-      ? formData
-      : {...formData, 'docstatus': 0};
+  /// * `docstatus` defaults to 0 when absent. In Frappe a document always has a
+  ///   `docstatus` — 0 while it is a draft — so desk expressions like
+  ///   `eval:doc.docstatus === 0` are true on a new doc. Form data assembled
+  ///   client-side does not always carry the key, and reading it as undefined
+  ///   mis-gated every draft-only visibility / mandatory / read-only rule.
+  /// * every `List` value is copied one level, because `pop()` mutates its
+  ///   receiver and these lists are live child-table state. `_computeUiState`
+  ///   runs per field per change, so a mutating expression on the real list
+  ///   would delete a row on every keystroke. One level is enough: the only
+  ///   mutating method removes an element rather than editing one, so the row
+  ///   maps stay shared and are never written to.
+  ///
+  /// The `...src` spread MUST come first, so the copied lists overwrite the
+  /// shared references it inserts. Reordering silently disables the copy.
+  static Map<String, dynamic> _evalScope(Map<String, dynamic> src) => {
+    ...src,
+    if (!src.containsKey('docstatus')) 'docstatus': 0,
+    for (final e in src.entries)
+      if (e.value is List) e.key: List<dynamic>.of(e.value as List),
+  };
 
   /// Expressions already reported by [_logOnce].
   static final Set<String> _loggedFailures = <String>{};
