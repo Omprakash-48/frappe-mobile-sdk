@@ -1373,4 +1373,87 @@ void main() {
       );
     },
   );
+  test('demotes a mobile form from the set on a terminal data 403', () async {
+    // A form this user's role cannot read: its list fetch 403s. It must be
+    // dropped from the mobile-form set so isOfflineBootstrapComplete and the
+    // workspace stop requiring/showing a form that can never load.
+    final metaX = DocTypeMeta(name: 'X', fields: [f('title', 'Data')]);
+    for (final s in buildParentSchemaDDL(metaX, tableName: 'docs__x')) {
+      await db.execute(s);
+    }
+    await db.insert('doctype_meta', {
+      'doctype': 'X',
+      'metaJson': '{"name":"X"}',
+      'isMobileForm': 1,
+      'table_name': 'docs__x',
+    });
+    final engine = PullEngine(
+      db: db,
+      metaDao: metaDao,
+      outboxDao: OutboxDao(db),
+      pool: ConcurrencyPool(maxConcurrent: 2),
+      fetcher: PullPageFetcher(
+        listHttp: (doctype, params) async =>
+            throw AuthException('Insufficient Permission for X', 403),
+      ),
+      pageSize: 500,
+      notifier: SyncStateNotifier(),
+      metaResolver: (dt) async =>
+          DocTypeMeta(name: dt, fields: [f('title', 'Data')]),
+    );
+    await engine.run(const ClosureResult(
+      doctypes: ['X'],
+      graph: {'X': DepGraph(doctype: 'X', tier: 0, outgoing: [], incoming: [])},
+      childDoctypes: {},
+      warnings: [],
+    ));
+
+    final row = await metaDao.findByDoctype('X');
+    expect(row, isNotNull);
+    expect(
+      row!.isMobileForm,
+      isFalse,
+      reason: 'a read-denied (403) mobile form must be demoted',
+    );
+  });
+
+  test('does NOT demote a mobile form on a transient network failure', () async {
+    final metaY = DocTypeMeta(name: 'Y', fields: [f('title', 'Data')]);
+    for (final s in buildParentSchemaDDL(metaY, tableName: 'docs__y')) {
+      await db.execute(s);
+    }
+    await db.insert('doctype_meta', {
+      'doctype': 'Y',
+      'metaJson': '{"name":"Y"}',
+      'isMobileForm': 1,
+      'table_name': 'docs__y',
+    });
+    final engine = PullEngine(
+      db: db,
+      metaDao: metaDao,
+      outboxDao: OutboxDao(db),
+      pool: ConcurrencyPool(maxConcurrent: 2),
+      fetcher: PullPageFetcher(
+        listHttp: (doctype, params) async =>
+            throw NetworkException('Cannot reach server'),
+      ),
+      pageSize: 500,
+      notifier: SyncStateNotifier(),
+      metaResolver: (dt) async =>
+          DocTypeMeta(name: dt, fields: [f('title', 'Data')]),
+    );
+    await engine.run(const ClosureResult(
+      doctypes: ['Y'],
+      graph: {'Y': DepGraph(doctype: 'Y', tier: 0, outgoing: [], incoming: [])},
+      childDoctypes: {},
+      warnings: [],
+    ));
+
+    final row = await metaDao.findByDoctype('Y');
+    expect(
+      row!.isMobileForm,
+      isTrue,
+      reason: 'a transient network failure must NOT demote the form',
+    );
+  });
 }

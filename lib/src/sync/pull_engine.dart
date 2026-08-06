@@ -158,10 +158,28 @@ class PullEngine {
       sdkLog(
         'PullEngine._runDoctype($doctype): meta resolve failed, skipping — $e\n$st',
       );
-      // Record on the release-visible, host-observable channel
-      // (SyncState.failedMetaSyncs). The debug-only sdkLog above compiles out
-      // in release and the per-doctype `note` is read by no progress UI.
-      notifier.recordMetaSyncFailure(doctype, 'meta: $e');
+      // Two separate jobs here, and both are needed:
+      //
+      //  1. REPORT it on the release-visible, host-observable channel
+      //     (SyncState.failedMetaSyncs) — the debug-only sdkLog above compiles
+      //     out in release and the per-doctype `note` is read by no progress UI.
+      //  2. STOP RE-REQUESTING it when the refusal is terminal (403 / 5xx), by
+      //     demoting the doctype out of the mobile-form set. Reporting alone
+      //     leaves the doctype in the closure, so it is re-requested and
+      //     re-refused on every single sweep, forever.
+      //
+      // A terminal failure gets the specific reason; anything transient keeps
+      // the generic one and stays in the set so the next sweep retries it.
+      if (_isTerminalPullFailure(e) &&
+          await metaDao.demoteFromMobileForm(doctype)) {
+        notifier.recordMetaSyncFailure(doctype, _terminalSkipReason(e));
+        sdkLog(
+          'PullEngine._runDoctype($doctype): demoted from mobile-form set '
+          '(terminal meta failure).',
+        );
+      } else {
+        notifier.recordMetaSyncFailure(doctype, 'meta: $e');
+      }
       notifier.value = notifier.value.updatePerDoctype(
         doctype,
         // deferred:true so the progress screen (which reads deferred +
@@ -220,6 +238,15 @@ class PullEngine {
             'PullEngine._runDoctype($doctype): child meta '
             '${edge.targetDoctype} resolve failed, skipping — $e\n$st',
           );
+          // NOTE — a `demoteFromMobileForm(doctype)` on this path was
+          // considered and REJECTED. Demoting the PARENT because one of its
+          // child tables failed to resolve removes a form the user can still
+          // use, and contradicts the skip-only-this-edge reasoning below.
+          // Demoting the CHILD would be a no-op anyway: `demoteFromMobileForm`
+          // only clears rows with `isMobileForm = 1`, and a child table
+          // (`istable`) is never a mobile form. So this path reports and
+          // continues; it does not demote.
+          //
           // Record the CHILD doctype's failure observably, then SKIP ONLY this
           // child edge (continue) rather than aborting the whole parent
           // (return): the parent's own scalar fields and its other child
@@ -389,6 +416,9 @@ class PullEngine {
           lastOkCursor: scratchComplete,
         ),
       );
+      // Recovered: drop any prior "skipped (no access / server error)" note so
+      // the sync-feedback surface stops reporting a doctype that now pulled.
+      notifier.clearMetaSyncFailure(doctype);
     } catch (e, st) {
       // Mid-pull failure: do NOT persist cursor. Surface the doctype's
       // current progress so the UI can show partial counts; full retry
@@ -397,12 +427,25 @@ class PullEngine {
       // A 403 is the server declining to read this doctype at all, which is an
       // EXPECTED steady state rather than a fault: the closure pull is no longer
       // gated on client-side `canRead` (reference masters can carry can_read=0
-      // yet still be required for link pickers), so a genuinely forbidden
-      // doctype is now requested on every cycle and refused every time. Reported
-      // as `deferred` so a host rendering per-doctype state does not show a
-      // permanent red "failed" for something working as designed. Real faults
-      // (5xx, transport, schema) keep the plain failed shape.
+      // yet still be required for link pickers). Reported as `deferred` so a
+      // host rendering per-doctype state does not show a permanent red "failed"
+      // for something working as designed. Real faults (5xx, transport, schema)
+      // keep the plain failed shape.
       final refused = e is FrappeException && e.statusCode == 403;
+      // Reporting it is not enough. Until this doctype leaves the mobile-form
+      // set it is re-requested and re-refused on EVERY sweep — the measured
+      // steady state was a 403 (DocType) and a 500 (Number Card) recurring 5x
+      // each in a 10-minute capture. Demote on a terminal refusal so the
+      // request stops being made; `resyncMobileConfiguration` re-marks every
+      // configured form, so a transient blip self-heals on the next sync.
+      if (_isTerminalPullFailure(e) &&
+          await metaDao.demoteFromMobileForm(doctype)) {
+        notifier.recordMetaSyncFailure(doctype, _terminalSkipReason(e));
+        sdkLog(
+          'PullEngine.pull($doctype): demoted from mobile-form set '
+          '(terminal data failure — read-denied or server error).',
+        );
+      }
       notifier.value = notifier.value.updatePerDoctype(
         doctype,
         DoctypeSyncState(
@@ -416,6 +459,32 @@ class PullEngine {
         ),
       );
     }
+  }
+
+  /// A server response the pull can never satisfy by retrying: read-denied
+  /// (403) or a server error (5xx — e.g. a doctype missing its controller).
+  /// Transient failures (network, timeout, 401-before-refresh) are excluded so
+  /// a blip never demotes a form the user can still use.
+  static bool _isTerminalPullFailure(Object e) {
+    if (e is NetworkException) return false;
+    if (e is FrappeException) {
+      final s = e.statusCode;
+      return s == 403 || (s != null && s >= 500);
+    }
+    return false;
+  }
+
+  /// Short, user-facing reason for skipping a doctype during sync — surfaced on
+  /// [SyncState.failedMetaSyncs] so the UI can tell the user WHY an item was
+  /// left out (permission vs a transient server-side error) instead of failing
+  /// silently.
+  static String _terminalSkipReason(Object e) {
+    if (e is FrappeException) {
+      final s = e.statusCode;
+      if (s == 403) return 'No access (permission denied)';
+      if (s != null && s >= 500) return 'Temporarily unavailable (server error)';
+    }
+    return 'Skipped';
   }
 
   static Map<String, dynamic>? _decodeJsonOrNull(String? raw) {
