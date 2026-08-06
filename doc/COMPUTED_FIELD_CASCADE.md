@@ -142,6 +142,9 @@ covered. Cascading native `fetch_from` patches may be addressed as a follow-up.
 - **Per-form.** Enable it only on forms whose `onFieldChange` handlers are known to be safe to
   re-enter. Handlers that issue network calls on change should be reviewed before enabling, so
   a cascade doesn't fan out unexpected requests.
-- **Deterministic.** With the flag off, no scheduling, no re-fire, no depth tracking.
+- **Deterministic.** With the flag off there is no cascade re-fire and no depth tracking. The
+  one piece of scheduling that remains is the deferred self-key widget patch described above —
+  so "no scheduling with the flag off" is true for every path *except* a handler that patches
+  the field currently changing.
 
 See also: [`doc/FIELD_CHANGE_HANDLER.md`](FIELD_CHANGE_HANDLER.md).

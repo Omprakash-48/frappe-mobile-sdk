@@ -59,7 +59,39 @@ class FormController extends ChangeNotifier {
   /// Parent document values, supplying `parent` to depends_on expressions on a
   /// child-row form. Null on a top-level form, where Frappe aliases `parent`
   /// to `doc`.
-  final Map<String, dynamic>? _parentData;
+  Map<String, dynamic>? _parentData;
+
+  /// Parent document values used to resolve `parent.<field>` in depends_on.
+  Map<String, dynamic>? get parentData => _parentData;
+
+  /// Wire `parent` after construction, for a host that builds its OWN
+  /// [FormController] and hands it to [FrappeFormBuilder] together with
+  /// `parentFormData` — the constructor argument is unreachable in that case,
+  /// and leaving it null silently aliases `parent` to `doc`, so every
+  /// `parent.<field>` condition would read this row's own values instead.
+  /// Mirrors how [fetchLinkedDocument] is injected by the widget layer.
+  ///
+  /// Recomputes the UI state of every field already being observed, because
+  /// visibility / mandatory / read-only may all depend on `parent`.
+  ///
+  /// Does NOT re-run validation. Intended for init-time wiring (which is where
+  /// [FrappeFormBuilder] uses it), before anything has validated. Assigning it
+  /// after [validate] has run leaves the *displayed* errors as they were until
+  /// the next validation, so a field that `mandatory_depends_on` has just made
+  /// required shows no error yet — call [validate] yourself if you need the
+  /// display refreshed immediately. Saving is unaffected either way:
+  /// [validate] clears `_errors` and re-derives every field from the live UI
+  /// state this setter has already refreshed, so a submit can never pass on a
+  /// stale required-set.
+  set parentData(Map<String, dynamic>? value) {
+    if (identical(_parentData, value)) return;
+    _parentData = value;
+    for (final e in _uiNotifiers.entries) {
+      e.value.value = _computeUiState(e.key);
+    }
+    _submitData.value = buildSubmitData();
+    notifyListeners();
+  }
 
   final Map<String, dynamic> _rawValues = {};
   final Map<String, ValueNotifier<dynamic>> _valueNotifiers = {};
@@ -88,6 +120,32 @@ class FormController extends ChangeNotifier {
     if (initialData != null) {
       for (final k in _stdEvalFields) {
         if (initialData.containsKey(k)) _rawValues[k] = initialData[k];
+      }
+    }
+    // Every Frappe document has a docstatus — 0 while it is a draft — and
+    // `frappe.model.get_new_doc` stamps it on a brand-new doc, so Desk reads
+    // `eval:doc.docstatus == 0` as true there. Nothing in the SDK sets the key,
+    // so without this a draft-only field is hidden on every new document.
+    _rawValues.putIfAbsent('docstatus', () => 0);
+
+    // `__islocal` marks a document that has never been saved. Desk stamps it
+    // alongside docstatus (`create_new.js:309-310`: `__islocal = 1`,
+    // `docstatus = 0`) and drops it once the doc has a name, and Frappe's own
+    // new-doc test is exactly "either flag or no name"
+    // (`document.py:539`: `if self.get("__islocal") or not self.get("name")`).
+    // So a doc with no name IS local — derived, not invented.
+    //
+    // Without this, `!doc.__islocal` reads `!undefined` == true, i.e. the SDK
+    // behaves as though every document were already saved: it SHOWS the
+    // saved-only fields Desk hides on create (the dominant corpus form —
+    // `depends_on: "eval:!doc.__islocal"`), and for `read_only_depends_on` it
+    // LOCKS a field the user is supposed to be able to fill in.
+    //
+    // An explicit `__islocal` from the host wins — it was seeded above.
+    if (!_rawValues.containsKey('__islocal')) {
+      final docName = _rawValues['name'];
+      if (docName == null || docName.toString().isEmpty) {
+        _rawValues['__islocal'] = 1;
       }
     }
     for (final f in _meta.fields) {
@@ -592,6 +650,19 @@ class FormController extends ChangeNotifier {
       if (v != null && !_stdEvalFields.contains(k)) complete[k] = v;
     });
 
+    // The payload must not carry the std fields, but the visibility sweep below
+    // MUST still see them. Evaluating `eval:doc.docstatus == 0` against a scope
+    // with no `docstatus` yields undefined == 0 -> false -> "hidden" -> the
+    // field is removed from the save, even though _computeUiState (which reads
+    // _rawValues, where docstatus IS present) rendered it and the user filled
+    // it in. Same for a Section/Tab Break gated that way, which drops every
+    // field beneath it. Evaluate against the doc, remove from the payload.
+    final evalScope = <String, dynamic>{
+      ...complete,
+      for (final k in _stdEvalFields)
+        if (_rawValues.containsKey(k)) k: _rawValues[k],
+    };
+
     // drop hidden-by-own-depends_on and hidden-by-container
     final hiddenByContainer = <String>{};
     String? secDeps, tabDeps;
@@ -610,14 +681,14 @@ class FormController extends ChangeNotifier {
           tabDeps != null &&
           !DependsOnEvaluator.evaluate(
             tabDeps,
-            complete,
+            evalScope,
             parentData: _parentData,
           );
       final secHidden =
           secDeps != null &&
           !DependsOnEvaluator.evaluate(
             secDeps,
-            complete,
+            evalScope,
             parentData: _parentData,
           );
       if (tabHidden || secHidden) hiddenByContainer.add(f.fieldname!);
@@ -632,7 +703,7 @@ class FormController extends ChangeNotifier {
       if (f.dependsOn == null || f.dependsOn!.isEmpty) return false;
       return !DependsOnEvaluator.evaluate(
         f.dependsOn,
-        complete,
+        evalScope,
         parentData: _parentData,
       );
     });

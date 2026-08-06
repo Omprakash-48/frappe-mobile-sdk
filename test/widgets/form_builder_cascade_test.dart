@@ -219,12 +219,15 @@ void main() {
 
     // The key assertion is that pumpAndSettle RETURNS (no infinite loop).
     // Calls are bounded: 1 for `a` + at most (depth cap) re-fires for `b`.
+    // Pin the exact count: 1 dispatch for `a` + _maxProgrammaticCascadeDepth
+    // (12) non-converging re-fires for `b`. `lessThanOrEqualTo(20)` also passed
+    // if the cap silently changed to 5 or 19, which is the one thing this test
+    // exists to police.
     expect(
       calls,
-      lessThanOrEqualTo(20),
-      reason: 'cascade must be bounded by the depth cap, not loop forever',
+      equals(13),
+      reason: 'cascade must stop at the depth cap (1 + 12), not loop forever',
     );
-    expect(calls, greaterThan(1), reason: 'the cascade did fire at least once');
   });
 
   testWidgets('cascade OFF: a SELF-referential rewrite must not recurse '
@@ -382,15 +385,23 @@ void main() {
       await tester.tap(find.byKey(const ValueKey('check_flag')));
       await tester.pumpAndSettle();
 
+      // Exactly once. `lessThanOrEqualTo(5)` could never fail here — the guard
+      // inside the handler throws at > 5, so any reachable value satisfied it,
+      // and a partial regression leaking two or three extra frames stayed
+      // green. The documented contract is "the handler fires exactly once".
       expect(
         flagHandlerCalls,
-        lessThanOrEqualTo(5),
+        equals(1),
         reason: 'the deferred self-key echo must not re-fire the handler',
       );
+      // Pin the representation. The handler returns bool `true`; what lands in
+      // doc space is int 1, because the Check widget's echo goes through
+      // FieldNormalizer. `anyOf(true, 1)` accepted either and so asserted
+      // nothing about which one the payload carries.
       expect(
         emitted?['flag'],
-        anyOf(true, 1),
-        reason: 'the self-patch value must land in the doc',
+        equals(1),
+        reason: 'the self-patch value must land in the doc as Frappe 0/1',
       );
     },
   );

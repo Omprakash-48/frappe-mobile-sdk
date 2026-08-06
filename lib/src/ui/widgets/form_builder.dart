@@ -534,6 +534,13 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
             parentData: widget.parentFormData,
           );
       _ownsController = widget.controller == null;
+      // A host-supplied controller never saw the constructor argument above, so
+      // thread `parent` in here too — otherwise parentFormData is silently
+      // ignored and every `parent.<field>` condition falls back to aliasing
+      // `doc`. no-clobber: a controller that already carries parentData wins.
+      if (widget.parentFormData != null && _controller!.parentData == null) {
+        _controller!.parentData = widget.parentFormData;
+      }
       _controller!.fetchLinkedDocument = widget.fetchLinkedDocument;
       // no-clobber: only wire the bridge hook if the controller has none.
       if (widget.onFieldChange != null &&
@@ -1001,8 +1008,14 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
   /// [FrappeFormBuilder.onFieldChange], depends_on rebuild). Extracted from the
   /// field `onChanged` callback so a value set programmatically can re-enter the
   /// SAME pipeline when [FrappeFormBuilder.cascadeProgrammaticChanges] is on —
-  /// see [_scheduleProgrammaticCascade]. When the flag is off this is
-  /// byte-identical to the previous inline `onChanged`.
+  /// see [_scheduleProgrammaticCascade].
+  ///
+  /// With the flag off this is the previous inline `onChanged` **except on the
+  /// self-key path**, where two ungated fixes apply: the widget patch is
+  /// deferred one frame, and its echo is swallowed to a state-sync. So a
+  /// depth-0 change that arrives while that deferred `patchValue` is in flight
+  /// no longer re-runs the pipeline. Only reachable when a handler patches the
+  /// field currently changing; see `doc/COMPUTED_FIELD_CASCADE.md`.
   ///
   /// [cascadeDepth] > 0 marks a programmatic cascade re-fire: the field's value
   /// is already in [_formData] (the parent patch set it), so `oldValue == value`
