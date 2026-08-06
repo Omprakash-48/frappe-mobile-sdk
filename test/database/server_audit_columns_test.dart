@@ -358,6 +358,154 @@ void main() {
         );
       },
     );
+
+    test(
+      'v5 → v6 clears every pull cursor so the audit columns get backfilled',
+      () async {
+        // Adding the columns is not enough. Once a doctype is `complete`, pulls
+        // are incremental (`modified >= cursor.modified`), so an upgraded
+        // install would only ever receive audit values for rows whose
+        // `modified` advanced server-side — every pre-existing row would keep
+        // NULL forever, and `IFNULL(owner,'') = <me>` would match none of them.
+        // The result is a silently PARTIAL filter, which is harder to notice
+        // than the `no such column` throw this migration replaced.
+        final tmpDir = Directory.systemTemp.createTempSync(
+          'audit_cols_cursor_',
+        );
+        addTearDown(() {
+          if (tmpDir.existsSync()) tmpDir.deleteSync(recursive: true);
+        });
+        final dbPath = p.join(tmpDir.path, 'test.db');
+
+        final db = await openDatabase(
+          dbPath,
+          version: 5,
+          onCreate: (d, _) async {
+            await d.execute('''
+            CREATE TABLE sdk_meta (
+              id INTEGER PRIMARY KEY CHECK (id = 1),
+              schema_version INTEGER NOT NULL DEFAULT 0,
+              session_user_json TEXT,
+              bootstrap_done INTEGER NOT NULL DEFAULT 0,
+              offline_enabled INTEGER NOT NULL DEFAULT 0,
+              offline_enabled_set_at INTEGER
+            )
+          ''');
+            await d.insert('sdk_meta', {'id': 1, 'schema_version': 5});
+            await d.execute(
+              'CREATE TABLE doctype_meta ('
+              '  doctype TEXT PRIMARY KEY,'
+              '  table_name TEXT,'
+              '  last_ok_cursor TEXT,'
+              '  last_pull_ok_at INTEGER'
+              ')',
+            );
+            // Two drained doctypes — both would otherwise stay incremental.
+            await d.insert('doctype_meta', {
+              'doctype': 'Order',
+              'table_name': 'docs__order',
+              'last_ok_cursor':
+                  '{"modified":"2026-01-01 00:00:00","name":"O-1",'
+                  '"complete":true}',
+              'last_pull_ok_at': 1,
+            });
+            await d.insert('doctype_meta', {
+              'doctype': 'Customer',
+              'table_name': 'docs__customer',
+              'last_ok_cursor':
+                  '{"modified":"2026-02-02 00:00:00","name":"C-9",'
+                  '"complete":true}',
+              'last_pull_ok_at': 2,
+            });
+            await d.execute(
+              'CREATE TABLE docs__order ('
+              '  mobile_uuid TEXT PRIMARY KEY,'
+              '  sync_status TEXT'
+              ')',
+            );
+          },
+          singleInstance: false,
+        );
+        addTearDown(db.close);
+
+        await AppDatabaseTestSeam.runOnUpgrade(db, 5, 6);
+
+        final rows = await db.query('doctype_meta', orderBy: 'doctype');
+        expect(rows, hasLength(2));
+        for (final r in rows) {
+          expect(
+            r['last_ok_cursor'],
+            isNull,
+            reason:
+                '${r['doctype']} must re-drain on the next sync; a surviving '
+                'complete cursor pins it to incremental pulls forever',
+          );
+        }
+        // Everything else about the row is left alone.
+        expect(rows.first['doctype'], 'Customer');
+        expect(rows.first['table_name'], 'docs__customer');
+
+        // The ALTERs still ran and the version still landed — the cursor clear
+        // shares their transaction, so a failure would have rolled both back.
+        expect(
+          (await _columns(db, 'docs__order')).keys,
+          containsAll(serverAuditColumnNames),
+        );
+        final meta = await db.query('sdk_meta', where: 'id = 1');
+        expect(meta.first['schema_version'], 6);
+      },
+    );
+
+    test('v5 → v6 survives a doctype_meta without last_ok_cursor', () async {
+      // `last_ok_cursor` is added on the v2→v3 leg, which `_onUpgrade` always
+      // runs first, so production DBs reaching v6 always have it. Guarded
+      // anyway: an unexpected throw would roll back the ALTERs and leave the
+      // schema unmigrated.
+      final tmpDir = Directory.systemTemp.createTempSync('audit_cols_nocur_');
+      addTearDown(() {
+        if (tmpDir.existsSync()) tmpDir.deleteSync(recursive: true);
+      });
+      final dbPath = p.join(tmpDir.path, 'test.db');
+
+      final db = await openDatabase(
+        dbPath,
+        version: 5,
+        onCreate: (d, _) async {
+          await d.execute('''
+            CREATE TABLE sdk_meta (
+              id INTEGER PRIMARY KEY CHECK (id = 1),
+              schema_version INTEGER NOT NULL DEFAULT 0,
+              session_user_json TEXT,
+              bootstrap_done INTEGER NOT NULL DEFAULT 0,
+              offline_enabled INTEGER NOT NULL DEFAULT 0,
+              offline_enabled_set_at INTEGER
+            )
+          ''');
+          await d.insert('sdk_meta', {'id': 1, 'schema_version': 5});
+          await d.execute(
+            'CREATE TABLE doctype_meta (doctype TEXT PRIMARY KEY)',
+          );
+          await d.insert('doctype_meta', {'doctype': 'Order'});
+          await d.execute(
+            'CREATE TABLE docs__order ('
+            '  mobile_uuid TEXT PRIMARY KEY,'
+            '  sync_status TEXT'
+            ')',
+          );
+        },
+        singleInstance: false,
+      );
+      addTearDown(db.close);
+
+      await AppDatabaseTestSeam.runOnUpgrade(db, 5, 6);
+
+      expect(
+        (await _columns(db, 'docs__order')).keys,
+        containsAll(serverAuditColumnNames),
+      );
+      final meta = await db.query('sdk_meta', where: 'id = 1');
+      expect(meta.first['schema_version'], 6);
+    });
   });
 
   group('pull persists the server values', () {

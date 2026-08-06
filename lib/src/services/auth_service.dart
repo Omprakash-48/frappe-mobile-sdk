@@ -919,6 +919,20 @@ class AuthService {
 /// statuses (e.g. 417 validation, 5xx) return false so an offline or
 /// transiently-failing client never has its token wiped. Used by [AuthService]
 /// token refresh; unit-tested in auth_service_refresh_test.dart.
+///
+/// Classifies on STATUS, not on exception subtype, and that distinction is the
+/// whole point: [RestHelper] only produces an [AuthException] for 401/403 when
+/// the error body parses as JSON. A non-JSON body — Frappe behind nginx, a proxy
+/// error page, an HTML login redirect — returns early as `ApiException(msg, 401)`
+/// instead. Matching on [AuthException] therefore missed exactly those cases and
+/// KEPT a dead refresh token, leaving the client to 401 -> refresh -> fail
+/// forever with no path to re-login.
+///
+/// Widening to [FrappeException] is safe in both directions: every
+/// [NetworkException] construction site passes no status code (so transport
+/// failures still return false and an offline user keeps their token), and no
+/// site synthesizes a 401/403 — every [ApiException] carries either a real
+/// `response.statusCode` or none at all.
 bool isDefinitiveAuthRejection(Object error) =>
-    error is AuthException &&
+    error is FrappeException &&
     (error.statusCode == 401 || error.statusCode == 403);

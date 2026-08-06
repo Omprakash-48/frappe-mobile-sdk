@@ -2,6 +2,7 @@ import 'dart:convert';
 
 import 'package:sqflite/sqflite.dart';
 
+import '../api/exceptions.dart';
 import '../concurrency/concurrency_pool.dart';
 import '../utils/sdk_log.dart';
 import '../concurrency/write_queue.dart';
@@ -259,7 +260,22 @@ class PullEngine {
           cursor: scratch,
           pageSize: pageSize,
         );
-        if (result.rows.isEmpty) break;
+        if (result.rows.isEmpty) {
+          // An empty page is normally end-of-stream. The exception is a page
+          // whose names were ALL dropped by the server's per-doc permission
+          // gate: treating that as drained would fall through to
+          // markComplete() below and record the doctype as fully pulled with
+          // every later page never fetched — silent, permanent data loss
+          // recoverable only by clearing the cursor. Skip past it instead.
+          //
+          // Only initial (offset) mode can skip: incremental mode pins
+          // limit_start at 0, so continuing would re-request the same page
+          // forever. Breaking there is safe and idempotent — the cursor stays
+          // put and the page is retried next cycle.
+          if (!result.pageFiltered || scratch.complete) break;
+          scratch = result.advancedCursor;
+          continue;
+        }
 
         if (writeQueueResolver != null) {
           final wq = _writeQueues.putIfAbsent(
@@ -364,13 +380,25 @@ class PullEngine {
       // current progress so the UI can show partial counts; full retry
       // happens on next pull cycle.
       sdkLog('PullEngine.pull($doctype) failed mid-pull — $e\n$st');
+      // A 403 is the server declining to read this doctype at all, which is an
+      // EXPECTED steady state rather than a fault: the closure pull is no longer
+      // gated on client-side `canRead` (reference masters can carry can_read=0
+      // yet still be required for link pickers), so a genuinely forbidden
+      // doctype is now requested on every cycle and refused every time. Reported
+      // as `deferred` so a host rendering per-doctype state does not show a
+      // permanent red "failed" for something working as designed. Real faults
+      // (5xx, transport, schema) keep the plain failed shape.
+      final refused = e is FrappeException && e.statusCode == 403;
       notifier.value = notifier.value.updatePerDoctype(
         doctype,
         DoctypeSyncState(
           pulledCount: pulledCount,
           lastPageSize: lastPageSize,
           startedAt: startedAt,
-          note: 'failed: $e',
+          deferred: refused,
+          note: refused
+              ? 'deferred: server refused read (403) for this doctype'
+              : 'failed: $e',
         ),
       );
     }

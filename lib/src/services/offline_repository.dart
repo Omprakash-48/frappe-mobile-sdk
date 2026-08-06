@@ -416,6 +416,15 @@ class OfflineRepository {
     // `\b` guards against false positives on a hypothetical `*_sync_status*`
     // column (`_` is a word char, so no boundary there).
     final syncStatusColumn = RegExp(r'\bsync_status\b');
+    // `sync_status` alone is not a sound parent marker: it is absent from
+    // `systemChildColumnNames`, and `child_schema.dart` emits every mappable
+    // DocField as a column — so a CHILD doctype that happens to declare a field
+    // literally named `sync_status` gets one, and would be misclassified as a
+    // parent here (its rows then read back through `Document.fromResolverRow`
+    // as if they were top-level documents). `parent_uuid` IS a child system
+    // column and is never emitted on a parent, so requiring its absence makes
+    // the test unambiguous in both directions.
+    final parentUuidColumn = RegExp(r'\bparent_uuid\b');
     final out = <Document>[];
     for (final entry in tableByDoctype.entries) {
       final dt = entry.key;
@@ -423,6 +432,7 @@ class OfflineRepository {
       final ddl = ddlByTable[tableName];
       if (ddl == null) continue; // table absent
       if (!syncStatusColumn.hasMatch(ddl)) continue; // no sync_status column
+      if (parentUuidColumn.hasMatch(ddl)) continue; // child mirror, not a parent
       try {
         final rows = await db.query(
           tableName,

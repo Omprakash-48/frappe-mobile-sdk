@@ -1602,6 +1602,11 @@ class FrappeSDK {
   /// doctypes and child-table doctypes are excluded — entry-points are managed
   /// by the normal sync cycle; child tables ride along inside their parents.
   ///
+  /// Because of that exclusion this is the WRONG method for remediating stale
+  /// entry-point data (e.g. backfilling the schema-v6 audit columns): it reports
+  /// success while the form-entry doctypes were never re-pulled. Use
+  /// [forceFullRepull] for that.
+  ///
   /// No-ops silently if the SDK isn't initialized (`_metaService`,
   /// `_syncService`, or `_database` is null). Per-doctype failures are logged
   /// and skipped. Emits to [syncComplete$] when finished so the home screen
@@ -1647,6 +1652,72 @@ class FrappeSDK {
       }
     } catch (e, st) {
       sdkLog('FrappeSDK: forcePullAll failed — $e\n$st');
+    }
+    _syncCompleteController?.add(null);
+  }
+
+  /// Re-pulls the closure from scratch, INCLUDING entry-point mobile-form
+  /// doctypes by default — the one difference from [forcePullAll], and the whole
+  /// reason this exists.
+  ///
+  /// Use this when a change makes previously-pulled rows stale in a way an
+  /// incremental pull cannot repair. The motivating case is the schema-v6 audit
+  /// columns (`owner` / `creation` / `modified_by`): they are server-owned, so a
+  /// row only receives them when it is re-fetched, and incremental pulls
+  /// (`modified >= cursor.modified`) never re-fetch a row whose `modified` has
+  /// not advanced. `owner = <me>` then silently matches only recently-touched
+  /// rows.
+  ///
+  /// [forcePullAll] cannot serve this purpose: it excludes entry points, which
+  /// are exactly the mobile-form doctypes where an `owner`-scoped filter is the
+  /// point. Note the trade-off this method makes deliberately — re-draining an
+  /// entry-point doctype is the heaviest pull the SDK performs. Prefer it as a
+  /// one-shot remediation, not a pull-to-refresh handler.
+  ///
+  /// Set [includeEntryPoints] to false for [forcePullAll]'s scope with this
+  /// method's explicit naming. Child-table doctypes are always excluded — they
+  /// ride along inside their parents.
+  ///
+  /// No-ops silently if the SDK isn't initialized. Per-doctype failures are
+  /// logged and skipped. Emits to [syncComplete$] when finished.
+  Future<void> forceFullRepull({bool includeEntryPoints = true}) async {
+    if (_metaService == null || _syncService == null || _database == null) {
+      return;
+    }
+    try {
+      await _refreshPermissionsBestEffort();
+      final entryPoints = await _metaService!.getMobileFormDoctypeNames();
+      final closure = await _metaService!.closure(entryPoints);
+      final pullable = await _buildPullableDoctypes(
+        entryPoints: entryPoints,
+        closure: closure,
+        excludeEntryPoints: !includeEntryPoints,
+      );
+      if (pullable.isEmpty) {
+        _syncCompleteController?.add(null);
+        return;
+      }
+      // Clear every cursor before the parallel batch so each worker reads a
+      // freshly-cleared cursor and re-fetches the entire dataset.
+      final dao = _database!.doctypeMetaDao;
+      for (final doctype in pullable) {
+        try {
+          await dao.clearLastOkCursor(doctype);
+        } catch (e, st) {
+          sdkLog(
+            'FrappeSDK: forceFullRepull cursor-clear($doctype) failed — $e\n$st',
+          );
+        }
+      }
+      final results = await _syncService!.pullSyncMany(doctypes: pullable);
+      for (final entry in results.entries) {
+        final err = entry.value.error;
+        if (err != null && err.isNotEmpty) {
+          sdkLog('FrappeSDK: forceFullRepull(${entry.key}) failed — $err');
+        }
+      }
+    } catch (e, st) {
+      sdkLog('FrappeSDK: forceFullRepull failed — $e\n$st');
     }
     _syncCompleteController?.add(null);
   }

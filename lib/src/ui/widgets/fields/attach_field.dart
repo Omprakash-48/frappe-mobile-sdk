@@ -90,6 +90,17 @@ class _AttachmentTooLarge implements Exception {
 /// For /private/files/ and /files/, uses the Frappe download_file API and
 /// [imageHeaders]/[fileUrlBase] for auth (mirrors ImageField).
 class AttachField extends BaseField {
+  /// Surfaces [message] to the user. `_AttachViewButtonState` has its own
+  /// `_showError`, but that lives on the download button's State and is not
+  /// reachable from [buildField] — hence this static twin.
+  ///
+  /// Takes a [ScaffoldMessengerState] rather than a [BuildContext]: callers are
+  /// past an `await`, and resolving from a context after an async gap is what
+  /// `use_build_context_synchronously` warns about. Capture before the await.
+  static void _notify(ScaffoldMessengerState messenger, String message) {
+    messenger.showSnackBar(SnackBar(content: Text(message)));
+  }
+
   final Future<String?> Function(File file)? uploadFile;
 
   /// Base URL of the Frappe server, used to resolve relative file paths into
@@ -205,28 +216,49 @@ class AttachField extends BaseField {
                   child: OutlinedButton.icon(
                     onPressed: enabled && !field.readOnly
                         ? () async {
-                            final result = await FilePicker.pickFiles();
-                            if (result != null &&
-                                result.files.single.path != null) {
+                            final messenger = ScaffoldMessenger.of(context);
+                            // `sdkLog` is debug-only, so every failure below was
+                            // invisible in release: the picker closed, the field
+                            // stayed empty, and nothing explained why. Also
+                            // guards `pickFiles` itself, which throws on a
+                            // denied storage permission.
+                            try {
+                              final result = await FilePicker.pickFiles();
+                              if (result == null ||
+                                  result.files.single.path == null) {
+                                return;
+                              }
                               final path = result.files.single.path!;
                               final file = File(path);
-                              if (uploadFile != null) {
-                                try {
-                                  final url = await uploadFile!(file);
-                                  if (url != null && url.isNotEmpty) {
-                                    fieldState.didChange(url);
-                                    onChanged?.call(url);
-                                  }
-                                  // On failure do not store local path (server expects file_url)
-                                } catch (e, st) {
-                                  sdkLog(
-                                    'AttachField: uploadFile failed — $e\n$st',
-                                  );
-                                }
-                              } else {
+                              if (uploadFile == null) {
                                 fieldState.didChange(path);
                                 onChanged?.call(path);
+                                return;
                               }
+                              final url = await uploadFile!(file);
+                              if (url != null && url.isNotEmpty) {
+                                fieldState.didChange(url);
+                                onChanged?.call(url);
+                                return;
+                              }
+                              // Upload "succeeded" but returned nothing usable.
+                              // Never store the local path — the server expects
+                              // a file_url.
+                              sdkLog(
+                                'AttachField: uploadFile returned an empty URL '
+                                'for $path',
+                              );
+                              _notify(
+                                messenger,
+                                'Upload failed — the file was not attached.',
+                              );
+                            } catch (e, st) {
+                              sdkLog('AttachField: attach failed — $e\n$st');
+                              _notify(
+                                messenger,
+                                'Could not attach the file. Check your '
+                                'connection and storage permissions.',
+                              );
                             }
                           }
                         : null,
@@ -331,6 +363,27 @@ class _AttachViewButtonState extends State<_AttachViewButton> {
 
   bool _busy = false;
 
+  /// Set in [dispose]. The download runs to completion regardless — there is no
+  /// cancel token on `http.Client.send`'s stream that would abort it cleanly
+  /// mid-write — but once unmounted we must not hand the file to an external
+  /// app. Without this, tapping Open on a large PDF and then navigating away
+  /// launched a viewer over whatever the user had moved on to.
+  bool _disposed = false;
+
+  @override
+  void dispose() {
+    _disposed = true;
+    // Only close a client this widget owns; an injected one belongs to the
+    // caller (see [_AttachViewButton.httpClient]).
+    _ownedClient?.close();
+    _ownedClient = null;
+    super.dispose();
+  }
+
+  /// The client created by [_open] when none was injected, tracked so [dispose]
+  /// can close it and abort an in-flight download's socket.
+  http.Client? _ownedClient;
+
   Future<void> _open() async {
     // Images: reuse the shared full-screen zoomable viewer.
     if (widget.isImage) {
@@ -357,6 +410,7 @@ class _AttachViewButtonState extends State<_AttachViewButton> {
     setState(() => _busy = true);
     // Reuse an injected client; otherwise create one and close it below.
     final client = widget.httpClient ?? http.Client();
+    if (widget.httpClient == null) _ownedClient = client;
     File? target;
     try {
       final request = http.Request('GET', Uri.parse(widget.url));
@@ -392,6 +446,14 @@ class _AttachViewButtonState extends State<_AttachViewButton> {
         await sink.flush();
       } finally {
         await sink.close();
+      }
+      // The user may have navigated away while this downloaded. Launching an
+      // external viewer now would appear over an unrelated screen, so drop the
+      // file instead. Checked AFTER the write completes because the stream
+      // cannot be aborted mid-chunk.
+      if (_disposed) {
+        await _deleteQuietly(target);
+        return;
       }
       final result = await OpenFilex.open(target.path);
       if (result.type != ResultType.done && mounted) {

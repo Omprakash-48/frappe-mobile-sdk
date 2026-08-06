@@ -17,7 +17,7 @@ void main() {
       listHttp: (doctype, params) async {
         cap.doctype = doctype;
         cap.params = params;
-        return const [];
+        return const ListHttpPage([]);
       },
     );
     final meta = DocTypeMeta(
@@ -56,12 +56,14 @@ void main() {
           capturedParams.add(Map.of(params));
           call++;
           if (call == 1) {
-            return List.generate(
-              3,
-              (i) => {'name': 'X-${i + 1}', 'modified': '2026-01-0${i + 1}'},
+            return ListHttpPage(
+              List.generate(
+                3,
+                (i) => {'name': 'X-${i + 1}', 'modified': '2026-01-0${i + 1}'},
+              ),
             );
           }
-          return const [];
+          return const ListHttpPage([]);
         },
       );
       final meta = DocTypeMeta(name: 'X', fields: const []);
@@ -97,7 +99,7 @@ void main() {
       final fetcher = PullPageFetcher(
         listHttp: (doctype, params) async {
           cap.params = params;
-          return const [];
+          return const ListHttpPage([]);
         },
       );
       final meta = DocTypeMeta(name: 'X', fields: const []);
@@ -139,10 +141,10 @@ void main() {
     'initial sync: advancedCursor tracks modified/name + advances start',
     () async {
       final fetcher = PullPageFetcher(
-        listHttp: (doctype, params) async => [
+        listHttp: (doctype, params) async => const ListHttpPage([
           {'name': 'X-1', 'modified': '2026-01-01 00:00:00'},
           {'name': 'X-2', 'modified': '2026-01-02 00:00:00'},
-        ],
+        ]),
       );
       final meta = DocTypeMeta(name: 'X', fields: const []);
       final result = await fetcher.fetch(
@@ -160,13 +162,13 @@ void main() {
   );
 
   test(
-    'incremental: advancedCursor uses last row modified/name, complete=true',
+    'incremental: advancedCursor uses max row modified/name, complete=true',
     () async {
       final fetcher = PullPageFetcher(
-        listHttp: (doctype, params) async => [
+        listHttp: (doctype, params) async => const ListHttpPage([
           {'name': 'X-1', 'modified': '2026-01-01 00:00:00'},
           {'name': 'X-2', 'modified': '2026-01-02 00:00:00'},
-        ],
+        ]),
       );
       final meta = DocTypeMeta(name: 'X', fields: const []);
       final result = await fetcher.fetch(
@@ -189,7 +191,7 @@ void main() {
 
   test('empty result → advancedCursor stays unchanged', () async {
     final fetcher = PullPageFetcher(
-      listHttp: (doctype, params) async => const [],
+      listHttp: (doctype, params) async => const ListHttpPage([]),
     );
     final meta = DocTypeMeta(name: 'X', fields: const []);
     const start = Cursor(modified: '2026-01-01', name: 'A', complete: true);
@@ -209,7 +211,7 @@ void main() {
     final fetcher = PullPageFetcher(
       listHttp: (doctype, params) async {
         cap.params = params;
-        return const [];
+        return const ListHttpPage([]);
       },
     );
     final meta = DocTypeMeta(
@@ -252,6 +254,191 @@ void main() {
     expect(fields, contains('taxes'));
   });
 
+  group('out-of-order pages (listFullDocs bulk-fetch path)', () {
+    // `bulkGetWithChildren` is a `names in (...)` fetch: nothing in the request
+    // obliges the server to honour `order_by`. Taking `rows.last` as the
+    // watermark therefore trusted an ordering the SDK never established.
+    final scrambled = <Map<String, dynamic>>[
+      {'name': 'X-3', 'modified': '2026-01-03 00:00:00'},
+      {'name': 'X-1', 'modified': '2026-01-01 00:00:00'},
+      {'name': 'X-2', 'modified': '2026-01-02 00:00:00'},
+    ];
+
+    test('incremental: cursor takes the page MAX, not rows.last', () async {
+      final fetcher = PullPageFetcher(
+        listHttp: (doctype, params) async => ListHttpPage(scrambled),
+      );
+      final result = await fetcher.fetch(
+        doctype: 'X',
+        meta: DocTypeMeta(name: 'X', fields: const []),
+        cursor: const Cursor(
+          modified: '2026-01-01 00:00:00',
+          name: 'A',
+          complete: true,
+        ),
+        pageSize: 500,
+      );
+      expect(
+        result.advancedCursor.modified,
+        '2026-01-03 00:00:00',
+        reason:
+            'rows.last is X-2; the true high-water mark is X-3. Taking the '
+            'last row lets the watermark regress below rows already applied.',
+      );
+      expect(result.advancedCursor.name, 'X-3');
+    });
+
+    test('incremental: a page whose last row carries the page MINIMUM does not '
+        'pin the watermark at the incoming cursor', () async {
+      // This is the stall-guard trap: if the scrambled last row happens to
+      // equal the incoming cursor, PullEngine breaks and persists the cursor
+      // at that minimum. Because server ordering is deterministic for the
+      // same query, every later sync reproduces it — the doctype's watermark
+      // is pinned forever and rows past page 1 are never pulled again.
+      final fetcher = PullPageFetcher(
+        listHttp: (doctype, params) async => const ListHttpPage([
+          {'name': 'X-9', 'modified': '2026-01-09 00:00:00'},
+          {'name': 'A', 'modified': '2026-01-01 00:00:00'},
+        ]),
+      );
+      final result = await fetcher.fetch(
+        doctype: 'X',
+        meta: DocTypeMeta(name: 'X', fields: const []),
+        cursor: const Cursor(
+          modified: '2026-01-01 00:00:00',
+          name: 'A',
+          complete: true,
+        ),
+        pageSize: 500,
+      );
+      expect(result.advancedCursor.modified, '2026-01-09 00:00:00');
+      expect(result.advancedCursor.name, 'X-9');
+    });
+
+    test('initial: cursor tracks the page MAX while start advances', () async {
+      final fetcher = PullPageFetcher(
+        listHttp: (doctype, params) async => ListHttpPage(scrambled),
+      );
+      final result = await fetcher.fetch(
+        doctype: 'X',
+        meta: DocTypeMeta(name: 'X', fields: const []),
+        cursor: Cursor.empty,
+        pageSize: 500,
+      );
+      expect(result.advancedCursor.modified, '2026-01-03 00:00:00');
+      expect(result.advancedCursor.start, 3);
+    });
+  });
+
+  group('permission-filtered pages (namesScanned)', () {
+    final meta = DocTypeMeta(name: 'X', fields: const []);
+
+    test(
+      'initial: zero docs but names scanned → pageFiltered, start advances by '
+      'the name count',
+      () async {
+        final fetcher = PullPageFetcher(
+          listHttp: (doctype, params) async =>
+              const ListHttpPage([], namesScanned: 100),
+        );
+        final result = await fetcher.fetch(
+          doctype: 'X',
+          meta: meta,
+          cursor: Cursor.empty,
+          pageSize: 100,
+        );
+        expect(result.rows, isEmpty);
+        expect(
+          result.pageFiltered,
+          isTrue,
+          reason:
+              'every name on the page was dropped by the per-doc permission '
+              'gate — that is a skip, not end-of-stream',
+        );
+        expect(result.advancedCursor.start, 100);
+      },
+    );
+
+    test(
+      'initial: offset advances by names scanned, not docs returned',
+      () async {
+        final fetcher = PullPageFetcher(
+          listHttp: (doctype, params) async => const ListHttpPage([
+            {'name': 'X-1', 'modified': '2026-01-01 00:00:00'},
+          ], namesScanned: 100),
+        );
+        final result = await fetcher.fetch(
+          doctype: 'X',
+          meta: meta,
+          cursor: Cursor.empty,
+          pageSize: 100,
+        );
+        expect(
+          result.advancedCursor.start,
+          100,
+          reason:
+              'advancing by rows.length (1) would re-request the 99 filtered '
+              'names on every page, growing the overlap without bound',
+        );
+        expect(result.pageFiltered, isFalse);
+      },
+    );
+
+    test('incremental: a filtered page still signals stop (limit_start is '
+        'pinned at 0, so skipping forward is impossible)', () async {
+      final fetcher = PullPageFetcher(
+        listHttp: (doctype, params) async =>
+            const ListHttpPage([], namesScanned: 100),
+      );
+      const start = Cursor(
+        modified: '2026-01-01 00:00:00',
+        name: 'A',
+        complete: true,
+      );
+      final result = await fetcher.fetch(
+        doctype: 'X',
+        meta: meta,
+        cursor: start,
+        pageSize: 100,
+      );
+      expect(result.pageFiltered, isFalse);
+      expect(result.advancedCursor.modified, '2026-01-01 00:00:00');
+      expect(result.advancedCursor.name, 'A');
+    });
+
+    test('namesScanned == 0 is genuine end-of-stream', () async {
+      final fetcher = PullPageFetcher(
+        listHttp: (doctype, params) async =>
+            const ListHttpPage([], namesScanned: 0),
+      );
+      final result = await fetcher.fetch(
+        doctype: 'X',
+        meta: meta,
+        cursor: Cursor.empty,
+        pageSize: 100,
+      );
+      expect(result.pageFiltered, isFalse);
+      expect(result.advancedCursor.start, 0);
+    });
+
+    test('namesScanned == null (plain get_list path) keeps rows.length as the '
+        'offset step', () async {
+      final fetcher = PullPageFetcher(
+        listHttp: (doctype, params) async => const ListHttpPage([
+          {'name': 'X-1', 'modified': '2026-01-01 00:00:00'},
+          {'name': 'X-2', 'modified': '2026-01-02 00:00:00'},
+        ]),
+      );
+      final result = await fetcher.fetch(
+        doctype: 'X',
+        meta: meta,
+        cursor: Cursor.empty,
+        pageSize: 100,
+      );
+      expect(result.advancedCursor.start, 2);
+    });
+  });
+
   test('always requests the server-owned audit fields', () async {
     // `owner` / `creation` / `modified_by` are real columns on every DocType
     // table but are never declared in `meta.fields`, so they must be asked
@@ -261,7 +448,7 @@ void main() {
     final fetcher = PullPageFetcher(
       listHttp: (doctype, params) async {
         cap.params = params;
-        return const [];
+        return const ListHttpPage([]);
       },
     );
     await fetcher.fetch(

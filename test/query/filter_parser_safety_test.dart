@@ -103,7 +103,14 @@ void main() {
         page: 0,
         pageSize: 10,
       );
-      expect(pq.sql, contains("IFNULL(owner, '') = ?"));
+      // BARE `owner = ?`, deliberately not `IFNULL(owner, '') = ?`: the
+      // wrapper is non-sargable, so it could not use the `ix_*_owner` index and
+      // `owner = <me>` was a guaranteed full scan. Equivalent for every
+      // realistic query — a NULL owner is excluded either way — and a
+      // meta-derived column beside it still gets the wrapper.
+      expect(pq.sql, contains('owner = ?'));
+      expect(pq.sql, isNot(contains("IFNULL(owner, '')")));
+      expect(pq.sql, contains("IFNULL(a, '') = ?"));
       expect(pq.params, containsAllInOrder(['someone@example.com', 'keep']));
     },
   );
@@ -134,8 +141,26 @@ void main() {
       page: 0,
       pageSize: 10,
     );
-    expect(pq.sql, contains("IFNULL(modified_by, '') = ?"));
+    expect(pq.sql, contains('modified_by = ?'));
+    expect(pq.sql, isNot(contains("IFNULL(modified_by, '')")));
     expect(pq.params, ['editor@example.com']);
+  });
+
+  test('!= on an audit column KEEPS the IFNULL wrapper', () {
+    // Not symmetric with `=` on purpose: with the wrapper a NULL owner counts as
+    // "not alice" and the row is returned; bare `owner != ?` yields NULL and
+    // would silently start excluding those rows.
+    final meta = DocTypeMeta(name: 'X', fields: [f('a', 'Data')]);
+    final pq = FilterParser.toSql(
+      meta: meta,
+      tableName: 'docs__x',
+      filters: [
+        ['owner', '!=', 'someone@example.com'],
+      ],
+      page: 0,
+      pageSize: 10,
+    );
+    expect(pq.sql, contains("IFNULL(owner, '') != ?"));
   });
 
   test('audit columns are NOT whitelisted on a child table (isTable)', () {

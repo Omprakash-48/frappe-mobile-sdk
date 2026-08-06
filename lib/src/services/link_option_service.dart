@@ -76,13 +76,26 @@ class LinkOptionService {
   /// reason this method was removed once already.
   static const int _titleCacheMaxEntries = 500;
 
-  /// Bounded LRU for [getLinkTitle], keyed `doctype::name`. Only SUCCESSFUL
-  /// resolutions are cached — a miss may just mean the target doctype has not
-  /// pulled yet, and must stay retryable.
+  /// Bounded LRU for [getLinkTitle], keyed `doctype::name`.
+  ///
+  /// The value is NULLABLE and membership is tested with `containsKey`, so this
+  /// distinguishes three states rather than two:
+  ///   * absent          — never resolved, or resolved to "retry later"
+  ///   * present, non-null — a real distinct title
+  ///   * present, null   — resolved, and this doctype has no distinct title to
+  ///                       give (no `title_field`), so the answer is final
+  ///
+  /// That third state is the point. Previously any `label == name` outcome was
+  /// left uncached to stay retryable while the target doctype was mid-pull — but
+  /// for a doctype whose `title_field` is unset (the majority in Frappe) the
+  /// label IS the name permanently, so those keys never populated and every grid
+  /// cell re-queried on every build. That is the exact N+1 this method's LRU was
+  /// restored to eliminate, still present for the doctypes most likely to appear
+  /// in a child-table grid.
   ///
   /// Insertion-ordered: a hit re-inserts the key to move it to the newest
   /// position, and inserting past [_titleCacheMaxEntries] evicts the oldest.
-  final Map<String, String> _titleCache = <String, String>{};
+  final Map<String, String?> _titleCache = <String, String?>{};
 
   /// In-flight lookups, so N grid cells referencing the SAME target await ONE
   /// resolve instead of each firing its own (the N+1 that motivated the
@@ -109,9 +122,10 @@ class LinkOptionService {
     if (name.isEmpty) return null;
     final key = '$doctype::$name';
 
-    final cached = _titleCache.remove(key);
-    if (cached != null) {
-      // Re-insert to mark as most-recently-used.
+    if (_titleCache.containsKey(key)) {
+      // Re-insert to mark as most-recently-used. A null value is a real cached
+      // answer ("no distinct title"), not a miss — hence containsKey.
+      final cached = _titleCache.remove(key);
       _titleCache[key] = cached;
       return cached;
     }
@@ -157,18 +171,31 @@ class LinkOptionService {
       meta.titleField,
       translateLabels: meta.translatedDoctype,
     );
+    // Row not found locally: genuinely retryable — the target doctype may not
+    // have pulled yet. Never cached.
     if (entities.isEmpty) return null;
+
     final label = entities.first.label;
+    final hasTitleField =
+        meta.titleField != null && meta.titleField!.isNotEmpty;
     if (label == null || label.isEmpty || label == name) {
-      // No distinct title available — do NOT cache; the target doctype may
-      // still be mid-pull and produce a real title later.
+      // A doctype with no `title_field` can never produce a title distinct from
+      // the name, so this answer is FINAL and worth caching. With a title_field
+      // configured the same outcome is transient — the field may be empty on
+      // this row now and populated by a later pull — so stay retryable.
+      if (!hasTitleField) _cacheTitle(key, null);
       return label;
     }
-    _titleCache[key] = label;
+    _cacheTitle(key, label);
+    return label;
+  }
+
+  /// Writes [value] for [key] and evicts the oldest entry past the cap.
+  void _cacheTitle(String key, String? value) {
+    _titleCache[key] = value;
     if (_titleCache.length > _titleCacheMaxEntries) {
       _titleCache.remove(_titleCache.keys.first);
     }
-    return label;
   }
 
   /// Fetches link options via the resolver (DB-first + background refresh when online).

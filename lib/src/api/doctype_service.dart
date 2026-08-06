@@ -108,7 +108,17 @@ class DoctypeService {
       }
     }
     if (effectiveFields != null) {
-      methodParams['fields'] = jsonEncode(effectiveFields);
+      // Never send a bare `*` the server is documented (three lines up) to
+      // reject. If expansion was unavailable or failed, strip it and let the
+      // remaining explicit fields stand; an empty result omits `fields`
+      // entirely, which Frappe answers with its default field set rather than
+      // an error. Keeping `*` guaranteed a failed request.
+      if (effectiveFields.contains('*')) {
+        effectiveFields = effectiveFields.where((f) => f != '*').toList();
+      }
+      if (effectiveFields.isNotEmpty) {
+        methodParams['fields'] = jsonEncode(effectiveFields);
+      }
     }
     if (filters != null) methodParams['filters'] = jsonEncode(filters);
     if (orFilters != null && orFilters.isNotEmpty) {
@@ -302,7 +312,42 @@ class DoctypeService {
   /// Caller is responsible for paginating across the full result set; one
   /// call returns at most [limitPageLength] full docs starting at
   /// [limitStart].
+  ///
+  /// Returns docs only. Callers that page against a watermark should prefer
+  /// [listFullDocsPage], which additionally reports how many names were
+  /// scanned — without it, a page whose names are entirely dropped by the
+  /// permission gate is indistinguishable from end-of-stream.
   Future<List<Map<String, dynamic>>> listFullDocs(
+    String doctype, {
+    List<List<dynamic>>? filters,
+    int limitStart = 0,
+    int? limitPageLength,
+    String? orderBy,
+  }) async => (await listFullDocsPage(
+    doctype,
+    filters: filters,
+    limitStart: limitStart,
+    limitPageLength: limitPageLength,
+    orderBy: orderBy,
+  )).docs;
+
+  /// [listFullDocs] plus the number of candidate names the inner `get_list`
+  /// returned for this window.
+  ///
+  /// Two guarantees the plain variant cannot express:
+  ///
+  /// 1. **Docs come back in `names` order** — i.e. in the [orderBy] the caller
+  ///    asked for. [bulkGetWithChildren] is a `names in (...)` bulk fetch that
+  ///    neither requests nor verifies server-side ordering, so accumulating its
+  ///    batches in arrival order would silently violate the [orderBy] contract
+  ///    the pull watermark depends on.
+  /// 2. **`namesScanned` distinguishes "filtered" from "exhausted".** The
+  ///    per-doc gate in [bulkGetWithChildren] drops denied/missing names, so
+  ///    `docs.length < namesScanned` is normal and `docs.isEmpty` while
+  ///    `namesScanned > 0` means *this page* was filtered out — not that the
+  ///    doctype is drained.
+  Future<({List<Map<String, dynamic>> docs, int namesScanned})>
+  listFullDocsPage(
     String doctype, {
     List<List<dynamic>>? filters,
     int limitStart = 0,
@@ -318,7 +363,9 @@ class DoctypeService {
       limitPageLength: resolvedLimit,
       orderBy: orderBy,
     );
-    if (nameList.isEmpty) return [];
+    if (nameList.isEmpty) {
+      return (docs: const <Map<String, dynamic>>[], namesScanned: 0);
+    }
 
     // Use `?.toString()` (matches listChildDocs) so int-valued `name`
     // fields from Frappe's autoname-by-numeric-series — which historically
@@ -328,13 +375,19 @@ class DoctypeService {
         if (n is Map<String, dynamic>)
           if (n['name']?.toString() case final String s when s.isNotEmpty) s,
     ];
-    if (names.isEmpty) return [];
+    if (names.isEmpty) {
+      return (docs: const <Map<String, dynamic>>[], namesScanned: 0);
+    }
 
-    // Match the server's MAX_BATCH cap. Each chunk is a single HTTP
-    // round-trip, so this typically reduces a 1000-row pull from
-    // ~1001 calls (1 list + 1000 per-name GETs) down to ~6 calls.
+    // Must equal `MAX_BATCH` in the server's
+    // `mobile_control/api/bulk_fetch.py` — exceeding it makes the endpoint
+    // throw ValidationError for the whole chunk. This is an UNENFORCED
+    // cross-repo invariant (no test on either side asserts they match), and the
+    // server file carries the reciprocal note. Each chunk is a single HTTP
+    // round-trip, so this typically reduces a 1000-row pull from ~1001 calls
+    // (1 list + 1000 per-name GETs) down to ~6 calls.
     const int chunkSize = 200;
-    final docs = <Map<String, dynamic>>[];
+    final byName = <String, Map<String, dynamic>>{};
     for (var i = 0; i < names.length; i += chunkSize) {
       final chunk = names.sublist(i, math.min(i + chunkSize, names.length));
       List<Map<String, dynamic>> batch;
@@ -348,9 +401,20 @@ class DoctypeService {
         if (e.statusCode != 404) rethrow;
         batch = await _perNameFallback(doctype, chunk);
       }
-      docs.addAll(batch);
+      for (final doc in batch) {
+        final key = doc['name']?.toString();
+        if (key != null && key.isNotEmpty) byName[key] = doc;
+      }
     }
-    return docs;
+
+    // Emit in the requested `names` order rather than batch-arrival order.
+    return (
+      docs: <Map<String, dynamic>>[
+        for (final n in names)
+          if (byName[n] case final Map<String, dynamic> doc) doc,
+      ],
+      namesScanned: names.length,
+    );
   }
 
   Future<List<Map<String, dynamic>>> _perNameFallback(

@@ -175,13 +175,29 @@ class ImageField extends BaseField {
     return '$baseNoSlash$p';
   }
 
+  /// Surfaces [message] to the user. `sdkLog` is `kDebugMode`-only, so without
+  /// this a release-build failure was completely invisible: the user took a
+  /// photo, the upload failed, the field stayed empty, and nothing said why.
+  ///
+  /// Takes a [ScaffoldMessengerState] rather than a [BuildContext] on purpose:
+  /// every caller is past an `await`, and resolving the messenger from a context
+  /// after an async gap is exactly what `use_build_context_synchronously` warns
+  /// about. Callers capture it before their first await instead.
+  static void _notify(ScaffoldMessengerState messenger, String message) {
+    messenger.showSnackBar(SnackBar(content: Text(message)));
+  }
+
   /// Applies a picked/recovered [file] to the field. Returns true only when the
   /// field value actually changed, so callers never report success over a field
   /// that an upload failure left empty.
+  ///
+  /// [messenger], when supplied, receives a SnackBar on failure. Optional so
+  /// the recovery path — which shows its own message — can opt out.
   Future<bool> _onImagePicked(
     FormFieldState<String> fieldState,
-    File file,
-  ) async {
+    File file, {
+    ScaffoldMessengerState? messenger,
+  }) async {
     if (uploadFile != null) {
       try {
         final url = await uploadFile!(file);
@@ -190,10 +206,21 @@ class ImageField extends BaseField {
           onChanged?.call(url);
           return true;
         }
-        // On upload failure or empty response, do not store local path (server expects file_url)
+        // Upload "succeeded" but returned nothing usable. Previously this path
+        // returned false with NO log at all — silent even in debug.
+        sdkLog('ImageField: uploadFile returned an empty URL for ${file.path}');
+        if (messenger != null) {
+          _notify(messenger, 'Upload failed — the photo was not attached.');
+        }
       } catch (e, st) {
         // Do not fall back to local path; leave field unchanged so wrong URL is never sent
         sdkLog('ImageField: uploadFile failed — $e\n$st');
+        if (messenger != null) {
+          _notify(
+            messenger,
+            'Could not upload the photo. Check your connection and try again.',
+          );
+        }
       }
       return false;
     }
@@ -415,12 +442,30 @@ class ImageField extends BaseField {
                 OutlinedButton.icon(
                   onPressed: enabled && !field.readOnly
                       ? () async {
-                          final picker = ImagePicker();
-                          final result = await picker.pickImage(
-                            source: ImageSource.gallery,
-                          );
-                          if (result != null) {
-                            await _onImagePicked(fieldState, File(result.path));
+                          // pickImage throws on a denied gallery permission —
+                          // a routine case, not an edge one. Unguarded it became
+                          // an unhandled async error from onPressed with nothing
+                          // shown to the user.
+                          final messenger = ScaffoldMessenger.of(context);
+                          try {
+                            final picker = ImagePicker();
+                            final result = await picker.pickImage(
+                              source: ImageSource.gallery,
+                            );
+                            if (result != null) {
+                              await _onImagePicked(
+                                fieldState,
+                                File(result.path),
+                                messenger: messenger,
+                              );
+                            }
+                          } catch (e, st) {
+                            sdkLog('ImageField: gallery pick failed — $e\n$st');
+                            _notify(
+                              messenger,
+                              'Could not open the gallery. Check photo '
+                              'permissions in Settings.',
+                            );
                           }
                         }
                       : null,
@@ -431,6 +476,7 @@ class ImageField extends BaseField {
                 OutlinedButton.icon(
                   onPressed: enabled && !field.readOnly
                       ? () async {
+                          final messenger = ScaffoldMessenger.of(context);
                           final picker = ImagePicker();
                           // Android can kill the host activity mid-capture
                           // and stash the result; without recovering it the
@@ -459,6 +505,7 @@ class ImageField extends BaseField {
                               await _onImagePicked(
                                 fieldState,
                                 File(result.path),
+                                messenger: messenger,
                               );
                             }
                             // A null result is ambiguous: the user cancelled, OR
@@ -469,9 +516,21 @@ class ImageField extends BaseField {
                             // which is the very bug this marker exists to fix.
                             // A plain cancel costs one empty retrieveLostData()
                             // on the next tap, and the age bound expires it.
-                          } catch (_) {
+                          } catch (e, st) {
                             await _clearCaptureMarker();
-                            rethrow;
+                            // Previously rethrown from inside onPressed — an
+                            // unhandled async error with no user-visible
+                            // message. A denied camera permission is the common
+                            // trigger, so report it instead of crashing the
+                            // zone.
+                            sdkLog(
+                              'ImageField: camera capture failed — $e\n$st',
+                            );
+                            _notify(
+                              messenger,
+                              'Could not open the camera. Check camera '
+                              'permissions in Settings.',
+                            );
                           }
                         }
                       : null,
