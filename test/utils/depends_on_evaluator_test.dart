@@ -309,7 +309,10 @@ void main() {
 
   group('leading ! (JS logical NOT)', () {
     test('negates a falsy field to true', () {
-      expect(DependsOnEvaluator.evaluate('eval:!doc.flag', {'flag': 0}), isTrue);
+      expect(
+        DependsOnEvaluator.evaluate('eval:!doc.flag', {'flag': 0}),
+        isTrue,
+      );
       expect(DependsOnEvaluator.evaluate('eval:!doc.flag', {}), isTrue);
       expect(
         DependsOnEvaluator.evaluate('eval:!doc.flag', {'flag': ''}),
@@ -351,17 +354,17 @@ void main() {
 
     test('composes with && and ||', () {
       expect(
-        DependsOnEvaluator.evaluate('eval:!doc.verified && doc.docstatus === 0', {
-          'verified': 0,
-          'docstatus': 0,
-        }),
+        DependsOnEvaluator.evaluate(
+          'eval:!doc.verified && doc.docstatus === 0',
+          {'verified': 0, 'docstatus': 0},
+        ),
         isTrue,
       );
       expect(
-        DependsOnEvaluator.evaluate('eval:!doc.verified && doc.docstatus === 0', {
-          'verified': 1,
-          'docstatus': 0,
-        }),
+        DependsOnEvaluator.evaluate(
+          'eval:!doc.verified && doc.docstatus === 0',
+          {'verified': 1, 'docstatus': 0},
+        ),
         isFalse,
       );
       expect(
@@ -384,10 +387,7 @@ void main() {
         isFalse,
       );
       // Unspaced forms go through operator-spacing normalization first.
-      expect(
-        DependsOnEvaluator.evaluate('eval:doc.x!=1', {'x': 2}),
-        isTrue,
-      );
+      expect(DependsOnEvaluator.evaluate('eval:doc.x!=1', {'x': 2}), isTrue);
     });
 
     test('referencedFields sees through a negation', () {
@@ -402,8 +402,14 @@ void main() {
       // In Frappe a document always has a docstatus — 0 while it is a draft —
       // so desk treats eval:doc.docstatus === 0 as true on a new doc. Client
       // form data does not always carry the key.
-      expect(DependsOnEvaluator.evaluate('eval:doc.docstatus === 0', {}), isTrue);
-      expect(DependsOnEvaluator.evaluate('eval:doc.docstatus == 0', {}), isTrue);
+      expect(
+        DependsOnEvaluator.evaluate('eval:doc.docstatus === 0', {}),
+        isTrue,
+      );
+      expect(
+        DependsOnEvaluator.evaluate('eval:doc.docstatus == 0', {}),
+        isTrue,
+      );
       expect(
         DependsOnEvaluator.evaluate('eval:doc.docstatus !== 0', {}),
         isFalse,
@@ -427,6 +433,68 @@ void main() {
 
     test('other missing fields are NOT defaulted', () {
       expect(DependsOnEvaluator.evaluate('eval:doc.other === 0', {}), isFalse);
+    });
+  });
+
+  // Shapes the old string-matching evaluator needed an operator-spacing pass to
+  // survive, asserted against real JS semantics instead of that
+  // implementation's limits. Unspaced operators, two-space literals and arrow
+  // predicates are already covered above and in depends_on_evaluator_test.dart;
+  // what was missing is a backslash-escaped quote, real arithmetic, and the
+  // regex-literal contract.
+  group('shapes that defeated the string-matching evaluator', () {
+    test('an escaped quote does not end the string literal early', () {
+      // `"it\"s ok"` is ONE JS literal holding `it"s ok`.
+      expect(
+        DependsOnEvaluator.evaluate(r'eval:doc.note == "it\"s ok"', {
+          'note': 'it"s ok',
+        }),
+        isTrue,
+      );
+      // A comparison operator inside the literal is data, not an operator.
+      expect(
+        DependsOnEvaluator.evaluate(r'eval:doc.note == "a\"b>c"', {
+          'note': 'a"b>c',
+        }),
+        isTrue,
+      );
+      expect(
+        DependsOnEvaluator.evaluate(r'eval:doc.note == "a\"b>c"', {
+          'note': 'other',
+        }),
+        isFalse,
+      );
+    });
+
+    test('a slash after a value is division, and it is really computed', () {
+      // The matcher documented `doc.a/2 == 5` as false because it did no
+      // arithmetic. Desk computes it, so a real answer is required here.
+      expect(
+        DependsOnEvaluator.evaluate('eval:doc.a/2 == 5', {'a': 10}),
+        isTrue,
+      );
+      expect(
+        DependsOnEvaluator.evaluate('eval:doc.a/2 == 5', {'a': 8}),
+        isFalse,
+      );
+    });
+
+    test('KNOWN LIMITATION: a regex literal falls back, it does not guess', () {
+      // js_expression.dart deliberately does not lex regex literals, so such an
+      // expression throws and the caller's per-property default is used — never
+      // a computed boolean. Pinned via the differential: the two defaults
+      // disagreeing proves the expression fell back rather than answering. This
+      // fails loudly if regex support is ever half-implemented.
+      const expr = r"eval:doc.html.replace(/<br>/g, '') == 'ab'";
+      const data = <String, dynamic>{'html': 'a<br>b'};
+      expect(
+        DependsOnEvaluator.evaluate(expr, data, defaultOnError: true),
+        isTrue,
+      );
+      expect(
+        DependsOnEvaluator.evaluate(expr, data, defaultOnError: false),
+        isFalse,
+      );
     });
   });
 }
