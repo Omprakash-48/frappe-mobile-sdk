@@ -71,9 +71,12 @@ class JsUndefined {
 
 const _undefined = JsUndefined.instance;
 
-/// Stands in for a global the SDK cannot know offline — today only `frappe`
-/// (`frappe.boot.developer_mode`, `frappe.session.user`). Any member or method
-/// on it yields the sentinel again, and it is falsy and nullish-equal, so
+/// Stands in for a global the SDK cannot know offline — `frappe`
+/// (`frappe.boot.developer_mode`, `frappe.session.user`, `frappe.datetime.*`)
+/// and `erpnext` (`erpnext.is_perpetual_inventory_enabled(...)`,
+/// `erpnext.stock.is_subcontracting_or_return_transfer(...)`, both of which
+/// really do gate fields in shipping erpnext metadata). Any member or method on
+/// it yields the sentinel again, and it is falsy and nullish-equal, so
 /// `eval:frappe.boot.developer_mode` hides its field exactly as a production
 /// Desk (where `developer_mode` is off) does.
 class JsUnknownGlobal {
@@ -594,7 +597,14 @@ class JsInterpreter {
         // Globals the SDK cannot resolve offline. Yielding a falsy sentinel
         // matches a production Desk (developer_mode off) and preserves the
         // pre-parser behaviour, instead of erroring into the "show it" default.
-        if (name == 'frappe' || name == 'cur_frm' || name == 'locals') {
+        // `erpnext` is here because real erpnext metadata gates fields on
+        // erpnext.is_perpetual_inventory_enabled(...) and
+        // erpnext.stock.is_subcontracting_or_return_transfer(...), neither of
+        // which is answerable without the server.
+        if (name == 'frappe' ||
+            name == 'cur_frm' ||
+            name == 'locals' ||
+            name == 'erpnext') {
           return _unknownGlobal;
         }
         // Frappe's `depends_on: "fieldname"` shorthand, written as

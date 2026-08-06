@@ -568,4 +568,35 @@ void main() {
       );
     });
   });
+
+  group('erpnext.* globals (real erpnext metadata)', () {
+    test('cint(erpnext.is_perpetual_inventory_enabled(...)) is false, not a '
+        'fallback', () {
+      // Verbatim from erpnext. Cannot be answered offline, so it must resolve
+      // to the undefined sentinel: cint(undefined) -> 0 -> falsy -> field
+      // hidden, which is what a Desk with perpetual inventory OFF shows.
+      // Agreeing under both defaults proves it evaluated instead of throwing.
+      const expr =
+          'eval:cint(erpnext.is_perpetual_inventory_enabled(parent.company))';
+      for (final d in [true, false]) {
+        expect(
+          DependsOnEvaluator.evaluate(expr, {
+            'company': 'Test Co',
+          }, defaultOnError: d),
+          isFalse,
+        );
+      }
+    });
+
+    test('a namespaced erpnext call also resolves rather than throwing', () {
+      const expr =
+          'eval: erpnext.stock.is_subcontracting_or_return_transfer(doc)';
+      for (final d in [true, false]) {
+        expect(
+          DependsOnEvaluator.evaluate(expr, {'a': 1}, defaultOnError: d),
+          isFalse,
+        );
+      }
+    });
+  });
 }
