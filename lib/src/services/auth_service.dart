@@ -25,7 +25,9 @@ class AuthService {
   static const String _keyOAuthClientSecret = 'frappe_oauth_client_secret';
   static const String _keyMobileUuid = 'frappe_mobile_uuid';
 
-  final FlutterSecureStorage _storage = const FlutterSecureStorage();
+  final FlutterSecureStorage _storage = const FlutterSecureStorage(
+    mOptions: MacOsOptions(usesDataProtectionKeychain: false),
+  );
   static const Uuid _uuid = Uuid();
   FrappeClient? _client;
   bool _isAuthenticated = false;
@@ -936,3 +938,26 @@ class AuthService {
 bool isDefinitiveAuthRejection(Object error) =>
     error is FrappeException &&
     (error.statusCode == 401 || error.statusCode == 403);
+
+/// True only for a DEFINITIVE rejection **of a refresh token**, meaning the
+/// stored token is dead and only a fresh login can recover the session.
+///
+/// Deliberately WIDER than [isDefinitiveAuthRejection] by one status: **417**.
+/// Frappe answers an unredeemable refresh token with
+/// `ValidationError: "Invalid or expired refresh token"`, which `RestHelper`
+/// surfaces as [ValidationException] (statusCode 417) — NOT 401. Classifying
+/// that as transient is what made a dead session retry forever, tripping the
+/// backend's per-user rate limiter and leaving no route to re-login.
+///
+/// Scoping the widening to the refresh call site is what keeps it safe: 417 is
+/// Frappe's generic validation status, so [isDefinitiveAuthRejection] must NOT
+/// adopt it — there, a 417 from an ordinary document save would wipe a healthy
+/// user's tokens.
+///
+/// 429 stays non-definitive on purpose: the limiter keys on the resolved USER,
+/// so a lockout says nothing about whether the token is still good.
+bool isDefinitiveRefreshRejection(Object error) =>
+    error is FrappeException &&
+    (error.statusCode == 401 ||
+        error.statusCode == 403 ||
+        error.statusCode == 417);
