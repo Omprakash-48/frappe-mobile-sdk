@@ -7,8 +7,10 @@ import '../database/app_database.dart';
 import '../database/entities/auth_token_entity.dart';
 import '../database/entities/doctype_meta_entity.dart';
 import '../models/mobile_form_name.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:uuid/uuid.dart';
+import 'session_health.dart';
 
 /// Handles Frappe authentication via credentials, API key, or OAuth 2.0.
 ///
@@ -50,6 +52,39 @@ class AuthService {
   /// meta fetches) await the SAME refresh instead of each starting their own
   /// or bailing out.
   Future<bool>? _refreshInFlight;
+
+  /// Published liveness of the stored credential. Never wipes anything on its
+  /// own — hosts decide what to show. See [SessionHealth].
+  final ValueNotifier<SessionHealth> sessionHealth =
+      ValueNotifier<SessionHealth>(SessionHealth.healthy);
+
+  String? _expiredSessionEmail;
+
+  /// Email of the user whose session expired. Captured BEFORE the token row is
+  /// deleted, because the row is the only place that email lives in the SDK.
+  String? get expiredSessionEmail => _expiredSessionEmail;
+
+  /// Clears the dead-session latch after a successful re-login, re-arming the
+  /// refresh path. Idempotent.
+  void markSessionRecovered() {
+    _sessionDead = false;
+    _refreshCooldownUntil = null;
+    _consecutiveRefreshFailures = 0;
+    _expiredSessionEmail = null;
+    sessionHealth.value = SessionHealth.healthy;
+  }
+
+  /// Test seam — drives the latch without a network round trip.
+  @visibleForTesting
+  void debugMarkExpired(String? email) {
+    _sessionDead = true;
+    _expiredSessionEmail = email;
+    sessionHealth.value = SessionHealth.expired;
+  }
+
+  bool _sessionDead = false;
+  DateTime? _refreshCooldownUntil;
+  int _consecutiveRefreshFailures = 0;
 
   /// Mirrors mobile-control's ACCESS_TOKEN_TTL_SECONDS (24h). Used ONLY to
   /// proactively refresh an aged Bearer on restore; the reactive 401->refresh
