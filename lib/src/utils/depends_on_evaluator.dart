@@ -347,6 +347,13 @@ class DependsOnEvaluator {
   static String _extractFieldName(String expr) {
     // Remove doc. prefix if present
     expr = expr.trim();
+    // Strip a trailing statement terminator — mirrors _extractValue below.
+    // Frappe depends_on expressions are sometimes authored as `eval:doc.x;`
+    // with a trailing semicolon. A Frappe fieldname can never contain `;`, so
+    // this cannot mis-fire. Without it, the bare-truthy fallback looked up a
+    // key like `x;` (or, via the leading-`!` branch, `district;`), never
+    // found it in form data, and treated the field as permanently falsy.
+    expr = expr.replaceAll(RegExp(r';\s*$'), '').trim();
     if (expr.startsWith('doc.')) {
       expr = expr.substring(4).trim();
     }
