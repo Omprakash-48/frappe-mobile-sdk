@@ -432,7 +432,9 @@ class OfflineRepository {
       final ddl = ddlByTable[tableName];
       if (ddl == null) continue; // table absent
       if (!syncStatusColumn.hasMatch(ddl)) continue; // no sync_status column
-      if (parentUuidColumn.hasMatch(ddl)) continue; // child mirror, not a parent
+      if (parentUuidColumn.hasMatch(ddl)) {
+        continue; // child mirror, not a parent
+      }
       try {
         final rows = await db.query(
           tableName,
@@ -1107,6 +1109,10 @@ class OfflineRepository {
     }
 
     if (addedFields.isEmpty && addedIsLocal.isEmpty && addedNorm.isEmpty) {
+      // `owner` is necessarily already present on this branch — a missing audit
+      // column would have landed in `addedFields` — but the guard keeps the
+      // statement from ever running against a table without the column.
+      if (actual.contains('owner')) await _ensureOwnerIndex(tableName);
       return;
     }
 
@@ -1122,6 +1128,10 @@ class OfflineRepository {
 
     try {
       await MetaMigration.apply(db, diff, tableName: tableName);
+      // After the ALTER, never before: a failed ALTER must not leave a
+      // CREATE INDEX running against a missing column, and any index failure is
+      // logged by the catch below instead of failing the pull page.
+      await _ensureOwnerIndex(tableName);
     } catch (e, st) {
       developer.log(
         'parent table schema reconcile failed for $doctype/$tableName: $e',
@@ -1130,6 +1140,25 @@ class OfflineRepository {
         stackTrace: st,
       );
     }
+  }
+
+  /// `buildParentSchemaDDL` and `AppDatabase._migrateV5ToV6` both index
+  /// `owner`; a table that acquires the audit columns HERE instead would keep
+  /// the full scan that index exists to remove — which is exactly the tables
+  /// this reconcile exists for (created between an upgrade and the next pull,
+  /// or provisioned outside the migration path). Not gated on "we just added
+  /// `owner`": a host that provisions its own table WITH the columns and
+  /// without the index lands in the same place. `IF NOT EXISTS` makes the
+  /// per-pull re-run free.
+  ///
+  /// Name and quoting match `AppDatabase._migrateV5ToV6` exactly so all three
+  /// provisioning paths converge on one index rather than creating two under
+  /// different names.
+  Future<void> _ensureOwnerIndex(String tableName) async {
+    final suffix = stripDocsPrefix(tableName);
+    await _database.rawDatabase.execute(
+      'CREATE INDEX IF NOT EXISTS "ix_${suffix}_owner" ON "$tableName"(owner)',
+    );
   }
 
   /// Returns [doc] with child-table rows attached to [doc.data] under each
