@@ -334,7 +334,7 @@ class DoctypeService {
   /// [listFullDocs] plus the number of candidate names the inner `get_list`
   /// returned for this window.
   ///
-  /// Two guarantees the plain variant cannot express:
+  /// Three guarantees the plain variant cannot express:
   ///
   /// 1. **Docs come back in `names` order** — i.e. in the [orderBy] the caller
   ///    asked for. [bulkGetWithChildren] is a `names in (...)` bulk fetch that
@@ -346,7 +346,19 @@ class DoctypeService {
   ///    `docs.length < namesScanned` is normal and `docs.isEmpty` while
   ///    `namesScanned > 0` means *this page* was filtered out — not that the
   ///    doctype is drained.
-  Future<({List<Map<String, dynamic>> docs, int namesScanned})>
+  /// 3. **`scannedMaxModified`/`scannedMaxName` are the window's watermark,
+  ///    not the returned docs'.** A caller paging with `limit_start` pinned at
+  ///    0 needs a watermark that advances even when the page returns zero
+  ///    docs; `null` means the listed rows carried no `modified` and the
+  ///    caller must not advance.
+  Future<
+    ({
+      List<Map<String, dynamic>> docs,
+      int namesScanned,
+      String? scannedMaxModified,
+      String? scannedMaxName,
+    })
+  >
   listFullDocsPage(
     String doctype, {
     List<List<dynamic>>? filters,
@@ -357,14 +369,19 @@ class DoctypeService {
     final resolvedLimit = limitPageLength ?? listFullDocsPageSize;
     final nameList = await list(
       doctype,
-      fields: ['name'],
+      fields: ['name', 'modified'],
       filters: filters,
       limitStart: limitStart,
       limitPageLength: resolvedLimit,
       orderBy: orderBy,
     );
     if (nameList.isEmpty) {
-      return (docs: const <Map<String, dynamic>>[], namesScanned: 0);
+      return (
+        docs: const <Map<String, dynamic>>[],
+        namesScanned: 0,
+        scannedMaxModified: null,
+        scannedMaxName: null,
+      );
     }
 
     // Use `?.toString()` (matches listChildDocs) so int-valued `name`
@@ -376,7 +393,40 @@ class DoctypeService {
           if (n['name']?.toString() case final String s when s.isNotEmpty) s,
     ];
     if (names.isEmpty) {
-      return (docs: const <Map<String, dynamic>>[], namesScanned: 0);
+      return (
+        docs: const <Map<String, dynamic>>[],
+        namesScanned: 0,
+        scannedMaxModified: null,
+        scannedMaxName: null,
+      );
+    }
+
+    // High-water `(modified, name)` of the window that was SCANNED, independent
+    // of which of those names survived the per-doc gate. The incremental pull
+    // pins `limit_start` at 0, so a window whose every name is denied leaves it
+    // no offset to step over — moving `modified` past the scanned window is the
+    // only way forward. Deliberately a max rather than `nameList.last`: correct
+    // even if the server ever stops honouring `order_by`, and it can never hand
+    // back a value that moves a watermark backwards.
+    //
+    // Lexicographic compare is chronological here: Frappe timestamps are
+    // fixed-width `YYYY-MM-DD HH:MM:SS[.ffffff]`. A row with no `modified` is
+    // skipped, so a server that omits the column yields null — which the
+    // fetcher treats as "cannot advance", i.e. today's behaviour exactly.
+    String? scannedMaxModified;
+    String? scannedMaxName;
+    for (final r in nameList) {
+      if (r is! Map<String, dynamic>) continue;
+      final m = r['modified'] as String?;
+      if (m == null) continue;
+      final n = r['name']?.toString() ?? '';
+      final cmp = scannedMaxModified == null
+          ? 1
+          : m.compareTo(scannedMaxModified);
+      if (cmp > 0 || (cmp == 0 && n.compareTo(scannedMaxName ?? '') > 0)) {
+        scannedMaxModified = m;
+        scannedMaxName = n;
+      }
     }
 
     // Must equal `MAX_BATCH` in the server's
@@ -414,6 +464,8 @@ class DoctypeService {
           if (byName[n] case final Map<String, dynamic> doc) doc,
       ],
       namesScanned: names.length,
+      scannedMaxModified: scannedMaxModified,
+      scannedMaxName: scannedMaxName,
     );
   }
 

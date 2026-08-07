@@ -263,17 +263,29 @@ class PullEngine {
         if (result.rows.isEmpty) {
           // An empty page is normally end-of-stream. The exception is a page
           // whose names were ALL dropped by the server's per-doc permission
-          // gate: treating that as drained would fall through to
-          // markComplete() below and record the doctype as fully pulled with
-          // every later page never fetched — silent, permanent data loss
-          // recoverable only by clearing the cursor. Skip past it instead.
+          // gate: treating that as drained falls through to markComplete()
+          // below and records the doctype as fully pulled with every later
+          // page unfetched — silent, permanent loss recoverable only by
+          // clearing the cursor. Skip past it instead.
           //
-          // Only initial (offset) mode can skip: incremental mode pins
-          // limit_start at 0, so continuing would re-request the same page
-          // forever. Breaking there is safe and idempotent — the cursor stays
-          // put and the page is retried next cycle.
-          if (!result.pageFiltered || scratch.complete) break;
+          // Both modes can skip. Initial mode steps `limit_start` past the
+          // scanned window; incremental mode (where `limit_start` is pinned at
+          // 0) advances `modified` to the scanned window's high-water mark.
+          // `pageFiltered` is the fetcher's promise that `advancedCursor`
+          // really moved, so this cannot re-request the same window.
+          if (!result.pageFiltered) break;
           scratch = result.advancedCursor;
+          // Checkpoint the skip so a failure on a LATER page does not discard
+          // it and re-scan the whole denied block next cycle. Safe mid-loop: in
+          // incremental mode the on-disk cursor is already `complete: true` and
+          // this only moves it forward past a window that yielded zero
+          // applicable docs; in initial mode this is the same `complete: false`
+          // checkpoint the applied-page path writes below (and `toJson()`
+          // returns null — no write — for a still-watermarkless first page).
+          final skipCursorJson = scratch.toJson();
+          if (skipCursorJson != null) {
+            await metaDao.setLastOkCursor(doctype, jsonEncode(skipCursorJson));
+          }
           continue;
         }
 
@@ -321,11 +333,13 @@ class PullEngine {
 
         // #64: checkpoint the cursor after every successfully-applied page so
         // an app-kill mid initial-sync resumes from here (limit_start =
-        // scratch.start) instead of page 0. `scratch` is complete:false; the
-        // post-loop markComplete() flip remains the only writer of
-        // complete:true. Mirrors SyncService._pullOneInternal's per-page
-        // journal. A crash between the page apply and this write re-applies
-        // the page on resume — idempotent via PullApply's UPSERT.
+        // scratch.start) instead of page 0. `scratch` is complete:false here;
+        // the post-loop markComplete() flip remains the only place `complete`
+        // FLIPS false→true (the filtered-skip checkpoint above re-writes a
+        // cursor that is already complete, it never flips one). Mirrors
+        // SyncService._pullOneInternal's per-page journal. A crash between the
+        // page apply and this write re-applies the page on resume — idempotent
+        // via PullApply's UPSERT.
         final pageCursorJson = scratch.toJson();
         if (pageCursorJson != null) {
           await metaDao.setLastOkCursor(doctype, jsonEncode(pageCursorJson));

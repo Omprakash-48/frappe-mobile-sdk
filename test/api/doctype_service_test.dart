@@ -306,15 +306,24 @@ void main() {
 
   group('listFullDocsPage', () {
     /// Serves [names] from `get_list` and [docs] from the bulk endpoint.
+    /// [modifiedByName] attaches a `modified` to the listed name row for that
+    /// name, mirroring the widened `fields: ['name', 'modified']` projection;
+    /// a name absent from the map lists without one.
     DoctypeService svcWith({
       required List<String> names,
       required List<Map<String, dynamic>> docs,
+      Map<String, String>? modifiedByName,
     }) => _svc(
       MockClient((req) async {
         if (req.url.path.contains('get_list')) {
           return _json({
             'message': [
-              for (final n in names) {'name': n},
+              for (final n in names)
+                {
+                  'name': n,
+                  if (modifiedByName?[n] != null)
+                    'modified': modifiedByName![n],
+                },
             ],
           });
         }
@@ -389,6 +398,100 @@ void main() {
       final page = await svc.listFullDocsPage('Customer');
       expect(page.docs, isEmpty);
       expect(page.namesScanned, 0);
+      expect(
+        page.scannedMaxModified,
+        isNull,
+        reason:
+            'the `nameList.isEmpty` early return scanned no window, so it has '
+            'no watermark to offer',
+      );
+      expect(page.scannedMaxName, isNull);
+    });
+
+    test(
+      "reports the scanned window's max even when every doc is dropped",
+      () async {
+        final svc = svcWith(
+          names: ['CUST-1', 'CUST-2', 'CUST-3'],
+          docs: const [],
+          modifiedByName: const {
+            'CUST-1': '2026-01-01 00:00:00',
+            'CUST-2': '2026-01-02 00:00:00',
+            'CUST-3': '2026-01-03 00:00:00',
+          },
+        );
+        final page = await svc.listFullDocsPage('Customer');
+        expect(page.namesScanned, 3);
+        expect(
+          page.scannedMaxModified,
+          '2026-01-03 00:00:00',
+          reason:
+              'the H3 case: the incremental pull pins `limit_start` at 0, so '
+              'it has no offset to step an all-denied block over — the '
+              'scanned window watermark is the only thing that can move the '
+              'cursor past it',
+        );
+        expect(page.scannedMaxName, 'CUST-3');
+      },
+    );
+
+    test('the watermark is the window MAX, not the last listed row', () async {
+      // Served deliberately out of `modified` order: the LAST row listed
+      // (CUST-2) carries a LOWER `modified` than CUST-3 before it.
+      final svc = svcWith(
+        names: ['CUST-1', 'CUST-3', 'CUST-2'],
+        docs: const [],
+        modifiedByName: const {
+          'CUST-1': '2026-01-01 00:00:00',
+          'CUST-3': '2026-01-03 00:00:00',
+          'CUST-2': '2026-01-02 00:00:00',
+        },
+      );
+      final page = await svc.listFullDocsPage('Customer');
+      expect(
+        page.scannedMaxModified,
+        '2026-01-03 00:00:00',
+        reason:
+            'taking the max rather than the last row is what keeps a '
+            'watermark from ever moving BACKWARDS if the server stops '
+            'honouring `order_by`',
+      );
+      expect(page.scannedMaxName, 'CUST-3');
+    });
+
+    test('null watermark when the listed rows carry no modified', () async {
+      final svc = svcWith(names: ['CUST-1', 'CUST-2'], docs: const []);
+      final page = await svc.listFullDocsPage('Customer');
+      expect(page.namesScanned, 2);
+      expect(
+        page.scannedMaxModified,
+        isNull,
+        reason:
+            'null means the caller must not advance: the code degrades to '
+            "today's stop-and-retry rather than inventing a watermark",
+      );
+      expect(page.scannedMaxName, isNull);
+    });
+
+    test('asks the name query for modified', () async {
+      Uri? captured;
+      final svc = _svc(
+        MockClient((req) async {
+          if (req.url.path.contains('get_list')) {
+            captured = req.url;
+            return _json({'message': const []});
+          }
+          return _json({});
+        }),
+      );
+      await svc.listFullDocsPage('Customer');
+      expect(
+        jsonDecode(captured!.queryParameters['fields']!),
+        containsAll(<String>['name', 'modified']),
+        reason:
+            'projecting `modified` on the name query is what makes the '
+            'scanned window watermark obtainable at all',
+      );
     });
 
     test(

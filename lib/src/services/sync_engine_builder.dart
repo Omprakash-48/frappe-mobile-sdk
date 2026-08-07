@@ -427,8 +427,12 @@ class SyncEngineBuilder {
 
       // The child-bearing path reports `namesScanned` so PullPageFetcher can
       // advance the offset by names consumed and recognise a fully
-      // permission-filtered page as "skip", not "end of stream". The flat path
-      // returns every row it lists, so it leaves namesScanned null.
+      // permission-filtered page as "skip", not "end of stream". It also reports
+      // the SCANNED window's `(modified, name)` high-water mark, which is the
+      // only thing that lets the INCREMENTAL pull (where `limit_start` is pinned
+      // at 0, so there is no offset to step) move past a window whose every name
+      // the per-doc gate denied. The flat path returns every row it lists, so it
+      // leaves all three null.
       if (hasChildren) {
         final page = await client.doctype.listFullDocsPage(
           doctype,
@@ -437,7 +441,12 @@ class SyncEngineBuilder {
           limitPageLength: limitPageLength,
           orderBy: orderBy,
         );
-        return ListHttpPage(page.docs, namesScanned: page.namesScanned);
+        return ListHttpPage(
+          page.docs,
+          namesScanned: page.namesScanned,
+          scannedMaxModified: page.scannedMaxModified,
+          scannedMaxName: page.scannedMaxName,
+        );
       }
 
       final result = await client.doctype.list(
