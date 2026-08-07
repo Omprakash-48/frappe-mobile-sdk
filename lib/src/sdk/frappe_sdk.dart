@@ -25,6 +25,7 @@ import '../models/session_user.dart';
 import '../query/unified_resolver.dart';
 import '../services/auth_service.dart';
 import '../services/local_writer.dart';
+import '../services/session_health.dart';
 import '../services/meta_service.dart';
 import '../services/permission_service.dart';
 import '../services/session_user_service.dart';
@@ -114,6 +115,11 @@ class FrappeSDK {
   /// Live sync-state notifier. Non-null after [initialize] completes.
   /// Wire into [SyncStatusBar] to surface pull/push activity in the UI.
   SyncStateNotifier? get syncStateNotifier => _syncStateNotifier;
+
+  /// Liveness of the stored credential. Null before [initialize]. Hosts should
+  /// prompt for re-login on [SessionHealth.expired] and stay quiet on
+  /// [SessionHealth.degraded], which clears by itself.
+  ValueNotifier<SessionHealth>? get sessionHealth => _authService?.sessionHealth;
 
   /// The tamper-detection service. Non-null after [initialize] completes.
   FrappeSecurityService get security {
