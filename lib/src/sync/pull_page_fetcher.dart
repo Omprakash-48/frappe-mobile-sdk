@@ -1,6 +1,7 @@
 import '../database/field_type_mapping.dart';
 import '../database/schema/system_columns.dart';
 import '../models/doc_type_meta.dart';
+import '../utils/sdk_log.dart';
 import 'cursor.dart';
 
 /// One page of raw rows from a remote list endpoint, plus how much of the
@@ -158,6 +159,20 @@ class PullPageFetcher {
         if (maxModified == null ||
             (cursor.modified != null &&
                 maxModified.compareTo(cursor.modified!) <= 0)) {
+          // Logged, not silent. This is the residual limit of `>=`-only paging:
+          // a denied block of >= pageSize rows sharing ONE `modified` value
+          // leaves nothing to advance to, so the watermark stays put and any
+          // readable row BEHIND that block is unreachable until something in
+          // the block changes. Data is not lost — it is never mirrored — and
+          // from the host's seat those are indistinguishable, so say so rather
+          // than returning a silent "end of stream".
+          sdkLog(
+            'PullPageFetcher($doctype): fully permission-filtered incremental '
+            'window of $scanned name(s) cannot advance the watermark '
+            '(cursor.modified=${cursor.modified}, window max=$maxModified). '
+            'Stopping this doctype for this cycle; rows behind the filtered '
+            'block stay unreachable while it spans a single `modified` value.',
+          );
           return PullPageResult(rows: rows, advancedCursor: cursor);
         }
         // The window is `modified asc, name asc`-ordered, so every row sharing

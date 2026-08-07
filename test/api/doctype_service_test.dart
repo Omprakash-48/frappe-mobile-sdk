@@ -4,6 +4,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 import 'package:frappe_mobile_sdk/src/api/doctype_service.dart';
+import 'package:frappe_mobile_sdk/src/api/exceptions.dart';
 import 'package:frappe_mobile_sdk/src/api/rest_helper.dart';
 
 http.Response _json(Object body, [int status = 200]) =>
@@ -200,9 +201,53 @@ void main() {
       expect(out.first['name'], 'CUST-1');
     });
 
-    test('returns empty list when message is not a list', () async {
-      final svc = _svc(MockClient((_) async => _json({'message': 'oops'})));
+    test('an all-denied batch is still a legitimate empty result', () async {
+      // `{"message": []}` is how the endpoint reports "every requested name
+      // was denied or deleted". This MUST stay non-throwing — it is the input
+      // the permission-filtered-page logic is built on.
+      final svc = _svc(
+        MockClient((_) async => _json({'message': <Map<String, dynamic>>[]})),
+      );
       expect(await svc.bulkGetWithChildren('Customer', ['CUST-1']), isEmpty);
+    });
+
+    test('a 2xx body that is not a list THROWS rather than reporting an '
+        'empty batch', () async {
+      // Data-loss guard. An empty batch means "every name denied", which the
+      // incremental pull uses as licence to advance the watermark past the
+      // scanned window. A malformed 2xx that returned `[]` here would move the
+      // watermark past READABLE, never-fetched rows — permanent silent loss.
+      // Failing the page leaves the cursor untouched so the window is retried.
+      final svc = _svc(MockClient((_) async => _json({'message': 'oops'})));
+      await expectLater(
+        svc.bulkGetWithChildren('Customer', ['CUST-1']),
+        throwsA(
+          isA<ApiException>().having(
+            (e) => e.statusCode,
+            'statusCode',
+            isNot(404),
+          ),
+        ),
+        reason:
+            'must not be 404 — the caller degrades 404 to per-name GETs, which '
+            'would mask a transient upstream failure as an N+1 success',
+      );
+    });
+
+    test('an unparseable 2xx body THROWS (RestHelper hands back a raw '
+        'String)', () async {
+      // `RestHelper._handleResponse` returns the raw body for any 2xx whose
+      // jsonDecode fails, so a truncated response on the SDK's largest payload
+      // lands in the `message is! List` branch as a String, not a Map.
+      final svc = _svc(
+        MockClient(
+          (_) async => http.Response('{"message": [{"name": "CUST-1"', 200),
+        ),
+      );
+      await expectLater(
+        svc.bulkGetWithChildren('Customer', ['CUST-1']),
+        throwsA(isA<ApiException>()),
+      );
     });
   });
 

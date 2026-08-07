@@ -228,7 +228,38 @@ class DoctypeService {
     final dynamic message = response is Map<String, dynamic>
         ? response['message']
         : response;
-    if (message is! List) return [];
+    if (message is! List) {
+      // MUST throw, never return []. An empty batch is how this endpoint
+      // reports "every requested name was denied or deleted", and
+      // [listFullDocsPage] turns that into `docs: []` with a non-zero
+      // `namesScanned` plus a scanned-window watermark — which the INCREMENTAL
+      // pull reads as "this window is genuinely unreadable, advance the
+      // watermark past it" (see PullPageFetcher.fetch). Letting a malformed 2xx
+      // reach that same `[]` would move the watermark past rows that are
+      // READABLE and were never fetched: permanent silent data loss,
+      // recoverable only by clearing the cursor.
+      //
+      // This is reachable, not theoretical. `RestHelper._handleResponse` hands
+      // back the RAW BODY STRING for any 2xx whose `jsonDecode` fails, so a
+      // truncated or proxy-mangled response on the largest payload the SDK ever
+      // requests — up to 200 full documents plus their child rows — arrives
+      // here as a String. Failing the page instead leaves the cursor untouched
+      // and retries on the next cycle.
+      //
+      // Status 502 deliberately, NOT 404: the caller's `on ApiException` treats
+      // 404 as "endpoint absent on this deployment" and degrades to per-name
+      // GETs, which would mask a transient upstream failure as an N+1 success.
+      throw ApiException(
+        'mobile_sync.get_docs_with_children returned a 2xx body that is not '
+        '{"message": [...]}; refusing to report an unreadable response as an '
+        'empty batch, because the pull cannot distinguish that from '
+        '"every name denied" and would advance the watermark past readable rows',
+        502,
+        message is String && message.length > 200
+            ? '${message.substring(0, 200)}…'
+            : message,
+      );
+    }
     return [
       for (final row in message)
         if (row is Map) Map<String, dynamic>.from(row),

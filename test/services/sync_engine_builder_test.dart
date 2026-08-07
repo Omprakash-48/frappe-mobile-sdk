@@ -236,6 +236,71 @@ void main() {
       expect(cursor['modified'], '2026-01-09 00:00:00');
     });
 
+    test('a malformed bulk response must NOT advance the watermark past '
+        'readable rows', () async {
+      // THE data-loss guard, end to end. An unparseable 2xx on the bulk
+      // endpoint used to surface as `docs: []` with a non-zero `namesScanned`
+      // — byte-identical to a legitimately all-denied window — so the
+      // incremental skip would advance `modified` past rows that are READABLE
+      // and were never fetched, and checkpoint it. Permanent silent loss,
+      // recoverable only by clearing the cursor.
+      //
+      // `bulkGetWithChildren` now throws on a non-list `message`, so the page
+      // fails, `PullEngine`'s mid-pull catch declines to persist, and the
+      // window is retried next cycle. The watermark must not move one tick.
+      final meta = childBearing();
+      await provisionCustomer(meta);
+      await appDb.doctypeMetaDao.setLastOkCursor(
+        'Customer',
+        '{"modified":"2026-01-01 00:00:00","name":"C-1","complete":true}',
+      );
+
+      final client = MockClient((req) async {
+        if (req.url.path.contains('get_list')) {
+          // Five readable names, the newest at 2026-01-04.
+          return _json({
+            'message': [
+              for (var i = 1; i <= 5; i++)
+                {'name': 'C-$i', 'modified': '2026-01-0$i 00:00:00'},
+            ],
+          });
+        }
+        if (req.url.path.contains('get_docs_with_children')) {
+          // Truncated body on the SDK's largest payload — a 200 that cannot
+          // be parsed. RestHelper hands back the raw String.
+          return http.Response('{"message": [{"name": "C-1"', 200);
+        }
+        return _json({});
+      });
+
+      final pack = await packWith(meta, client);
+      await pack.pullEngine.run(closure);
+
+      final cursor =
+          jsonDecode((await appDb.doctypeMetaDao.getLastOkCursor('Customer'))!)
+              as Map<String, dynamic>;
+      expect(
+        cursor['modified'],
+        '2026-01-01 00:00:00',
+        reason:
+            'the watermark MUST stay put. Reverting the throw in '
+            '`bulkGetWithChildren` makes this read 2026-01-05 — the scanned '
+            'window max — putting all five readable rows behind the watermark '
+            'where neither pull path will ever return them again. That is the '
+            'exact permanent silent loss this guards.',
+      );
+      expect(
+        cursor['complete'],
+        isTrue,
+        reason: 'a failed page must not flip the doctype out of incremental',
+      );
+      expect(
+        await appDb.rawDatabase.query('docs__customer'),
+        isEmpty,
+        reason: 'nothing was applied, so nothing may be claimed as pulled',
+      );
+    });
+
     test('the name query asks the server for modified', () async {
       // Without `modified` in the projection the scanned-window watermark
       // cannot be computed at all, and the closure degrades to stop-and-retry.
