@@ -86,6 +86,40 @@ class AuthService {
   DateTime? _refreshCooldownUntil;
   int _consecutiveRefreshFailures = 0;
 
+  /// Refresh backoff ladder. Indexed by consecutive failure count; the last
+  /// entry repeats. Deliberately coarse — a refresh that just failed is very
+  /// unlikely to succeed seconds later, and each attempt costs rate-limit
+  /// budget the user cannot get back.
+  static const List<Duration> _refreshBackoff = <Duration>[
+    Duration(seconds: 30),
+    Duration(minutes: 2),
+    Duration(minutes: 5),
+    Duration(minutes: 15),
+  ];
+
+  /// Injectable clock so cooldown tests do not sleep.
+  @visibleForTesting
+  DateTime Function() clock = DateTime.now;
+
+  /// True when a refresh may be attempted right now.
+  @visibleForTesting
+  bool debugRefreshAllowed() {
+    if (_sessionDead) return false;
+    final until = _refreshCooldownUntil;
+    return until == null || !clock().isBefore(until);
+  }
+
+  /// Records a non-definitive failure and arms the next cooldown.
+  @visibleForTesting
+  void debugRecordTransientFailure({required bool rateLimited}) {
+    final index = rateLimited
+        ? _refreshBackoff.length - 1
+        : _consecutiveRefreshFailures.clamp(0, _refreshBackoff.length - 1);
+    _consecutiveRefreshFailures++;
+    _refreshCooldownUntil = clock().add(_refreshBackoff[index]);
+    sessionHealth.value = SessionHealth.degraded;
+  }
+
   /// Mirrors mobile-control's ACCESS_TOKEN_TTL_SECONDS (24h). Used ONLY to
   /// proactively refresh an aged Bearer on restore; the reactive 401->refresh
   /// path is the safety net for any backend whose TTL differs, so this is an
@@ -794,9 +828,14 @@ class AuthService {
   }
 
   /// Single-flight wrapper: concurrent 401s share ONE in-flight refresh and
-  /// its result, instead of each firing a competing refresh or bailing with
-  /// `false` (which previously left the sibling closure fetches unretried).
+  /// its result, instead of each firing a competing refresh.
+  ///
+  /// The gate in front of it is what stops the storm. Single-flight only
+  /// dedupes refreshes that overlap in time; every SUBSEQUENT request wave
+  /// started a fresh one, which is how one session produced 215 refresh calls
+  /// and tripped the backend's per-user rate limiter.
   Future<bool> _tryRefreshMobileAuthToken() {
+    if (!debugRefreshAllowed()) return Future<bool>.value(false);
     return _refreshInFlight ??= _doRefreshMobileAuthToken().whenComplete(() {
       _refreshInFlight = null;
     });
@@ -837,26 +876,33 @@ class AuthService {
                 await _database!.authTokenDao.updateToken(updatedToken);
                 _client?.rest.setBearerToken(newAccessToken);
                 _isAuthenticated = true;
+                markSessionRecovered();
                 return true;
               }
             } catch (e, st) {
-              // Only a DEFINITIVE server rejection (HTTP 401/403) means the
-              // refresh token is dead and must be cleared. A transport failure
-              // (NetworkException/timeout) or any other error must NOT wipe the
-              // token — the user may simply be offline, and wiping strands
-              // their cached masters + queued outbox behind the login screen
-              // (see restoreSession's online gate).
-              if (isDefinitiveAuthRejection(e)) {
+              // Only a DEFINITIVE rejection (401/403/417) means the refresh
+              // token is dead. A transport failure, 5xx, or a 429 lockout must
+              // NOT wipe it — the user may simply be offline or rate-limited,
+              // and wiping strands their cached masters + queued outbox behind
+              // a login screen they cannot pass.
+              if (isDefinitiveRefreshRejection(e)) {
                 dev.log(
                   '_doRefreshMobileAuthToken: refresh rejected '
                   '(${e is FrappeException ? e.statusCode : '?'}), clearing tokens — $e\n$st',
                   name: 'Auth',
                 );
+                // Capture the identity BEFORE deleting the row — it is the only
+                // place the SDK stores it, and the host needs it to prompt.
+                _expiredSessionEmail = token.user;
+                _sessionDead = true;
+                sessionHealth.value = SessionHealth.expired;
                 await _database!.authTokenDao.deleteAll();
               } else {
+                final status = e is FrappeException ? e.statusCode : null;
+                debugRecordTransientFailure(rateLimited: status == 429);
                 dev.log(
-                  '_doRefreshMobileAuthToken: refresh failed '
-                  '(transport/other), keeping token — $e\n$st',
+                  '_doRefreshMobileAuthToken: refresh failed (status=$status), '
+                  'token kept, next attempt after $_refreshCooldownUntil — $e\n$st',
                   name: 'Auth',
                 );
               }
