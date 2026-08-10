@@ -517,7 +517,7 @@ void main() {
         'for "block"', () {
       expect(
         DependsOnEvaluator.evaluate('eval:!doc.district;', {
-          'district': 'East Khasi Hills',
+          'district': 'D',
         }),
         isFalse, // district set -> not read-only -> editable
       );
@@ -579,6 +579,31 @@ void main() {
           'grade': 'B',
         }),
         isTrue,
+      );
+    });
+  });
+
+  group('extractEvalDocField (regression: trailing ; must not swallow the '
+      'complex-expression fallback)', () {
+    // Root cause: _extractFieldName now strips a trailing `;`, which made a
+    // complex (non-bare) expression that merely ends in `;` look "changed"
+    // from its stripped form too, so it was mistaken for a bare `doc.field`
+    // reference and returned whole instead of falling through to the regex.
+    test('bare eval:doc.x; still takes the fast path', () {
+      expect(
+        DependsOnEvaluator.extractEvalDocField('eval:doc.x;'),
+        'x',
+      );
+    });
+
+    test(
+        'a complex expression ending in ; falls through to the doc.<field> '
+        'regex instead of returning the whole expression', () {
+      expect(
+        DependsOnEvaluator.extractEvalDocField(
+          "eval:(doc.category||'').replace(/^prefix\\s*/, '');",
+        ),
+        'category',
       );
     });
   });

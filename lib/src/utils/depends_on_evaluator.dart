@@ -367,8 +367,17 @@ class DependsOnEvaluator {
     if (value.startsWith('eval:')) {
       expr = value.substring(5).trimLeft();
     }
-    String fieldName = _extractFieldName(expr);
-    if (expr != fieldName) return fieldName;
+    final fieldName = _extractFieldName(expr);
+    // Only take the fast path when the expression -- after stripping an
+    // optional trailing `;` -- is NOTHING but a bare `doc.field` reference.
+    // Comparing `expr != fieldName` alone is not enough: `_extractFieldName`
+    // also strips a trailing `;`, so a complex expression that merely ends
+    // in `;` (e.g. wrapped in `.replace(...)`) would look "changed" too and
+    // be mistaken for a bare reference, returning the whole expression
+    // instead of falling through to the regex below.
+    final exprSansTrailingSemicolon =
+        expr.replaceAll(RegExp(r';\s*$'), '').trim();
+    if (exprSansTrailingSemicolon == 'doc.$fieldName') return fieldName;
     // The whole expression isn't a bare `doc.field` reference (e.g. it's
     // wrapped in a JS call like `(doc.x||'').replace(/.../, '')`). Fall back
     // to finding the first `doc.<field>` reference anywhere in the string so
