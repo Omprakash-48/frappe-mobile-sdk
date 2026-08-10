@@ -474,6 +474,13 @@ class AuthService {
     _client!.rest.setBearerToken(accessToken);
     _isAuthenticated = true;
     _cachedUserInfo = (email: user, fullName: fullName ?? user);
+    // A fresh credential retires any dead-session latch and cooldown. Without
+    // this, a user who re-logs in after a definitive rejection keeps a
+    // permanently gated refresh path: the gate short-circuits before any
+    // network call, so the only thing that clears the latch — a successful
+    // refresh — can never run. The host does not construct a new AuthService
+    // on logout, so the latch otherwise survives logout -> login.
+    markSessionRecovered();
   }
 
   /// Authenticates with API key and secret.
@@ -879,6 +886,12 @@ class AuthService {
                 markSessionRecovered();
                 return true;
               }
+              // Server returned 200 but no usable access_token. No exception
+              // was thrown, so without this the OAuth fallback below runs
+              // with no cooldown armed — the next 401 retries the mobile
+              // refresh instantly, reproducing the storm this guard exists
+              // to prevent.
+              debugRecordTransientFailure(rateLimited: false);
             } catch (e, st) {
               // Only a DEFINITIVE rejection (401/403/417) means the refresh
               // token is dead. A transport failure, 5xx, or a 429 lockout must
@@ -907,7 +920,17 @@ class AuthService {
                 );
               }
             }
+          } else {
+            // No base URL configured. No exception, so without this the
+            // OAuth fallback below runs with no cooldown armed — the next
+            // 401 retries the mobile refresh instantly.
+            debugRecordTransientFailure(rateLimited: false);
           }
+        } else if (token != null) {
+          // Token row exists but the refresh token is empty (e.g. an SSO
+          // token that never carried one). No exception, so without this
+          // the OAuth fallback below runs with no cooldown armed.
+          debugRecordTransientFailure(rateLimited: false);
         }
       } catch (e, st) {
         dev.log(
