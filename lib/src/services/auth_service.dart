@@ -495,6 +495,11 @@ class AuthService {
       await _storage.write(key: _keyApiKey, value: apiKey);
       await _storage.write(key: _keyApiSecret, value: apiSecret);
       _isAuthenticated = true;
+      // A fresh credential retires any dead-session latch and cooldown, same
+      // as the mobile-login paths — otherwise a mobile-login -> dead-refresh
+      // -> API-key-re-login sequence leaves the refresh path permanently
+      // gated.
+      markSessionRecovered();
       return true;
     } catch (e) {
       _isAuthenticated = false;
@@ -685,6 +690,11 @@ class AuthService {
       }
       _client!.rest.setBearerToken(accessToken);
       _isAuthenticated = true;
+      // A fresh credential retires any dead-session latch and cooldown, same
+      // as the mobile-login paths — otherwise a mobile-login -> dead-refresh
+      // -> OAuth-re-login sequence leaves the refresh path permanently
+      // gated.
+      markSessionRecovered();
       return true;
     } catch (e) {
       _isAuthenticated = false;
@@ -942,7 +952,13 @@ class AuthService {
 
     // Fallback to OAuth refresh.
     final refreshed = await _tryRefreshOAuthToken();
-    if (!refreshed) {
+    if (refreshed) {
+      // The fallback produced a live credential, so any degraded status and
+      // cooldown armed by the mobile-refresh dead-end above are now stale —
+      // leaving them set would gate the next legitimate refresh for up to 15
+      // minutes and report a healthy session as degraded.
+      markSessionRecovered();
+    } else {
       _isAuthenticated = false;
     }
     return refreshed;

@@ -30,13 +30,24 @@ const _secureStorageChannel = MethodChannel(
   'plugins.it_nomads.com/flutter_secure_storage',
 );
 
-void _mockSecureStorage({String? baseUrl}) {
+void _mockSecureStorage({
+  String? baseUrl,
+  String? oauthRefreshToken,
+  String? oauthClientId,
+  String? oauthClientSecret,
+}) {
+  final values = <String, String?>{
+    'frappe_base_url': baseUrl,
+    'frappe_oauth_refresh_token': oauthRefreshToken,
+    'frappe_oauth_client_id': oauthClientId,
+    'frappe_oauth_client_secret': oauthClientSecret,
+  };
   TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
       .setMockMethodCallHandler(_secureStorageChannel, (call) async {
     switch (call.method) {
       case 'read':
         final key = (call.arguments as Map)['key'] as String;
-        return key == 'frappe_base_url' ? baseUrl : null;
+        return values[key];
       case 'readAll':
         return <String, String>{};
       case 'containsKey':
@@ -244,6 +255,88 @@ void main() {
             '401 wave fires a competing refresh against the backend',
       );
       expect(results, everyElement(isTrue));
+    });
+  });
+
+  group('(f) a successful OAuth fallback clears a stale mobile-refresh latch', () {
+    test(
+      'degraded status + cooldown armed by the mobile dead-end are cleared '
+      'once the OAuth fallback lands a live credential',
+      () async {
+        // Empty refresh_token on the stored mobile token trips the (a)
+        // dead-end in _doRefreshMobileAuthToken, which arms degraded +
+        // cooldown before falling through to the OAuth fallback below.
+        await db.authTokenDao.insertToken(
+          AuthTokenEntity(
+            accessToken: 'AT-old',
+            refreshToken: '',
+            user: 'user@example.com',
+            createdAt: _agedCreatedAt(),
+          ),
+        );
+        _mockSecureStorage(
+          baseUrl: 'http://x',
+          oauthRefreshToken: 'OAUTH-RT-old',
+          oauthClientId: 'client-1',
+        );
+        final auth = AuthService.forTesting(FrappeClient('http://x'), database: db);
+
+        // OAuth2Helper calls the top-level http.post directly (no injectable
+        // client), so the fallback's network call is intercepted via
+        // package:http's zoned Client() override instead of FrappeClient's
+        // httpClient.
+        final restored = await http.runWithClient(
+          () => auth.restoreSession(isOnline: true),
+          () => MockClient((req) async {
+            return http.Response(
+              jsonEncode({
+                'access_token': 'OAUTH-AT-new',
+                'refresh_token': 'OAUTH-RT-new',
+                'expires_in': 3600,
+              }),
+              200,
+            );
+          }),
+        );
+
+        expect(restored, isTrue);
+        expect(
+          auth.sessionHealth.value,
+          SessionHealth.healthy,
+          reason: 'a live credential from the OAuth fallback makes the '
+              'mobile-refresh dead-end degraded status stale',
+        );
+        expect(
+          auth.debugRefreshAllowed(),
+          isTrue,
+          reason: 'the cooldown armed by the mobile dead-end must not '
+              'outlive a fallback that already produced a working session',
+        );
+      },
+    );
+  });
+
+  group('(g) loginWithApiKey clears the dead-session latch', () {
+    test('a successful API-key login re-arms refresh after a dead session', () async {
+      _mockSecureStorage();
+      final auth = AuthService.forTesting(FrappeClient('http://x'), database: db);
+
+      auth.debugMarkExpired('dead@example.com');
+      expect(auth.debugRefreshAllowed(), isFalse);
+
+      final ok = await auth.loginWithApiKey('KEY-1', 'SECRET-1');
+
+      expect(ok, isTrue);
+      expect(
+        auth.debugRefreshAllowed(),
+        isTrue,
+        reason: 'loginWithApiKey does not route through '
+            '_processLoginResponse, so it needs its own latch clear — '
+            'otherwise a mobile-login -> dead-refresh -> API-key-re-login '
+            'sequence leaves the refresh path permanently gated',
+      );
+      expect(auth.sessionHealth.value, SessionHealth.healthy);
+      expect(auth.expiredSessionEmail, isNull);
     });
   });
 }
