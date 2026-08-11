@@ -167,7 +167,20 @@ class DependsOnEvaluator {
   /// Evaluate depends_on expression
   /// Supports: eval:doc.field == value, eval:doc.field != value, etc.
   /// Operator spacing is normalized, so `doc.field==value` works too.
-  static bool evaluate(String? expression, Map<String, dynamic> formData) {
+  /// [onError] is the verdict returned when the expression cannot be evaluated
+  /// at all (a genuine parse/eval failure, not a false condition).
+  ///
+  /// It must differ by caller. For `depends_on`, `true` is safe — show the field
+  /// rather than silently hide data. For `mandatory_depends_on` the same default
+  /// is harmful: an unparseable expression would mark the field required and
+  /// block the save with nothing the user can do about it, so that caller passes
+  /// `false`. Same for `read_only_depends_on`, where erring towards locked would
+  /// make a field permanently uneditable.
+  static bool evaluate(
+    String? expression,
+    Map<String, dynamic> formData, {
+    bool onError = true,
+  }) {
     if (expression == null || expression.isEmpty) return true;
 
     // Remove eval: prefix if present
@@ -194,13 +207,15 @@ class DependsOnEvaluator {
       // Handle && (AND) operator — split outside brackets to avoid breaking .includes([...])
       final andParts = _splitOutsideBrackets(expr, ' && ');
       if (andParts.length > 1) {
-        return andParts.every((part) => evaluate(part.trim(), formData));
+        return andParts
+            .every((part) => evaluate(part.trim(), formData, onError: onError));
       }
 
       // Handle || (OR) operator — same bracket-aware splitting
       final orParts = _splitOutsideBrackets(expr, ' || ');
       if (orParts.length > 1) {
-        return orParts.any((part) => evaluate(part.trim(), formData));
+        return orParts
+            .any((part) => evaluate(part.trim(), formData, onError: onError));
       }
 
       // Handle a leading `!` (JS logical NOT), e.g. `!doc.__islocal` — the
@@ -215,8 +230,29 @@ class DependsOnEvaluator {
       if (expr.startsWith('!') &&
           !expr.startsWith('!=') &&
           !expr.startsWith('!==')) {
-        return !evaluate(expr.substring(1).trim(), formData);
+        // Invert the error default too, so that a failure inside the negated
+        // sub-expression still surfaces as [onError] after the `!`.
+        return !evaluate(expr.substring(1).trim(), formData,
+            onError: !onError);
       }
+
+      // Handle child-table membership:
+      //   (doc.<table> || []).some(r => r.<field> === '<literal>')
+      //   (doc.<table> || []).some(r => (r.<field> || '').toLowerCase().includes('<literal>'))
+      //
+      // A standard Frappe idiom for "show this field when a row in that child
+      // table selected a particular option" — the `Other … (Specify)` pattern.
+      // Frappe Desk and the web SPA both evaluate it with a real JS engine.
+      // Without this branch the ` === ` split below tore the arrow function in
+      // half, took `(doc.x || []).some(r => r.f` as a FIELDNAME, looked it up,
+      // found nothing, and returned false — so such fields were permanently
+      // hidden and (being hidden) stripped from the save payload.
+      //
+      // Placed after the && / || / ! branches so composite expressions split
+      // first. Both helpers above are paren-aware, so the ` || ` inside
+      // `(doc.x || [])` is not mistaken for a logical OR.
+      final someResult = _evaluateChildTableSome(expr, formData);
+      if (someResult != null) return someResult;
 
       // Handle [values].includes(doc.field) pattern
       final includesMatch = RegExp(
@@ -326,11 +362,15 @@ class DependsOnEvaluator {
       final value = formData[fieldName];
       return value != null && value != '' && value != 0 && value != false;
     } catch (e, st) {
-      // If evaluation fails, default to true (show field)
+      // Fall back to the caller's declared safe answer. `true` suits
+      // `depends_on` (show the field rather than hide data), but it is actively
+      // harmful for `mandatory_depends_on`, where it makes an unparseable
+      // expression block the save with no way for the user to satisfy it — see
+      // [onError].
       debugPrint(
         'DependsOnEvaluator.evaluate failed for "$expression" — $e\n$st',
       );
-      return true;
+      return onError;
     }
   }
 
@@ -454,6 +494,84 @@ class DependsOnEvaluator {
   /// expression (the matching `)` is at the end). `(A) || (B)` keeps both
   /// pairs because neither pair spans the whole string. Repeats so
   /// `((A))` flattens fully.
+  /// Matches the `.some(<param> => <body>)` envelope over a child table.
+  ///
+  /// Accepts both the guarded form `(doc.tbl || []).some(...)` and the bare
+  /// `doc.tbl.some(...)`. Groups: 1 = table fieldname, 2 = arrow parameter,
+  /// 3 = arrow body.
+  /// The trailing `;?` matters: Frappe authors routinely end a `depends_on`
+  /// with a statement terminator.
+  static final RegExp _someEnvelope = RegExp(
+    r'^\(?\s*doc\.(\w+)\s*(?:\|\|\s*\[\s*\]\s*)?\)?\s*\.some\(\s*(\w+)\s*=>\s*(.+)\)\s*;?\s*$',
+  );
+
+  /// `row.field <op> value` — the strict-equality body.
+  static final RegExp _someCompareBody = RegExp(
+    r'^(\w+)\.(\w+)\s*(===|!==|==|!=)\s*(.+)$',
+  );
+
+  /// `(row.field || '').toLowerCase().includes(value)` and its simpler
+  /// variants — the substring-match body. `.toLowerCase()` and the `|| ''`
+  /// guard are both optional.
+  static final RegExp _someIncludesBody = RegExp(
+    r"""^\(?\s*(\w+)\.(\w+)\s*(?:\|\|\s*(?:''|"")\s*)?\)?\s*(\.toLowerCase\(\))?\s*\.includes\(\s*(.+?)\s*\)$""",
+  );
+
+  /// Evaluates a child-table `.some(...)` predicate.
+  ///
+  /// Returns `null` when [expr] is not a `.some(...)` shape at all, so the
+  /// caller can fall through to the other branches. A recognised shape over a
+  /// missing or empty table is a real answer — `false` — not a fall-through.
+  static bool? _evaluateChildTableSome(
+    String expr,
+    Map<String, dynamic> formData,
+  ) {
+    final envelope = _someEnvelope.firstMatch(expr);
+    if (envelope == null) return null;
+
+    final tableField = envelope.group(1)!;
+    final param = envelope.group(2)!;
+    final body = envelope.group(3)!.trim();
+
+    // Resolve the predicate first, so an unrecognised body falls through to the
+    // legacy branches rather than silently answering false.
+    bool Function(Map<dynamic, dynamic> row)? predicate;
+
+    final compare = _someCompareBody.firstMatch(body);
+    if (compare != null && compare.group(1) == param) {
+      final rowField = compare.group(2)!;
+      final op = compare.group(3)!;
+      final expected = _extractValue(compare.group(4)!);
+      predicate = (row) {
+        final actual = row[rowField];
+        final equal = _compareValues(actual, expected, '==');
+        return op.startsWith('!') ? !equal : equal;
+      };
+    } else {
+      final includes = _someIncludesBody.firstMatch(body);
+      if (includes != null && includes.group(1) == param) {
+        final rowField = includes.group(2)!;
+        final lowered = includes.group(3) != null;
+        final needleRaw = _extractValue(includes.group(4)!)?.toString() ?? '';
+        final needle = lowered ? needleRaw.toLowerCase() : needleRaw;
+        predicate = (row) {
+          var haystack = row[rowField]?.toString() ?? '';
+          if (lowered) haystack = haystack.toLowerCase();
+          return needle.isNotEmpty && haystack.contains(needle);
+        };
+      }
+    }
+
+    if (predicate == null) return null;
+
+    final rows = formData[tableField];
+    if (rows is! List) return false;
+    for (final row in rows) {
+      if (row is Map && predicate(row)) return true;
+    }
+    return false;
+  }
+
   static String _stripOuterParens(String expr) {
     String s = expr.trim();
     while (s.length >= 2 && s.startsWith('(') && s.endsWith(')')) {

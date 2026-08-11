@@ -806,19 +806,32 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
     return _readOnlyNamesCache!;
   }
 
-  bool _evaluateDepends(String? expr, bool defaultValue) {
+  /// [defaultValue] answers an ABSENT expression; [onError] answers one that is
+  /// present but cannot be evaluated. They are deliberately separate — see
+  /// [DependsOnEvaluator.evaluate].
+  bool _evaluateDepends(
+    String? expr,
+    bool defaultValue, {
+    required bool onError,
+  }) {
     if (expr == null || expr.isEmpty) return defaultValue;
-    return DependsOnEvaluator.evaluate(expr, _evalData);
+    return DependsOnEvaluator.evaluate(expr, _evalData, onError: onError);
   }
 
   bool _shouldShowField(DocField field) =>
-      _evaluateDepends(field.dependsOn, true);
+      // An unparseable expression shows the field rather than hiding data.
+      _evaluateDepends(field.dependsOn, true, onError: true);
 
   bool _isFieldRequired(DocField field) =>
-      field.reqd || _evaluateDepends(field.mandatoryDependsOn, false);
+      field.reqd ||
+      // NEVER become mandatory because an expression failed to parse — that
+      // would block the save with nothing the user could do to satisfy it.
+      _evaluateDepends(field.mandatoryDependsOn, false, onError: false);
 
   bool _isFieldReadOnly(DocField field) =>
-      field.readOnly || _evaluateDepends(field.readOnlyDependsOn, false);
+      field.readOnly ||
+      // Likewise, never lock a field because an expression failed to parse.
+      _evaluateDepends(field.readOnlyDependsOn, false, onError: false);
 
   /// Handles fetch_from: when a Link field changes, fetch the linked document
   /// and patch target fields (format: "link_field_name.source_field_name").
