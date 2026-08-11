@@ -400,6 +400,14 @@ class DependsOnEvaluator {
     return expr;
   }
 
+  /// An expression that is NOTHING but one `doc.<fieldname>` reference, with
+  /// an optional trailing statement terminator. The fieldname shape matches
+  /// the reference regex in [extractEvalDocField]'s fallback, so both paths
+  /// agree on what a fieldname may contain.
+  static final RegExp _bareDocFieldRef = RegExp(
+    r'^doc\.([A-Za-z_][A-Za-z0-9_]*)\s*;?\s*$',
+  );
+
   /// Extract `doc.fieldname` from an eval expression like `eval:doc.x` or `eval: doc.x`.
   /// Returns the field name, or null if the value is not an eval:doc expression.
   static String? extractEvalDocField(String value) {
@@ -407,17 +415,20 @@ class DependsOnEvaluator {
     if (value.startsWith('eval:')) {
       expr = value.substring(5).trimLeft();
     }
-    final fieldName = _extractFieldName(expr);
-    // Only take the fast path when the expression -- after stripping an
-    // optional trailing `;` -- is NOTHING but a bare `doc.field` reference.
-    // Comparing `expr != fieldName` alone is not enough: `_extractFieldName`
-    // also strips a trailing `;`, so a complex expression that merely ends
-    // in `;` (e.g. wrapped in `.replace(...)`) would look "changed" too and
-    // be mistaken for a bare reference, returning the whole expression
-    // instead of falling through to the regex below.
-    final exprSansTrailingSemicolon =
-        expr.replaceAll(RegExp(r';\s*$'), '').trim();
-    if (exprSansTrailingSemicolon == 'doc.$fieldName') return fieldName;
+    // Fast path ONLY when the whole expression is a bare `doc.<fieldname>`
+    // reference (optional trailing `;`). The gate anchors on the FIELDNAME
+    // SHAPE, and that is what makes it correct.
+    //
+    // The previous gate compared the expression against `_extractFieldName`'s
+    // output — but that helper returns whatever remains after stripping a
+    // leading `doc.`, with no check that the remainder is a legal fieldname.
+    // For `doc.a && doc.b` it returns `a && doc.b`, which reassembles to
+    // exactly `doc.a && doc.b`, so the equality held and the fast path handed
+    // back `a && doc.b` AS A FIELDNAME. No such field exists, so the caller's
+    // dependency lookup found nothing and the link picker silently stopped
+    // filtering — the failure mode looks like "no filter", not like an error.
+    final bare = _bareDocFieldRef.firstMatch(expr);
+    if (bare != null) return bare.group(1);
     // The whole expression isn't a bare `doc.field` reference (e.g. it's
     // wrapped in a JS call like `(doc.x||'').replace(/.../, '')`). Fall back
     // to finding the first `doc.<field>` reference anywhere in the string so
