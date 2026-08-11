@@ -1234,6 +1234,102 @@ void main() {
     });
   });
 
+  group('demotion out of the mobile-form set is narrow', () {
+    const closure = ClosureResult(
+      doctypes: ['Customer'],
+      graph: {
+        'Customer': DepGraph(
+          doctype: 'Customer',
+          tier: 0,
+          outgoing: [],
+          incoming: [],
+        ),
+      },
+      childDoctypes: {},
+      warnings: [],
+    );
+
+    /// Marks Customer as a mobile form, fails its pull with [error], and
+    /// reports whether it survived in the mobile-form set.
+    Future<bool> stillMobileFormAfter(Object error) async {
+      await db.update(
+        'doctype_meta',
+        {'isMobileForm': 1},
+        where: 'doctype = ?',
+        whereArgs: ['Customer'],
+      );
+      final engine = PullEngine(
+        db: db,
+        metaDao: metaDao,
+        outboxDao: OutboxDao(db),
+        pool: ConcurrencyPool(maxConcurrent: 1),
+        fetcher: PullPageFetcher(listHttp: (_, _) async => throw error),
+        pageSize: 10,
+        notifier: SyncStateNotifier(),
+        metaResolver: (dt) async =>
+            DocTypeMeta(name: dt, fields: [f('customer_name', 'Data')]),
+      );
+      await engine.run(closure);
+      final rows = await db.query(
+        'doctype_meta',
+        columns: ['isMobileForm'],
+        where: 'doctype = ?',
+        whereArgs: ['Customer'],
+      );
+      return rows.single['isMobileForm'] == 1;
+    }
+
+    // The regression this pins: `bulkGetWithChildren` throws
+    // ApiException(…, 502) for a truncated / proxy-mangled 2xx body. Treating
+    // 502 as terminal meant ONE malformed response silently cost the user the
+    // form — it leaves `getMobileFormDoctypeNames()` (the closure's entry-point
+    // source) AND the workspace, and only a login / initialize() re-promotes.
+    test('a 502 from the malformed-batch guard does NOT demote', () async {
+      expect(
+        await stillMobileFormAfter(ApiException('malformed batch body', 502)),
+        isTrue,
+        reason:
+            'a truncated response is transient — demoting costs the user the '
+            'form until app restart, which is worse than re-requesting it',
+      );
+    });
+
+    test('a gateway 503 / 504 does NOT demote', () async {
+      expect(
+        await stillMobileFormAfter(ApiException('bad gateway', 503)),
+        isTrue,
+      );
+      expect(
+        await stillMobileFormAfter(ApiException('gateway timeout', 504)),
+        isTrue,
+      );
+    });
+
+    test('a transport failure does NOT demote', () async {
+      expect(
+        await stillMobileFormAfter(NetworkException('No internet connection')),
+        isTrue,
+      );
+    });
+
+    // The other direction, so the narrowing above cannot silently disable
+    // demotion altogether: a 500 is the measured broken-controller case and
+    // recurs identically on every sweep, so it must still stop being requested.
+    test('a 500 (broken controller) DOES demote', () async {
+      expect(
+        await stillMobileFormAfter(ApiException('no module named …', 500)),
+        isFalse,
+      );
+    });
+
+    test('a 403 (read denied) DOES demote', () async {
+      expect(
+        await stillMobileFormAfter(AuthException('not permitted', 403)),
+        isFalse,
+      );
+    });
+  });
+
   test(
     'falls back to normalized table name when doctype_meta has no table_name',
     () async {

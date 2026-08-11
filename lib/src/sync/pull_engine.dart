@@ -436,8 +436,16 @@ class PullEngine {
       // set it is re-requested and re-refused on EVERY sweep — the measured
       // steady state was a 403 (DocType) and a 500 (Number Card) recurring 5x
       // each in a 10-minute capture. Demote on a terminal refusal so the
-      // request stops being made; `resyncMobileConfiguration` re-marks every
-      // configured form, so a transient blip self-heals on the next sync.
+      // request stops being made.
+      //
+      // DEMOTION IS NOT SELF-HEALING WITHIN A SESSION. Only
+      // `resyncMobileConfiguration` re-promotes, and the SDK calls it at login
+      // and `initialize()` — not on a sync cycle. So a demoted doctype is gone
+      // from `getMobileFormDoctypeNames()` (the closure's entry-point source)
+      // and from the workspace until the app is relaunched. That is why
+      // [_isTerminalPullFailure] is deliberately narrow: the cost of demoting
+      // a doctype that WOULD have recovered is far higher than the cost of
+      // re-requesting one that will not.
       if (_isTerminalPullFailure(e) &&
           await metaDao.demoteFromMobileForm(doctype)) {
         notifier.recordMetaSyncFailure(doctype, _terminalSkipReason(e));
@@ -461,15 +469,37 @@ class PullEngine {
     }
   }
 
+  /// Gateway / availability statuses, excluded from the terminal set even
+  /// though they are 5xx.
+  ///
+  /// A 502/503/504 is an infrastructure hiccup IN FRONT OF the app server — it
+  /// says nothing about this doctype, and the next sweep is very likely to
+  /// succeed. 502 additionally covers the SDK's OWN malformed-batch guard:
+  /// `DoctypeService.bulkGetWithChildren` throws `ApiException(…, 502)` when a
+  /// 2xx body is not `{"message": [...]}` (a truncated or proxy-mangled
+  /// response on the largest payload the SDK requests). Treating that as
+  /// terminal meant ONE truncated response demoted the doctype, which is
+  /// strictly worse than the data-loss bug the guard was added to prevent.
+  ///
+  /// The asymmetry is what settles it: a doctype left in the set costs a
+  /// repeated request per sweep, and recovers by itself. A demoted doctype
+  /// costs the user that form — and its sync — until the next login or
+  /// `FrappeSDK.initialize`, because nothing else re-promotes it.
+  static const Set<int> _transientServerStatuses = <int>{502, 503, 504};
+
   /// A server response the pull can never satisfy by retrying: read-denied
-  /// (403) or a server error (5xx — e.g. a doctype missing its controller).
-  /// Transient failures (network, timeout, 401-before-refresh) are excluded so
-  /// a blip never demotes a form the user can still use.
+  /// (403) or a genuine server-side error (5xx other than the gateway family
+  /// above — e.g. a 500 from a doctype missing its controller, which recurs
+  /// identically on every sweep). Transient failures (network, timeout,
+  /// 401-before-refresh, gateway 5xx) are excluded so a blip never demotes a
+  /// form the user can still use.
   static bool _isTerminalPullFailure(Object e) {
     if (e is NetworkException) return false;
     if (e is FrappeException) {
       final s = e.statusCode;
-      return s == 403 || (s != null && s >= 500);
+      if (s == null) return false;
+      if (_transientServerStatuses.contains(s)) return false;
+      return s == 403 || s >= 500;
     }
     return false;
   }
@@ -482,7 +512,10 @@ class PullEngine {
     if (e is FrappeException) {
       final s = e.statusCode;
       if (s == 403) return 'No access (permission denied)';
-      if (s != null && s >= 500) return 'Temporarily unavailable (server error)';
+      // Deliberately NOT "temporarily unavailable": this string is only ever
+      // produced for a status [_isTerminalPullFailure] classified as terminal,
+      // and the genuinely temporary 5xx (502/503/504) no longer reach it.
+      if (s != null && s >= 500) return 'Unavailable (server error)';
     }
     return 'Skipped';
   }
