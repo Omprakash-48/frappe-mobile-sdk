@@ -1007,9 +1007,77 @@ void main() {
       },
     );
 
+    test('H3 regression: a fully-denied incremental window advances the '
+        'watermark past itself and the drain keeps going', () async {
+      await metaDao.setLastOkCursor(
+        'Customer',
+        '{"modified":"2026-01-01 00:00:00","name":"C-1","complete":true}',
+      );
+      var calls = 0;
+      final fetcher = PullPageFetcher(
+        listHttp: (doctype, params) async {
+          calls++;
+          switch (calls) {
+            case 1:
+              // Every name in the window was dropped by the per-doc
+              // permission gate. `limit_start` is pinned at 0 in
+              // incremental mode, so the watermark itself has to move.
+              return const ListHttpPage(
+                [],
+                namesScanned: 2,
+                scannedMaxModified: '2026-01-02 00:00:00',
+                scannedMaxName: 'C-3',
+              );
+            case 2:
+              // The row hiding BEHIND the denied block.
+              return const ListHttpPage([
+                {
+                  'name': 'C-9',
+                  'modified': '2026-01-09 00:00:00',
+                  'customer_name': 'Iota',
+                },
+              ], namesScanned: 1);
+            default:
+              return const ListHttpPage([], namesScanned: 0);
+          }
+        },
+      );
+      await engineWith(fetcher).run(closure);
+
+      expect(
+        calls,
+        3,
+        reason:
+            'before the fix this stopped at call 1: the fetcher returned '
+            'the cursor unchanged, the engine broke on `scratch.complete`, '
+            'markComplete() re-persisted the identical watermark, and the '
+            'next cycle issued the byte-identical query — C-9 was never '
+            'fetched and every row behind the denied block stayed silently '
+            'and permanently unreachable',
+      );
+      final names = (await db.query(
+        'docs__customer',
+        orderBy: 'server_name',
+      )).map((r) => r['server_name']).toList();
+      expect(
+        names,
+        contains('C-9'),
+        reason: 'the row behind the denied block must still be pulled',
+      );
+      final parsed =
+          jsonDecode((await metaDao.getLastOkCursor('Customer'))!)
+              as Map<String, dynamic>;
+      expect(
+        parsed['modified'],
+        '2026-01-09 00:00:00',
+        reason:
+            'the watermark must end up past the denied block, not frozen '
+            'at 2026-01-01 00:00:00 forever',
+      );
+    });
+
     test(
-      'incremental mode still stops on a filtered page (limit_start is pinned '
-      'at 0, so skipping forward is impossible)',
+      'a same-second filtered window still stops (nothing to advance to)',
       () async {
         await metaDao.setLastOkCursor(
           'Customer',
@@ -1019,22 +1087,87 @@ void main() {
         final fetcher = PullPageFetcher(
           listHttp: (doctype, params) async {
             calls++;
-            return const ListHttpPage([], namesScanned: 2);
+            // The whole scanned window sits inside the cursor's own
+            // `modified` second, so there is no strictly-greater watermark
+            // to move to and the fetcher reports pageFiltered: false.
+            return const ListHttpPage(
+              [],
+              namesScanned: 2,
+              scannedMaxModified: '2026-01-01 00:00:00',
+              scannedMaxName: 'C-3',
+            );
           },
         );
         await engineWith(fetcher).run(closure);
+
         expect(
           calls,
           1,
-          reason: 'continuing here would re-request the same page forever',
+          reason:
+              'the watermark cannot advance here, so continuing would '
+              're-request the same window forever — this is the '
+              'anti-infinite-loop guarantee, and the test hanging means the '
+              'skip guard is wrong',
         );
-        // The watermark is left where it was, so the page retries next cycle.
         final parsed =
             jsonDecode((await metaDao.getLastOkCursor('Customer'))!)
                 as Map<String, dynamic>;
-        expect(parsed['modified'], '2026-01-01 00:00:00');
+        expect(
+          parsed['modified'],
+          '2026-01-01 00:00:00',
+          reason:
+              'the watermark is left where it was, so the window is '
+              'retried next cycle',
+        );
+        expect(
+          parsed['name'],
+          'C-1',
+          reason:
+              '`name` must never advance without `modified`: SyncService '
+              'drops rows with modified == cursor.modified && name <= '
+              'cursor.name, so bumping `name` alone would skip READABLE rows',
+        );
       },
     );
+
+    test('the skip is checkpointed against a later failure', () async {
+      await metaDao.setLastOkCursor(
+        'Customer',
+        '{"modified":"2026-01-01 00:00:00","name":"C-1","complete":true}',
+      );
+      var calls = 0;
+      final fetcher = PullPageFetcher(
+        listHttp: (doctype, params) async {
+          calls++;
+          if (calls == 1) {
+            return const ListHttpPage(
+              [],
+              namesScanned: 2,
+              scannedMaxModified: '2026-01-02 00:00:00',
+              scannedMaxName: 'C-3',
+            );
+          }
+          throw Exception('boom');
+        },
+      );
+      // PullEngine catches a mid-pull failure and records it per doctype;
+      // run() does not rethrow.
+      await engineWith(fetcher).run(closure);
+
+      expect(calls, 2, reason: 'the engine skipped past the denied window');
+      final parsed =
+          jsonDecode((await metaDao.getLastOkCursor('Customer'))!)
+              as Map<String, dynamic>;
+      expect(
+        parsed['modified'],
+        '2026-01-02 00:00:00',
+        reason:
+            'the mid-loop skip checkpoint must survive the failure on the '
+            'NEXT page — without it the cursor falls back to '
+            '2026-01-01 00:00:00 and the whole denied block is re-scanned '
+            'every cycle',
+      );
+    });
   });
 
   group('a server refusal is deferred, not a permanent failure', () {
@@ -1080,11 +1213,13 @@ void main() {
       expect(st.note, contains('403'));
     });
 
-    test('a 403 delivered as ApiException (non-JSON body) is also deferred',
-        () async {
-      final st = await runWith(ApiException('<h1>403</h1>', 403));
-      expect(st!.deferred, isTrue);
-    });
+    test(
+      'a 403 delivered as ApiException (non-JSON body) is also deferred',
+      () async {
+        final st = await runWith(ApiException('<h1>403</h1>', 403));
+        expect(st!.deferred, isTrue);
+      },
+    );
 
     test('a real fault is still reported as failed', () async {
       for (final e in <Object>[
@@ -1238,4 +1373,87 @@ void main() {
       );
     },
   );
+  test('demotes a mobile form from the set on a terminal data 403', () async {
+    // A form this user's role cannot read: its list fetch 403s. It must be
+    // dropped from the mobile-form set so isOfflineBootstrapComplete and the
+    // workspace stop requiring/showing a form that can never load.
+    final metaX = DocTypeMeta(name: 'X', fields: [f('title', 'Data')]);
+    for (final s in buildParentSchemaDDL(metaX, tableName: 'docs__x')) {
+      await db.execute(s);
+    }
+    await db.insert('doctype_meta', {
+      'doctype': 'X',
+      'metaJson': '{"name":"X"}',
+      'isMobileForm': 1,
+      'table_name': 'docs__x',
+    });
+    final engine = PullEngine(
+      db: db,
+      metaDao: metaDao,
+      outboxDao: OutboxDao(db),
+      pool: ConcurrencyPool(maxConcurrent: 2),
+      fetcher: PullPageFetcher(
+        listHttp: (doctype, params) async =>
+            throw AuthException('Insufficient Permission for X', 403),
+      ),
+      pageSize: 500,
+      notifier: SyncStateNotifier(),
+      metaResolver: (dt) async =>
+          DocTypeMeta(name: dt, fields: [f('title', 'Data')]),
+    );
+    await engine.run(const ClosureResult(
+      doctypes: ['X'],
+      graph: {'X': DepGraph(doctype: 'X', tier: 0, outgoing: [], incoming: [])},
+      childDoctypes: {},
+      warnings: [],
+    ));
+
+    final row = await metaDao.findByDoctype('X');
+    expect(row, isNotNull);
+    expect(
+      row!.isMobileForm,
+      isFalse,
+      reason: 'a read-denied (403) mobile form must be demoted',
+    );
+  });
+
+  test('does NOT demote a mobile form on a transient network failure', () async {
+    final metaY = DocTypeMeta(name: 'Y', fields: [f('title', 'Data')]);
+    for (final s in buildParentSchemaDDL(metaY, tableName: 'docs__y')) {
+      await db.execute(s);
+    }
+    await db.insert('doctype_meta', {
+      'doctype': 'Y',
+      'metaJson': '{"name":"Y"}',
+      'isMobileForm': 1,
+      'table_name': 'docs__y',
+    });
+    final engine = PullEngine(
+      db: db,
+      metaDao: metaDao,
+      outboxDao: OutboxDao(db),
+      pool: ConcurrencyPool(maxConcurrent: 2),
+      fetcher: PullPageFetcher(
+        listHttp: (doctype, params) async =>
+            throw NetworkException('Cannot reach server'),
+      ),
+      pageSize: 500,
+      notifier: SyncStateNotifier(),
+      metaResolver: (dt) async =>
+          DocTypeMeta(name: dt, fields: [f('title', 'Data')]),
+    );
+    await engine.run(const ClosureResult(
+      doctypes: ['Y'],
+      graph: {'Y': DepGraph(doctype: 'Y', tier: 0, outgoing: [], incoming: [])},
+      childDoctypes: {},
+      warnings: [],
+    ));
+
+    final row = await metaDao.findByDoctype('Y');
+    expect(
+      row!.isMobileForm,
+      isTrue,
+      reason: 'a transient network failure must NOT demote the form',
+    );
+  });
 }

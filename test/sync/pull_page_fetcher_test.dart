@@ -384,8 +384,134 @@ void main() {
       },
     );
 
-    test('incremental: a filtered page still signals stop (limit_start is '
-        'pinned at 0, so skipping forward is impossible)', () async {
+    test('incremental: advances past a fully-filtered window', () async {
+      final fetcher = PullPageFetcher(
+        listHttp: (doctype, params) async => const ListHttpPage(
+          [],
+          namesScanned: 100,
+          scannedMaxModified: '2026-01-05 00:00:00',
+          scannedMaxName: 'Z',
+        ),
+      );
+      const start = Cursor(
+        modified: '2026-01-01 00:00:00',
+        name: 'A',
+        complete: true,
+      );
+      final result = await fetcher.fetch(
+        doctype: 'X',
+        meta: meta,
+        cursor: start,
+        pageSize: 100,
+      );
+      expect(
+        result.pageFiltered,
+        isTrue,
+        reason:
+            'incremental pins limit_start at 0, so the only way past a '
+            'denied block is to move `modified`. Leaving the cursor put '
+            'makes the next sync issue the byte-identical query, get the '
+            'identical empty window, and strand every row BEHIND the block '
+            'forever',
+      );
+      expect(result.advancedCursor.modified, '2026-01-05 00:00:00');
+      expect(
+        result.advancedCursor.name,
+        'Z',
+        reason:
+            'the window is `modified asc, name asc`-ordered, so its max name '
+            'is the last row that was inside the window and denied',
+      );
+      expect(
+        result.advancedCursor.complete,
+        isTrue,
+        reason:
+            'the skip must stay incremental; dropping back to an offset pull '
+            'would re-scan the whole table',
+      );
+    });
+
+    test('incremental: a same-second window still stops', () async {
+      final fetcher = PullPageFetcher(
+        listHttp: (doctype, params) async => const ListHttpPage(
+          [],
+          namesScanned: 100,
+          scannedMaxModified: '2026-01-01 00:00:00',
+          scannedMaxName: 'Z',
+        ),
+      );
+      const start = Cursor(
+        modified: '2026-01-01 00:00:00',
+        name: 'A',
+        complete: true,
+      );
+      final result = await fetcher.fetch(
+        doctype: 'X',
+        meta: meta,
+        cursor: start,
+        pageSize: 100,
+      );
+      expect(
+        result.pageFiltered,
+        isFalse,
+        reason:
+            'a window whose max `modified` only EQUALS the cursor cannot '
+            'move the `modified >=` predicate, so no progress is possible: '
+            'report end-of-stream and retry next cycle',
+      );
+      expect(result.advancedCursor.modified, '2026-01-01 00:00:00');
+      expect(
+        result.advancedCursor.name,
+        'A',
+        reason:
+            '`name` must never advance without `modified`: bumping it alone '
+            'leaves the next request byte-identical (an infinite loop in '
+            'PullEngine), and the SyncService tie-group skip — which drops '
+            'rows with `modified == cursor.modified && name <= cursor.name` '
+            '— would then discard READABLE rows',
+      );
+    });
+
+    test('incremental: an older window max never moves the watermark '
+        'backwards', () async {
+      final fetcher = PullPageFetcher(
+        listHttp: (doctype, params) async => const ListHttpPage(
+          [],
+          namesScanned: 100,
+          scannedMaxModified: '2025-12-31 00:00:00',
+          scannedMaxName: 'Z',
+        ),
+      );
+      const start = Cursor(
+        modified: '2026-01-01 00:00:00',
+        name: 'A',
+        complete: true,
+      );
+      final result = await fetcher.fetch(
+        doctype: 'X',
+        meta: meta,
+        cursor: start,
+        pageSize: 100,
+      );
+      expect(
+        result.pageFiltered,
+        isFalse,
+        reason:
+            'the compare is strictly-greater, so a window max below the '
+            'cursor is not progress',
+      );
+      expect(
+        result.advancedCursor.modified,
+        '2026-01-01 00:00:00',
+        reason:
+            'a watermark must never move backwards — that would re-pull '
+            'and re-apply everything between the two timestamps',
+      );
+      expect(result.advancedCursor.name, 'A');
+    });
+
+    test('incremental: a null window max degrades to stop-and-retry '
+        '(inert, not broken)', () async {
       final fetcher = PullPageFetcher(
         listHttp: (doctype, params) async =>
             const ListHttpPage([], namesScanned: 100),
@@ -401,9 +527,47 @@ void main() {
         cursor: start,
         pageSize: 100,
       );
-      expect(result.pageFiltered, isFalse);
+      expect(
+        result.pageFiltered,
+        isFalse,
+        reason:
+            'this is the path a deployment that refuses to project '
+            '`modified` on the name query lands on: with no watermark to '
+            'advance to, the fix is simply inert and the pre-fix '
+            'stop-and-retry behaviour stands — no crash, no loss',
+      );
       expect(result.advancedCursor.modified, '2026-01-01 00:00:00');
       expect(result.advancedCursor.name, 'A');
+    });
+
+    test('incremental: advances from a null incoming watermark', () async {
+      final fetcher = PullPageFetcher(
+        listHttp: (doctype, params) async => const ListHttpPage(
+          [],
+          namesScanned: 100,
+          scannedMaxModified: '2026-01-05 00:00:00',
+          scannedMaxName: 'Z',
+        ),
+      );
+      const start = Cursor(complete: true);
+      final result = await fetcher.fetch(
+        doctype: 'X',
+        meta: meta,
+        cursor: start,
+        pageSize: 100,
+      );
+      expect(
+        result.pageFiltered,
+        isTrue,
+        reason:
+            'a complete cursor with no `modified` is a real state (fetch '
+            'attaches the `modified >=` filter only when it is non-null), so '
+            'the window it scanned genuinely starts at the head of the '
+            'table and any non-null max is progress',
+      );
+      expect(result.advancedCursor.modified, '2026-01-05 00:00:00');
+      expect(result.advancedCursor.name, 'Z');
+      expect(result.advancedCursor.complete, isTrue);
     });
 
     test('namesScanned == 0 is genuine end-of-stream', () async {
@@ -419,6 +583,39 @@ void main() {
       );
       expect(result.pageFiltered, isFalse);
       expect(result.advancedCursor.start, 0);
+    });
+
+    test('namesScanned == 0 wins over an advancing watermark', () async {
+      final fetcher = PullPageFetcher(
+        listHttp: (doctype, params) async => const ListHttpPage(
+          [],
+          namesScanned: 0,
+          scannedMaxModified: '2026-01-05 00:00:00',
+          scannedMaxName: 'Z',
+        ),
+      );
+      const start = Cursor(
+        modified: '2026-01-01 00:00:00',
+        name: 'A',
+        complete: true,
+      );
+      final result = await fetcher.fetch(
+        doctype: 'X',
+        meta: meta,
+        cursor: start,
+        pageSize: 100,
+      );
+      expect(
+        result.pageFiltered,
+        isFalse,
+        reason:
+            'the endpoint consumed nothing, so this is real end-of-stream: a '
+            'watermark reported over an empty window must not be mistaken '
+            'for progress, or every incremental pull would advance its '
+            'cursor on the final empty page',
+      );
+      expect(result.advancedCursor.modified, '2026-01-01 00:00:00');
+      expect(result.advancedCursor.name, 'A');
     });
 
     test('namesScanned == null (plain get_list path) keeps rows.length as the '

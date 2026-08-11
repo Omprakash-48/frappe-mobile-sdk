@@ -1,6 +1,7 @@
 import '../database/field_type_mapping.dart';
 import '../database/schema/system_columns.dart';
 import '../models/doc_type_meta.dart';
+import '../utils/sdk_log.dart';
 import 'cursor.dart';
 
 /// One page of raw rows from a remote list endpoint, plus how much of the
@@ -21,7 +22,21 @@ class ListHttpPage {
   /// `rows.length`. Null means "same as `rows.length`" (the plain path).
   final int? namesScanned;
 
-  const ListHttpPage(this.rows, {this.namesScanned});
+  /// High-water `(modified, name)` of the window the endpoint SCANNED — set
+  /// only on the name-list path, which is the only one that can consume
+  /// candidate rows it does not return. Null on the plain `get_list` path
+  /// (where `rows` IS the window) and when the listed rows carried no
+  /// `modified`; null disables the incremental skip in [PullPageFetcher.fetch]
+  /// and preserves the old stop-and-retry behaviour.
+  final String? scannedMaxModified;
+  final String? scannedMaxName;
+
+  const ListHttpPage(
+    this.rows, {
+    this.namesScanned,
+    this.scannedMaxModified,
+    this.scannedMaxName,
+  });
 }
 
 typedef ListHttpFn =
@@ -42,6 +57,10 @@ class PullPageResult {
   /// end-of-stream, and treating it as one is silent data loss: the pull would
   /// stop here and mark the doctype fully drained with later pages never
   /// fetched. [PullEngine] skips past it instead.
+  ///
+  /// Set only when [advancedCursor] genuinely moved past the scanned window
+  /// (offset in initial mode, `modified` in incremental), so a caller may loop
+  /// on it without re-requesting the same window.
   final bool pageFiltered;
 
   const PullPageResult({
@@ -71,6 +90,13 @@ class PullPageResult {
 /// page. [PullEngine] owns the stall guard for this case (it only fires for
 /// `complete == true` pages). For initial sync the loop terminates on an
 /// empty page, so no stall guard is needed.
+///
+/// A fully permission-filtered incremental window is NOT that stall case: it
+/// carries a scanned-window watermark strictly greater than the incoming
+/// cursor, so [fetch] advances `modified` past the denied block and reports
+/// [PullPageResult.pageFiltered] so the engine keeps draining. Only a window
+/// whose scanned max is *not* greater (≥ `pageSize` denied rows inside one
+/// `modified` second) falls back to stop-and-retry.
 class PullPageFetcher {
   final ListHttpFn listHttp;
 
@@ -108,11 +134,61 @@ class PullPageFetcher {
     final scanned = page.namesScanned ?? rows.length;
 
     if (rows.isEmpty) {
-      if (scanned == 0 || cursor.complete) {
-        // Genuinely drained — or incremental mode, where limit_start is always 0
-        // so there is no offset to skip forward with. Signalling end-of-stream
-        // is correct and idempotent there: the cursor simply stays put.
+      if (scanned == 0) {
+        // Genuinely drained: the endpoint consumed nothing.
         return PullPageResult(rows: rows, advancedCursor: cursor);
+      }
+      if (cursor.complete) {
+        // Incremental, and every name in the window was dropped by the per-doc
+        // permission gate. `limit_start` is pinned at 0 here, so there is no
+        // offset to step the block over: the watermark itself has to move or
+        // the next sync issues the byte-identical query, gets the identical
+        // empty window, and every row BEHIND the block stays unreachable
+        // forever (ordering is `modified asc`, so a denied block always
+        // occupies the head of the window).
+        final maxModified = page.scannedMaxModified;
+        // Advance ONLY on a strictly greater `modified`. Two reasons this is
+        // not a `(modified, name)` compare: `name` is not part of the
+        // incremental predicate, so bumping it alone leaves the next request
+        // identical (an infinite loop in PullEngine); and the on-disk cursor is
+        // shared with `SyncService`, whose tie-group skip drops rows with
+        // `modified == cursor.modified && name <= cursor.name` — advancing
+        // `name` under an unchanged `modified` would make it skip READABLE
+        // rows. Equal, lower, or absent → no progress is possible; report
+        // end-of-stream and leave the cursor untouched, exactly as before.
+        if (maxModified == null ||
+            (cursor.modified != null &&
+                maxModified.compareTo(cursor.modified!) <= 0)) {
+          // Logged, not silent. This is the residual limit of `>=`-only paging:
+          // a denied block of >= pageSize rows sharing ONE `modified` value
+          // leaves nothing to advance to, so the watermark stays put and any
+          // readable row BEHIND that block is unreachable until something in
+          // the block changes. Data is not lost — it is never mirrored — and
+          // from the host's seat those are indistinguishable, so say so rather
+          // than returning a silent "end of stream".
+          sdkLog(
+            'PullPageFetcher($doctype): fully permission-filtered incremental '
+            'window of $scanned name(s) cannot advance the watermark '
+            '(cursor.modified=${cursor.modified}, window max=$maxModified). '
+            'Stopping this doctype for this cycle; rows behind the filtered '
+            'block stay unreachable while it spans a single `modified` value.',
+          );
+          return PullPageResult(rows: rows, advancedCursor: cursor);
+        }
+        // The window is `modified asc, name asc`-ordered, so every row sharing
+        // `maxModified` with a smaller name was inside the window and therefore
+        // denied — `SyncService` skipping them is right — while same-second rows
+        // with a larger name fell outside the LIMIT, keep `name > cursor.name`,
+        // and are still returned by both paths. No row is lost.
+        return PullPageResult(
+          rows: rows,
+          advancedCursor: Cursor(
+            modified: maxModified,
+            name: page.scannedMaxName,
+            complete: true,
+          ),
+          pageFiltered: true,
+        );
       }
       // Initial mode, every name on this page filtered out. Step the offset past
       // the scanned window and let the engine keep draining.

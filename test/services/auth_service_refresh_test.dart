@@ -83,4 +83,42 @@ void main() {
       expect(isDefinitiveAuthRejection(Exception('unexpected')), isFalse);
     });
   });
+
+  group('isDefinitiveRefreshRejection', () {
+    test('401/403 are definitive, as for any credential rejection', () {
+      expect(isDefinitiveRefreshRejection(AuthException('nope', 401)), isTrue);
+      expect(isDefinitiveRefreshRejection(AuthException('nope', 403)), isTrue);
+    });
+
+    test('417 is definitive HERE — the refresh endpoint answers a dead token '
+        'with ValidationError "Invalid or expired refresh token", not 401', () {
+      expect(
+        isDefinitiveRefreshRejection(
+          ValidationException('Invalid or expired refresh token'),
+        ),
+        isTrue,
+      );
+      expect(isDefinitiveRefreshRejection(FrappeException('x', 417)), isTrue);
+    });
+
+    test('429 is NOT definitive — the limiter is per-user, so the token is '
+        'still good and must survive the lockout', () {
+      expect(isDefinitiveRefreshRejection(ApiException('slow down', 429)),
+          isFalse);
+    });
+
+    test('transport and 5xx are NOT definitive', () {
+      expect(isDefinitiveRefreshRejection(NetworkException('offline')), isFalse);
+      expect(isDefinitiveRefreshRejection(ApiException('boom', 500)), isFalse);
+      expect(isDefinitiveRefreshRejection(FrappeException('no status')), isFalse);
+    });
+
+    test('the general auth classifier is NOT widened — 417 there would wipe '
+        'tokens on any validation error', () {
+      expect(
+        isDefinitiveAuthRejection(ValidationException('bad payload')),
+        isFalse,
+      );
+    });
+  });
 }

@@ -228,7 +228,38 @@ class DoctypeService {
     final dynamic message = response is Map<String, dynamic>
         ? response['message']
         : response;
-    if (message is! List) return [];
+    if (message is! List) {
+      // MUST throw, never return []. An empty batch is how this endpoint
+      // reports "every requested name was denied or deleted", and
+      // [listFullDocsPage] turns that into `docs: []` with a non-zero
+      // `namesScanned` plus a scanned-window watermark — which the INCREMENTAL
+      // pull reads as "this window is genuinely unreadable, advance the
+      // watermark past it" (see PullPageFetcher.fetch). Letting a malformed 2xx
+      // reach that same `[]` would move the watermark past rows that are
+      // READABLE and were never fetched: permanent silent data loss,
+      // recoverable only by clearing the cursor.
+      //
+      // This is reachable, not theoretical. `RestHelper._handleResponse` hands
+      // back the RAW BODY STRING for any 2xx whose `jsonDecode` fails, so a
+      // truncated or proxy-mangled response on the largest payload the SDK ever
+      // requests — up to 200 full documents plus their child rows — arrives
+      // here as a String. Failing the page instead leaves the cursor untouched
+      // and retries on the next cycle.
+      //
+      // Status 502 deliberately, NOT 404: the caller's `on ApiException` treats
+      // 404 as "endpoint absent on this deployment" and degrades to per-name
+      // GETs, which would mask a transient upstream failure as an N+1 success.
+      throw ApiException(
+        'mobile_sync.get_docs_with_children returned a 2xx body that is not '
+        '{"message": [...]}; refusing to report an unreadable response as an '
+        'empty batch, because the pull cannot distinguish that from '
+        '"every name denied" and would advance the watermark past readable rows',
+        502,
+        message is String && message.length > 200
+            ? '${message.substring(0, 200)}…'
+            : message,
+      );
+    }
     return [
       for (final row in message)
         if (row is Map) Map<String, dynamic>.from(row),
@@ -334,7 +365,7 @@ class DoctypeService {
   /// [listFullDocs] plus the number of candidate names the inner `get_list`
   /// returned for this window.
   ///
-  /// Two guarantees the plain variant cannot express:
+  /// Three guarantees the plain variant cannot express:
   ///
   /// 1. **Docs come back in `names` order** — i.e. in the [orderBy] the caller
   ///    asked for. [bulkGetWithChildren] is a `names in (...)` bulk fetch that
@@ -346,7 +377,19 @@ class DoctypeService {
   ///    `docs.length < namesScanned` is normal and `docs.isEmpty` while
   ///    `namesScanned > 0` means *this page* was filtered out — not that the
   ///    doctype is drained.
-  Future<({List<Map<String, dynamic>> docs, int namesScanned})>
+  /// 3. **`scannedMaxModified`/`scannedMaxName` are the window's watermark,
+  ///    not the returned docs'.** A caller paging with `limit_start` pinned at
+  ///    0 needs a watermark that advances even when the page returns zero
+  ///    docs; `null` means the listed rows carried no `modified` and the
+  ///    caller must not advance.
+  Future<
+    ({
+      List<Map<String, dynamic>> docs,
+      int namesScanned,
+      String? scannedMaxModified,
+      String? scannedMaxName,
+    })
+  >
   listFullDocsPage(
     String doctype, {
     List<List<dynamic>>? filters,
@@ -357,14 +400,19 @@ class DoctypeService {
     final resolvedLimit = limitPageLength ?? listFullDocsPageSize;
     final nameList = await list(
       doctype,
-      fields: ['name'],
+      fields: ['name', 'modified'],
       filters: filters,
       limitStart: limitStart,
       limitPageLength: resolvedLimit,
       orderBy: orderBy,
     );
     if (nameList.isEmpty) {
-      return (docs: const <Map<String, dynamic>>[], namesScanned: 0);
+      return (
+        docs: const <Map<String, dynamic>>[],
+        namesScanned: 0,
+        scannedMaxModified: null,
+        scannedMaxName: null,
+      );
     }
 
     // Use `?.toString()` (matches listChildDocs) so int-valued `name`
@@ -376,7 +424,40 @@ class DoctypeService {
           if (n['name']?.toString() case final String s when s.isNotEmpty) s,
     ];
     if (names.isEmpty) {
-      return (docs: const <Map<String, dynamic>>[], namesScanned: 0);
+      return (
+        docs: const <Map<String, dynamic>>[],
+        namesScanned: 0,
+        scannedMaxModified: null,
+        scannedMaxName: null,
+      );
+    }
+
+    // High-water `(modified, name)` of the window that was SCANNED, independent
+    // of which of those names survived the per-doc gate. The incremental pull
+    // pins `limit_start` at 0, so a window whose every name is denied leaves it
+    // no offset to step over — moving `modified` past the scanned window is the
+    // only way forward. Deliberately a max rather than `nameList.last`: correct
+    // even if the server ever stops honouring `order_by`, and it can never hand
+    // back a value that moves a watermark backwards.
+    //
+    // Lexicographic compare is chronological here: Frappe timestamps are
+    // fixed-width `YYYY-MM-DD HH:MM:SS[.ffffff]`. A row with no `modified` is
+    // skipped, so a server that omits the column yields null — which the
+    // fetcher treats as "cannot advance", i.e. today's behaviour exactly.
+    String? scannedMaxModified;
+    String? scannedMaxName;
+    for (final r in nameList) {
+      if (r is! Map<String, dynamic>) continue;
+      final m = r['modified'] as String?;
+      if (m == null) continue;
+      final n = r['name']?.toString() ?? '';
+      final cmp = scannedMaxModified == null
+          ? 1
+          : m.compareTo(scannedMaxModified);
+      if (cmp > 0 || (cmp == 0 && n.compareTo(scannedMaxName ?? '') > 0)) {
+        scannedMaxModified = m;
+        scannedMaxName = n;
+      }
     }
 
     // Must equal `MAX_BATCH` in the server's
@@ -414,6 +495,8 @@ class DoctypeService {
           if (byName[n] case final Map<String, dynamic> doc) doc,
       ],
       namesScanned: names.length,
+      scannedMaxModified: scannedMaxModified,
+      scannedMaxName: scannedMaxName,
     );
   }
 

@@ -198,6 +198,16 @@ void main() {
         for (final col in serverAuditColumnNames) {
           expect(rows.first[col], isNull);
         }
+        final idx = await appDb.rawDatabase.rawQuery(
+          "SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='docs__order'",
+        );
+        expect(
+          idx.map((r) => r['name']),
+          contains('ix_order_owner'),
+          reason:
+              'a table that gains `owner` via reconcile must gain its '
+              'index too',
+        );
 
         // Idempotent: a second reconcile must not throw "duplicate column".
         await repo.reconcileParentTableForMeta(
@@ -208,6 +218,83 @@ void main() {
         expect(
           (await _columns(appDb.rawDatabase, 'docs__order')).keys,
           containsAll(serverAuditColumnNames),
+        );
+        final idxAgain = await appDb.rawDatabase.rawQuery(
+          "SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='docs__order'",
+        );
+        expect(
+          idxAgain.map((r) => r['name']),
+          contains('ix_order_owner'),
+          reason:
+              'the second pass is a DIFFERENT code path from the first: the '
+              'first indexed post-ALTER inside the `try`, the second takes the '
+              '`addedFields.isEmpty` early return guarded by '
+              '`actual.contains(\'owner\')` — and must neither throw nor drop '
+              'the index',
+        );
+      },
+    );
+
+    test(
+      'reconcile indexes owner on a table that already HAS the audit columns',
+      () async {
+        final appDb = await AppDatabase.inMemoryDatabase();
+        addTearDown(appDb.rawDatabase.close);
+
+        // A host that provisioned its own table WITH the audit columns but
+        // WITHOUT the index: the reconcile has nothing to add, so its very
+        // first call takes the early return — which must still index `owner`.
+        await appDb.rawDatabase.execute('''
+          CREATE TABLE docs__order (
+            mobile_uuid TEXT PRIMARY KEY,
+            server_name TEXT,
+            sync_status TEXT NOT NULL DEFAULT 'dirty',
+            sync_error TEXT,
+            error_code TEXT,
+            sync_attempts INTEGER NOT NULL DEFAULT 0,
+            last_attempt_at INTEGER,
+            sync_op TEXT,
+            push_base_payload TEXT,
+            docstatus INTEGER NOT NULL DEFAULT 0,
+            modified TEXT,
+            local_modified INTEGER NOT NULL,
+            pulled_at INTEGER,
+            owner TEXT,
+            creation TEXT,
+            modified_by TEXT,
+            title TEXT,
+            title__norm TEXT,
+            customer TEXT,
+            customer__is_local INTEGER
+          )
+        ''');
+
+        final before = await appDb.rawDatabase.rawQuery(
+          "SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='docs__order'",
+        );
+        expect(
+          before.map((r) => r['name']),
+          isNot(contains('ix_order_owner')),
+          reason: 'precondition: the host-provisioned table has no owner index',
+        );
+
+        final repo = OfflineRepository(appDb);
+        await repo.reconcileParentTableForMeta(
+          'Order',
+          'docs__order',
+          parentMeta,
+        );
+
+        final after = await appDb.rawDatabase.rawQuery(
+          "SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='docs__order'",
+        );
+        expect(
+          after.map((r) => r['name']),
+          contains('ix_order_owner'),
+          reason:
+              'the index call is deliberately NOT gated on "we just added '
+              '`owner`" — a table provisioned with the columns and without the '
+              'index keeps the full scan the index exists to remove',
         );
       },
     );

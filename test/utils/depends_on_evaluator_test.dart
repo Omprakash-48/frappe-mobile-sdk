@@ -599,4 +599,108 @@ void main() {
       }
     });
   });
+
+  group('trailing semicolon in the bare-truthy fallback (regression)', () {
+    // Root cause: `_extractFieldName` stripped a leading `doc.` but not a
+    // trailing `;`. The comparison branches were unaffected because
+    // `_extractValue` (the right-hand operand) already stripped it — only the
+    // LEFT operand of a comparison and the whole-expression truthy fallback
+    // ever reach `_extractFieldName`, and a `;` can only trail the whole
+    // expression, never a left operand. So the bug — and the fix — is
+    // reachable only through the truthy fallback, including the fallback
+    // reached recursively via the leading-`!` branch below.
+    test('eval:!doc.district; matches the real Frappe read_only_depends_on '
+        'for "block"', () {
+      expect(
+        DependsOnEvaluator.evaluate('eval:!doc.district;', {
+          'district': 'D',
+        }),
+        isFalse, // district set -> not read-only -> editable
+      );
+      expect(DependsOnEvaluator.evaluate('eval:!doc.district;', {}), isTrue);
+      expect(
+        DependsOnEvaluator.evaluate('eval:!doc.district;', {'district': ''}),
+        isTrue,
+      );
+    });
+
+    test(
+      'eval:!doc.district || !doc.block; matches read_only_depends_on for '
+      '"village" across all four combinations',
+      () {
+        bool ro(Map<String, dynamic> d) =>
+            DependsOnEvaluator.evaluate('eval:!doc.district || !doc.block;', d);
+
+        expect(ro({'district': 'D', 'block': 'B'}), isFalse);
+        expect(ro({'district': 'D', 'block': ''}), isTrue);
+        expect(ro({'district': '', 'block': 'B'}), isTrue);
+        expect(ro({'district': '', 'block': ''}), isTrue);
+      },
+    );
+
+    test('eval:doc.some_check; truthy path with trailing semicolon', () {
+      expect(
+        DependsOnEvaluator.evaluate('eval:doc.some_check;', {
+          'some_check': 1,
+        }),
+        isTrue,
+      );
+      expect(
+        DependsOnEvaluator.evaluate('eval:doc.some_check;', {
+          'some_check': 0,
+        }),
+        isFalse,
+      );
+      expect(DependsOnEvaluator.evaluate('eval:doc.some_check;', {}), isFalse);
+    });
+
+    test('regression: comparison operators with a trailing ; still work '
+        '(already covered by _extractValue, must not regress)', () {
+      expect(DependsOnEvaluator.evaluate('eval:doc.x == 1;', {'x': 1}), isTrue);
+      expect(DependsOnEvaluator.evaluate('eval:doc.x == 1;', {'x': 2}), isFalse);
+      expect(
+        DependsOnEvaluator.evaluate('eval:doc.x != 1;', {'x': 2}),
+        isTrue,
+      );
+      expect(
+        DependsOnEvaluator.evaluate('eval:doc.x >= 3;', {'x': 3}),
+        isTrue,
+      );
+      // includes() has its own fully-anchored regex and never reached
+      // _extractFieldName's bare-truthy path even before the fix — confirm
+      // it is genuinely untouched (no trailing `;` support was added or
+      // needed here; that would be a separate, unrequested change).
+      expect(
+        DependsOnEvaluator.evaluate('eval:["A","B"].includes(doc.grade)', {
+          'grade': 'B',
+        }),
+        isTrue,
+      );
+    });
+  });
+
+  group('extractEvalDocField (regression: trailing ; must not swallow the '
+      'complex-expression fallback)', () {
+    // Root cause: _extractFieldName now strips a trailing `;`, which made a
+    // complex (non-bare) expression that merely ends in `;` look "changed"
+    // from its stripped form too, so it was mistaken for a bare `doc.field`
+    // reference and returned whole instead of falling through to the regex.
+    test('bare eval:doc.x; still takes the fast path', () {
+      expect(
+        DependsOnEvaluator.extractEvalDocField('eval:doc.x;'),
+        'x',
+      );
+    });
+
+    test(
+        'a complex expression ending in ; falls through to the doc.<field> '
+        'regex instead of returning the whole expression', () {
+      expect(
+        DependsOnEvaluator.extractEvalDocField(
+          "eval:(doc.category||'').replace(/^prefix\\s*/, '');",
+        ),
+        'category',
+      );
+    });
+  });
 }

@@ -226,8 +226,15 @@ class DependsOnEvaluator {
     if (value.startsWith('eval:')) {
       expr = value.substring(5).trimLeft();
     }
-    String fieldName = _extractFieldName(expr);
-    if (expr != fieldName) return fieldName;
+    final fieldName = _extractFieldName(expr);
+    // Only take the fast path when the expression — after stripping an optional
+    // trailing `;` — is NOTHING but a bare `doc.field` reference. Comparing
+    // `expr != fieldName` alone is not enough: [_extractFieldName] also strips a
+    // trailing `;`, so a complex expression that merely ends in `;` (e.g.
+    // wrapped in `.replace(...)`) would look "changed" too and be mistaken for a
+    // bare reference, returning the whole expression instead of falling through
+    // to the regex below.
+    if (_stripTrailingSemicolon(expr) == 'doc.$fieldName') return fieldName;
     // The whole expression isn't a bare `doc.field` reference (e.g. it's wrapped
     // in a JS call like `(doc.x||'').replace(/.../, '')`). Fall back to the
     // first `doc.<field>` reference anywhere in the string so dependent-field
@@ -236,10 +243,21 @@ class DependsOnEvaluator {
     return RegExp(r'doc\.([A-Za-z_][A-Za-z0-9_]*)').firstMatch(expr)?.group(1);
   }
 
+  /// Drops a trailing statement terminator. Frappe `link_filters` / `depends_on`
+  /// values are sometimes authored as `eval:doc.x;`, and a Frappe fieldname can
+  /// never contain `;`, so this cannot mis-fire. Without it [extractEvalDocField]
+  /// returned `x;` — a key no form data ever holds — and the Link field's
+  /// dependent-field detection silently failed.
+  ///
+  /// [evaluate] needs no equivalent: `js_expression.dart` already parses a
+  /// trailing `;` as expression-statement punctuation.
+  static String _stripTrailingSemicolon(String expr) =>
+      expr.replaceAll(RegExp(r';\s*$'), '').trim();
+
   static String _extractFieldName(String expr) {
-    expr = expr.trim();
+    expr = _stripTrailingSemicolon(expr);
     if (expr.startsWith('doc.')) {
-      expr = expr.substring(4).trim();
+      expr = _stripTrailingSemicolon(expr.substring(4));
     }
     return expr;
   }
