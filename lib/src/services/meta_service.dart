@@ -1,6 +1,8 @@
 import 'dart:convert';
 import 'package:flutter/foundation.dart';
 import '../api/client.dart';
+import '../api/exceptions.dart';
+import '../utils/sdk_log.dart';
 import '../models/closure_result.dart';
 import '../models/dep_graph.dart';
 import '../models/doc_type_meta.dart';
@@ -409,6 +411,70 @@ class MetaService {
     List<MobileFormName> mobileFormNames,
   ) => _updateMobileFormDoctypes(mobileFormNames);
 
+  /// Removes only the forms the locally-synced permission matrix
+  /// AFFIRMATIVELY denies — a `doctype_permission` row exists AND its `read`
+  /// is false.
+  ///
+  /// SUBTRACT-ONLY, never intersect. A doctype with NO row is KEPT. That
+  /// asymmetry is the whole design: `PermissionService` defaults a cache miss
+  /// to ALLOW, so a positive filter (`where(canRead)`) is a no-op once
+  /// permissions are synced and, on a first launch where the matrix has not
+  /// synced yet, would rest entirely on that default. Getting it wrong in the
+  /// other direction empties the workspace on first launch — a worse failure
+  /// than the churn this guards against.
+  ///
+  /// Reads the DAO directly rather than taking a `PermissionService`: the
+  /// default-allow resolver is precisely what must NOT be applied here.
+  @visibleForTesting
+  Future<List<MobileFormName>> dropDeniedFormsForTest(
+    List<MobileFormName> mobileFormNames,
+  ) => _dropDeniedForms(mobileFormNames);
+
+  Future<List<MobileFormName>> _dropDeniedForms(
+    List<MobileFormName> mobileFormNames,
+  ) async {
+    final kept = <MobileFormName>[];
+    final dropped = <String>[];
+    for (final mfn in mobileFormNames) {
+      final doctype = mfn.mobileDoctype;
+      if (doctype.isEmpty) {
+        kept.add(mfn);
+        continue;
+      }
+      try {
+        final perm = await _database.doctypePermissionDao.findByDoctype(
+          doctype,
+        );
+        if (perm != null && !perm.read) {
+          dropped.add(doctype);
+          continue;
+        }
+      } catch (e, st) {
+        // A permission-table read failure must not shrink the workspace.
+        // Fail OPEN — keep the form and let the per-doctype 403 handle it.
+        sdkLog(
+          'MetaService._dropDeniedForms($doctype): permission lookup failed, '
+          'keeping the form — $e\n$st',
+        );
+      }
+      kept.add(mfn);
+    }
+    if (dropped.isNotEmpty) {
+      sdkLog(
+        'MetaService.resyncMobileConfiguration: guest fallback list scoped '
+        'against the local permission matrix, dropped ${dropped.length} '
+        'read-denied doctype(s): ${dropped.join(', ')}',
+      );
+    }
+    return kept;
+  }
+
+  /// Statuses on which the mobile-configuration fetch is retried
+  /// unauthenticated: the two ways a server-side permission filter can refuse
+  /// rather than return a filtered list. Deliberately excludes 401 (a dead
+  /// credential, which must surface) and every 5xx.
+  static const Set<int?> _permissionFilterStatuses = <int?>{403, 417};
+
   /// Fetches mobile configuration from server and resyncs doctype metadata.
   ///
   /// Calls `/api/v2/method/mobile_auth.configuration` to get updated mobile form list
@@ -421,24 +487,55 @@ class MetaService {
       // can read. The DEPLOYED endpoint's authenticated filter can raise a
       // PermissionError (a throwing `has_permission` on `DocType`) instead of
       // returning a filtered list. Since the method is `allow_guest=True`,
-      // fall back to an unauthenticated fetch to still obtain the full mobile
-      // workspace list; the per-doctype meta pulls below stay permission-scoped
-      // (getdoctype 403s are caught + skipped), and the login `permissions` map
-      // gates the workspace UI, so nothing the user cannot read is exposed.
+      // fall back to an unauthenticated fetch to still obtain the mobile
+      // workspace list.
       // SDK-WORKAROUND: backend `get_mobile_configuration` should use throw=False.
+      //
+      // The fallback is scoped to the PERMISSION statuses ON PURPOSE — an
+      // unscoped catch here is a correctness hazard, not merely untidy:
+      //
+      //  * On 401 it would answer a DEAD CREDENTIAL with the GUEST workspace
+      //    list. That list is unfiltered, `_updateMobileFormDoctypes` marks
+      //    every entry `isMobileForm: true`, and the expired session is hidden
+      //    behind a workspace that looks populated.
+      //  * On a transport failure (offline) it would swap one failed request
+      //    for a second failed request and report the offline user's error as
+      //    a permission story.
+      //
+      // Both paths also manufacture exactly the churn the terminal-demotion
+      // guard exists to suppress: unreadable doctypes enter the closure, 403,
+      // get demoted, and are re-promoted on the next launch.
+      //
+      // 417 is in the set alongside 403 because the commit that introduced
+      // this workaround recorded the SYMPTOM ("can raise a PermissionError")
+      // but never the observed STATUS. Frappe maps `frappe.PermissionError` to
+      // 403, but a `has_permission` hook that raises through a bare
+      // `frappe.throw()` surfaces as `ValidationException` (417) — the same
+      // asymmetry documented on [isDefinitiveRefreshRejection]. Scoping to 403
+      // alone would make this method THROW on a deployment where it previously
+      // recovered, silently killing the workaround. Widening is safe here
+      // precisely because it is scoped to this ONE call site: a 417 from a
+      // configuration fetch is not a statement about the credential, and
+      // nothing on this path wipes a token.
+      //
+      // 401, 5xx and transport failures still rethrow — those are the cases
+      // the unscoped catch got wrong.
       dynamic result;
+      var usedGuestFallback = false;
       try {
         result = await _client.rest.get(
           '/api/v2/method/mobile_auth.configuration',
         );
-      } catch (e, st) {
-        debugPrint(
+      } on FrappeException catch (e, st) {
+        if (!_permissionFilterStatuses.contains(e.statusCode)) rethrow;
+        sdkLog(
           'MetaService.resyncMobileConfiguration: authenticated config fetch '
-          'failed, retrying unauthenticated — $e\n$st',
+          'returned ${e.statusCode}, retrying unauthenticated — $e\n$st',
         );
         result = await _client.rest.getPublic(
           '/api/v2/method/mobile_auth.configuration',
         );
+        usedGuestFallback = true;
       }
 
       // Parse response - response structure: {"data": [...]}
@@ -463,8 +560,22 @@ class MetaService {
         return;
       }
 
+      // The guest list is UNFILTERED — the server could not scope it to this
+      // user. Subtract anything the locally-synced permission matrix
+      // affirmatively denies before it reaches the mobile-form set. Applied to
+      // the fallback branch ONLY: the authenticated response is already
+      // server-filtered, and intersecting THAT against a possibly-stale local
+      // matrix could subtract forms the user can legitimately read.
+      final scopedFormNames = usedGuestFallback
+          ? await _dropDeniedForms(mobileFormNames)
+          : mobileFormNames;
+
+      if (scopedFormNames.isEmpty) {
+        return;
+      }
+
       // Update mobile form doctypes and get list of doctypes to sync
-      final doctypesToSync = await _updateMobileFormDoctypes(mobileFormNames);
+      final doctypesToSync = await _updateMobileFormDoctypes(scopedFormNames);
 
       // Sync all doctypes that need updating
       if (doctypesToSync.isNotEmpty) {
