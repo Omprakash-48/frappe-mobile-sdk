@@ -339,4 +339,107 @@ void main() {
       expect(auth.expiredSessionEmail, isNull);
     });
   });
+
+  group('(h) the OAuth leg classifies failures like the mobile leg', () {
+    /// Same as [_mockSecureStorage] but records every deleted key, so a test
+    /// can assert whether the OAuth grant was wiped.
+    List<String> mockStorageRecordingDeletes() {
+      final deleted = <String>[];
+      final values = <String, String?>{
+        'frappe_base_url': 'http://x',
+        'frappe_oauth_refresh_token': 'OAUTH-RT-old',
+        'frappe_oauth_client_id': 'client-1',
+      };
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(_secureStorageChannel, (call) async {
+        switch (call.method) {
+          case 'read':
+            return values[(call.arguments as Map)['key'] as String];
+          case 'delete':
+            deleted.add((call.arguments as Map)['key'] as String);
+            return null;
+          case 'readAll':
+            return <String, String>{};
+          case 'containsKey':
+            return false;
+          default:
+            return null;
+        }
+      });
+      return deleted;
+    }
+
+    /// Drives `restoreSession` down to the OAuth fallback (the stored mobile
+    /// token carries an empty refresh token, which dead-ends the mobile leg),
+    /// with the OAuth call answered by [oauthResponder].
+    Future<({AuthService auth, List<String> deleted})> runOAuth(
+      Future<http.Response> Function(http.Request) oauthResponder,
+    ) async {
+      await db.authTokenDao.insertToken(
+        AuthTokenEntity(
+          accessToken: 'AT-old',
+          refreshToken: '',
+          user: 'user@example.com',
+          createdAt: _agedCreatedAt(),
+        ),
+      );
+      final deleted = mockStorageRecordingDeletes();
+      final auth = AuthService.forTesting(
+        FrappeClient('http://x'),
+        database: db,
+      );
+      await http.runWithClient(
+        () => auth.restoreSession(isOnline: true),
+        () => MockClient(oauthResponder),
+      );
+      return (auth: auth, deleted: deleted);
+    }
+
+    test('a 401 from the OAuth grant reports the session as EXPIRED', () async {
+      // Before: this leg wiped the tokens but never touched sessionHealth, so
+      // a host watching it was never told to prompt for re-login. The
+      // credential was gone and nothing said so.
+      final r = await runOAuth(
+        (_) async => http.Response(jsonEncode({'error': 'invalid_grant'}), 401),
+      );
+      expect(r.auth.sessionHealth.value, SessionHealth.expired);
+      expect(
+        r.deleted,
+        contains('frappe_oauth_refresh_token'),
+        reason: 'a definitively rejected grant SHOULD still be cleared',
+      );
+    });
+
+    test('a transport failure KEEPS the OAuth grant', () async {
+      // Before: any error cleared the tokens, so opening the app offline
+      // destroyed a perfectly good grant and stranded the user behind a login
+      // screen they could not reach.
+      final r = await runOAuth((_) async => throw const _TransportFailure());
+      expect(
+        r.deleted,
+        isNot(contains('frappe_oauth_refresh_token')),
+        reason: 'an offline user must not lose their OAuth grant',
+      );
+      expect(
+        r.auth.sessionHealth.value,
+        isNot(SessionHealth.expired),
+        reason: 'the session is not expired — the network is unavailable',
+      );
+    });
+
+    test('a 5xx from the OAuth grant KEEPS it', () async {
+      final r = await runOAuth(
+        (_) async => http.Response('upstream exploded', 502),
+      );
+      expect(r.deleted, isNot(contains('frappe_oauth_refresh_token')));
+      expect(r.auth.sessionHealth.value, isNot(SessionHealth.expired));
+    });
+  });
+}
+
+/// Stands in for a dropped socket on the OAuth call.
+class _TransportFailure implements Exception {
+  const _TransportFailure();
+  @override
+  String toString() => 'SocketException: Network is unreachable';
 }
