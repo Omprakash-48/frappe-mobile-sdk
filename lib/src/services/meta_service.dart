@@ -417,10 +417,29 @@ class MetaService {
   /// Throws if not authenticated or API call fails.
   Future<void> resyncMobileConfiguration() async {
     try {
-      // Authenticated call so the server can filter to doctypes this user can read.
-      final result = await _client.rest.get(
-        '/api/v2/method/mobile_auth.configuration',
-      );
+      // Authenticated call so the server can filter to the doctypes this user
+      // can read. The DEPLOYED endpoint's authenticated filter can raise a
+      // PermissionError (a throwing `has_permission` on `DocType`) instead of
+      // returning a filtered list. Since the method is `allow_guest=True`,
+      // fall back to an unauthenticated fetch to still obtain the full mobile
+      // workspace list; the per-doctype meta pulls below stay permission-scoped
+      // (getdoctype 403s are caught + skipped), and the login `permissions` map
+      // gates the workspace UI, so nothing the user cannot read is exposed.
+      // SDK-WORKAROUND: backend `get_mobile_configuration` should use throw=False.
+      dynamic result;
+      try {
+        result = await _client.rest.get(
+          '/api/v2/method/mobile_auth.configuration',
+        );
+      } catch (e, st) {
+        debugPrint(
+          'MetaService.resyncMobileConfiguration: authenticated config fetch '
+          'failed, retrying unauthenticated — $e\n$st',
+        );
+        result = await _client.rest.getPublic(
+          '/api/v2/method/mobile_auth.configuration',
+        );
+      }
 
       // Parse response - response structure: {"data": [...]}
       final response = result is Map<String, dynamic>
@@ -456,6 +475,7 @@ class MetaService {
             debugPrint(
               'MetaService.resyncMobileConfiguration($doctype) failed — $e\n$st',
             );
+            onMetaSyncFailure?.call(doctype, e);
             continue;
           }
         }

@@ -387,10 +387,11 @@ class OfflineRepository {
     }
     if (tableByDoctype.isEmpty) return const [];
 
-    // ONE metadata round-trip: every table's name + CREATE DDL. B43 — this
-    // replaces the old per-doctype `sqliteTableExists` + `sqliteColumnExists`
-    // probes (two sequential DB round-trips EACH, O(N) on the main isolate —
-    // the "Sync Data page slow" cause). Existence is membership in this map;
+    // ONE metadata round-trip: every table's name + CREATE DDL, read from
+    // `sqlite_master` in a single query. B43 — this replaces the old
+    // per-doctype table + column existence probes (two sequential DB
+    // round-trips EACH, O(N) on the main isolate — the "Sync Data page slow"
+    // cause). Existence is membership in this map;
     // `sync_status` presence is read straight from the CREATE DDL, so child /
     // link `docs__*` tables (which lack the column) are skipped WITHOUT ever
     // issuing a throwing query against them. Uses only `sqlite_master`, so it
@@ -415,6 +416,15 @@ class OfflineRepository {
     // `\b` guards against false positives on a hypothetical `*_sync_status*`
     // column (`_` is a word char, so no boundary there).
     final syncStatusColumn = RegExp(r'\bsync_status\b');
+    // `sync_status` alone is not a sound parent marker: it is absent from
+    // `systemChildColumnNames`, and `child_schema.dart` emits every mappable
+    // DocField as a column — so a CHILD doctype that happens to declare a field
+    // literally named `sync_status` gets one, and would be misclassified as a
+    // parent here (its rows then read back through `Document.fromResolverRow`
+    // as if they were top-level documents). `parent_uuid` IS a child system
+    // column and is never emitted on a parent, so requiring its absence makes
+    // the test unambiguous in both directions.
+    final parentUuidColumn = RegExp(r'\bparent_uuid\b');
     final out = <Document>[];
     for (final entry in tableByDoctype.entries) {
       final dt = entry.key;
@@ -422,10 +432,14 @@ class OfflineRepository {
       final ddl = ddlByTable[tableName];
       if (ddl == null) continue; // table absent
       if (!syncStatusColumn.hasMatch(ddl)) continue; // no sync_status column
+      if (parentUuidColumn.hasMatch(ddl)) {
+        continue; // child mirror, not a parent
+      }
       try {
         final rows = await db.query(
           tableName,
-          where: "sync_status IN "
+          where:
+              "sync_status IN "
               "('dirty', 'deleted', 'sync_error', 'sync_blocked')",
         );
         for (final r in rows) {
@@ -577,6 +591,30 @@ class OfflineRepository {
     }
 
     final existingServerName = existing?['server_name'] as String?;
+
+    // Carry Frappe's audit fields forward. LocalWriter's insert is
+    // `ConflictAlgorithm.replace`, so any column it doesn't emit is reset to
+    // NULL — and the form payload has no reason to round-trip `owner` /
+    // `creation` / `modified_by`. Without this, editing a previously-pulled
+    // doc would blank its `owner` and drop the row out of any `owner = <me>`
+    // filtered list. Values come only from the row already on disk (i.e. from
+    // the server, or from this device's own earlier save). Safe to read off
+    // `existing` because `reconcileParentTableForMeta` above has already added
+    // the columns.
+    //
+    // `modified_by` is deliberately EXCLUDED when the writer has a session
+    // user: this save's author is the current user, not whoever last touched
+    // the row, and carrying the stale value forward would win over the
+    // writer's stamp (highest precedence is `data`). With no session user we
+    // fall through to the old carry-forward so the on-disk value is preserved
+    // exactly as before.
+    final stampedBy = _localWriter.currentSessionUserId;
+    for (final col in serverAuditColumnNames) {
+      if (dataWithUuid.containsKey(col)) continue;
+      if (col == 'modified_by' && stampedBy != null) continue;
+      final v = existing?[col];
+      if (v != null) dataWithUuid[col] = v;
+    }
 
     await _database.rawDatabase.transaction((txn) async {
       await _localWriter.writeParentInTxn(
@@ -1028,6 +1066,27 @@ class OfflineRepository {
     final addedNorm = <String>[];
     final seen = <String>{..._reconcileParentSystemCols};
 
+    // Backfill Frappe's server-owned audit columns onto tables created before
+    // they were materialized. The loop below only ever proposes META-derived
+    // columns (system names are pre-seeded into `seen` and therefore skipped),
+    // so without this an already-installed app would keep a `docs__*` table
+    // that has no `owner` / `creation` / `modified_by` — and `FilterParser`
+    // now emits real SQL for those, which would fail with "no such column".
+    //
+    // `AppDatabase._migrateV5ToV6` covers the same gap at open time and is the
+    // primary guarantee (it runs offline too); this is the per-doctype
+    // belt-and-braces for tables created between an upgrade and this pull, and
+    // for hosts that provision tables outside the migration path.
+    //
+    // ONLY nullable TEXT columns are safe to add this way: SQLite rejects
+    // `ALTER TABLE ... ADD COLUMN ... NOT NULL` without a default, which is
+    // why the other system columns (`local_modified`, `sync_status`, ...) are
+    // deliberately NOT reconciled here.
+    for (final col in serverAuditColumnNames) {
+      if (actual.contains(col)) continue;
+      addedFields.add(AddedField(name: col, sqlType: 'TEXT'));
+    }
+
     for (final f in meta.fields) {
       final name = f.fieldname;
       final type = f.fieldtype;
@@ -1050,6 +1109,10 @@ class OfflineRepository {
     }
 
     if (addedFields.isEmpty && addedIsLocal.isEmpty && addedNorm.isEmpty) {
+      // `owner` is necessarily already present on this branch — a missing audit
+      // column would have landed in `addedFields` — but the guard keeps the
+      // statement from ever running against a table without the column.
+      if (actual.contains('owner')) await _ensureOwnerIndex(tableName);
       return;
     }
 
@@ -1065,6 +1128,10 @@ class OfflineRepository {
 
     try {
       await MetaMigration.apply(db, diff, tableName: tableName);
+      // After the ALTER, never before: a failed ALTER must not leave a
+      // CREATE INDEX running against a missing column, and any index failure is
+      // logged by the catch below instead of failing the pull page.
+      await _ensureOwnerIndex(tableName);
     } catch (e, st) {
       developer.log(
         'parent table schema reconcile failed for $doctype/$tableName: $e',
@@ -1073,6 +1140,25 @@ class OfflineRepository {
         stackTrace: st,
       );
     }
+  }
+
+  /// `buildParentSchemaDDL` and `AppDatabase._migrateV5ToV6` both index
+  /// `owner`; a table that acquires the audit columns HERE instead would keep
+  /// the full scan that index exists to remove — which is exactly the tables
+  /// this reconcile exists for (created between an upgrade and the next pull,
+  /// or provisioned outside the migration path). Not gated on "we just added
+  /// `owner`": a host that provisions its own table WITH the columns and
+  /// without the index lands in the same place. `IF NOT EXISTS` makes the
+  /// per-pull re-run free.
+  ///
+  /// Name and quoting match `AppDatabase._migrateV5ToV6` exactly so all three
+  /// provisioning paths converge on one index rather than creating two under
+  /// different names.
+  Future<void> _ensureOwnerIndex(String tableName) async {
+    final suffix = stripDocsPrefix(tableName);
+    await _database.rawDatabase.execute(
+      'CREATE INDEX IF NOT EXISTS "ix_${suffix}_owner" ON "$tableName"(owner)',
+    );
   }
 
   /// Returns [doc] with child-table rows attached to [doc.data] under each

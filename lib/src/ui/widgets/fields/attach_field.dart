@@ -1,7 +1,10 @@
 // Copyright (c) 2026, Bhushan Barbuddhe and contributors
 // For license information, please see license.txt
 
+import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
+import 'package:crypto/crypto.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_form_builder/flutter_form_builder.dart';
 import 'package:file_picker/file_picker.dart';
@@ -10,12 +13,76 @@ import 'package:path_provider/path_provider.dart';
 import 'package:open_filex/open_filex.dart';
 import '../../../utils/attachment_paths.dart';
 import '../../../utils/attachment_pick.dart';
+import '../../../utils/sdk_log.dart';
 import 'base_field.dart';
 import 'field_helpers.dart';
 // Reuse the shared full-screen zoomable image viewer (showFullScreenImage /
 // showFullScreenImageProvider) so image attachments open exactly like
 // ImageField previews, with the same auth headers.
 import 'image_field.dart';
+
+/// Dedicated subdirectory (under the OS temp dir) holding attachments that were
+/// downloaded so an external app could open them. Keeping them in one folder
+/// instead of loose in the temp root makes the cache identifiable and lets the
+/// OS reclaim it as a unit.
+@visibleForTesting
+const String attachmentTempDirName = 'frappe_attachments';
+
+/// File name used to cache the attachment at [url] inside
+/// [attachmentTempDirName].
+///
+/// The name is the SHA-1 of the FULL [url], so two attachments that happen to
+/// share a basename (two different `report.pdf`s) can never overwrite each
+/// other — the old code named the temp file after the basename alone and showed
+/// the user STALE bytes from the earlier download. It is also deterministic:
+/// re-opening the same attachment reuses (and overwrites) the same file instead
+/// of littering the cache with one copy per tap.
+///
+/// [fileName] is the basename of the stored field value and is only used to
+/// recover the extension, which [OpenFilex] needs to pick a handler app.
+@visibleForTesting
+String attachmentTempFileName(String url, String fileName) {
+  final digest = sha1.convert(utf8.encode(url)).toString();
+  return '$digest${_cacheExtension(url, fileName)}';
+}
+
+/// Extension to preserve on the cached file, `''` when none can be trusted.
+///
+/// [fileName] (the stored value's basename) wins because a Frappe
+/// `download_file` proxy URL carries the real name only inside its query
+/// string; the URL path is the fallback. Anything that is not a short
+/// alphanumeric extension is dropped so nothing outside the hashed name can be
+/// injected into the path.
+String _cacheExtension(String url, String fileName) {
+  String urlPath;
+  try {
+    urlPath = Uri.parse(url).path;
+  } catch (_) {
+    urlPath = url;
+  }
+  for (final candidate in [fileName, urlPath]) {
+    final ext = _extensionOf(candidate.trim());
+    if (_safeExtension.hasMatch(ext)) return ext.toLowerCase();
+  }
+  return '';
+}
+
+/// Trailing `.ext` of [name], or `''` when it has none.
+String _extensionOf(String name) {
+  final dot = name.lastIndexOf('.');
+  if (dot <= 0 || dot == name.length - 1) return '';
+  if (dot < name.lastIndexOf('/')) return '';
+  return name.substring(dot);
+}
+
+final RegExp _safeExtension = RegExp(r'^\.[A-Za-z0-9]{1,10}$');
+
+/// Raised when an attachment is bigger than
+/// [_AttachViewButtonState.maxDownloadBytes]. A dedicated type keeps the
+/// user-facing message distinct from a generic transport failure.
+class _AttachmentTooLarge implements Exception {
+  const _AttachmentTooLarge();
+}
 
 /// Widget for Attach field type.
 /// When [uploadFile] is set, picks upload to server first and store file_url; otherwise stores local path.
@@ -25,6 +92,17 @@ import 'image_field.dart';
 /// For /private/files/ and /files/, uses the Frappe download_file API and
 /// [imageHeaders]/[fileUrlBase] for auth (mirrors ImageField).
 class AttachField extends BaseField {
+  /// Surfaces [message] to the user. `_AttachViewButtonState` has its own
+  /// `_showError`, but that lives on the download button's State and is not
+  /// reachable from [buildField] — hence this static twin.
+  ///
+  /// Takes a [ScaffoldMessengerState] rather than a [BuildContext]: callers are
+  /// past an `await`, and resolving from a context after an async gap is what
+  /// `use_build_context_synchronously` warns about. Capture before the await.
+  static void _notify(ScaffoldMessengerState messenger, String message) {
+    messenger.showSnackBar(SnackBar(content: Text(message)));
+  }
+
   final Future<String?> Function(File file)? uploadFile;
 
   /// Base URL of the Frappe server, used to resolve relative file paths into
@@ -45,6 +123,13 @@ class AttachField extends BaseField {
   /// for the filename label and View/Open action. Display-only.
   final Map<int, String>? pendingAttachmentPaths;
 
+  /// HTTP client used to download a non-image attachment before handing it to
+  /// the device's default app. Optional: when null a short-lived client is
+  /// created per download and closed afterwards (the pre-existing behaviour).
+  /// A client passed in here is owned by the caller and is never closed by this
+  /// widget. Exists so the download path can be exercised in tests.
+  final http.Client? httpClient;
+
   const AttachField({
     super.key,
     required super.field,
@@ -57,6 +142,7 @@ class AttachField extends BaseField {
     this.imageHeaders,
     this.isOnline,
     this.pendingAttachmentPaths,
+    this.httpClient,
   });
 
   static const Set<String> _imageExtensions = {
@@ -161,12 +247,31 @@ class AttachField extends BaseField {
                   child: OutlinedButton.icon(
                     onPressed: enabled && !field.readOnly
                         ? () async {
-                            final result = await FilePicker.pickFiles();
-                            if (result != null &&
-                                result.files.single.path != null) {
+                            final messenger = ScaffoldMessenger.of(context);
+                            // `sdkLog` is debug-only, so every failure below was
+                            // invisible in release: the picker closed, the field
+                            // stayed empty, and nothing explained why. Also
+                            // guards `pickFiles` itself, which throws on a
+                            // denied storage permission.
+                            try {
+                              final result = await FilePicker.pickFiles();
+                              if (result == null ||
+                                  result.files.single.path == null) {
+                                return;
+                              }
                               final picked = File(result.files.single.path!);
                               // Durable-copy-first; upload inline when online,
                               // else keep the local path for save-time queueing.
+                              //
+                              // This deliberately REPLACES the older "never
+                              // store the local path — the server expects a
+                              // file_url" rule. A local path is now a valid
+                              // stored value: the offline attachment producer
+                              // queues it at save time and rewrites the field
+                              // once the upload lands. `resolvePickedAttachment`
+                              // absorbs the null-uploader and failed-upload
+                              // branches that used to be spelled out here, and
+                              // falls back to the durable copy in both.
                               final stored = await resolvePickedAttachment(
                                 picked: picked,
                                 online: isOnline?.call() ?? true,
@@ -175,7 +280,26 @@ class AttachField extends BaseField {
                               if (stored != null && stored.isNotEmpty) {
                                 fieldState.didChange(stored);
                                 onChanged?.call(stored);
+                                return;
                               }
+                              // Only reachable if the durable copy itself
+                              // yielded nothing, so there is no local path to
+                              // queue either — the pick is genuinely lost.
+                              sdkLog(
+                                'AttachField: could not store the picked file '
+                                '${picked.path}',
+                              );
+                              _notify(
+                                messenger,
+                                'Upload failed — the file was not attached.',
+                              );
+                            } catch (e, st) {
+                              sdkLog('AttachField: attach failed — $e\n$st');
+                              _notify(
+                                messenger,
+                                'Could not attach the file. Check your '
+                                'connection and storage permissions.',
+                              );
                             }
                           }
                         : null,
@@ -197,7 +321,11 @@ class AttachField extends BaseField {
                     isLocal: isLocalFile,
                     isImage: isImage,
                     headers: imageHeaders,
+                    // `displaySource`, not `current`: a `pending:<id>` marker
+                    // resolves to its durable local file, so the label shows the
+                    // real filename rather than the marker text.
                     fileName: _getFileName(displaySource),
+                    httpClient: httpClient,
                   ),
               ],
             ),
@@ -241,8 +369,11 @@ class _AttachViewButton extends StatefulWidget {
   /// Auth headers used to fetch private server files.
   final Map<String, String>? headers;
 
-  /// Display file name used for the downloaded temp file.
+  /// Display file name — used to recover the extension of the cached temp file.
   final String fileName;
+
+  /// Caller-owned client for the download; null means "create and close one".
+  final http.Client? httpClient;
 
   const _AttachViewButton({
     required this.url,
@@ -250,6 +381,7 @@ class _AttachViewButton extends StatefulWidget {
     required this.isImage,
     required this.headers,
     required this.fileName,
+    required this.httpClient,
   });
 
   @override
@@ -257,7 +389,45 @@ class _AttachViewButton extends StatefulWidget {
 }
 
 class _AttachViewButtonState extends State<_AttachViewButton> {
+  /// Hard ceiling on an attachment we will pull down for an external app.
+  /// Bytes are streamed straight to disk so RAM is never the constraint, but a
+  /// mis-sized (or hostile) file must not be able to fill the app's cache
+  /// directory or silently burn a metered connection. 50 MB is far above a
+  /// normal Frappe attachment — scans, photos and reports are single-digit MB —
+  /// while staying small enough to remain a genuine guard rail.
+  static const int maxDownloadBytes = 50 * 1024 * 1024;
+
+  /// Budget for the server to start responding. Without it a hung server left
+  /// the spinner spinning forever with no way out (there is no cancel button).
+  static const Duration responseTimeout = Duration(seconds: 30);
+
+  /// Longest idle gap tolerated between two chunks once bytes are flowing.
+  /// Applied per chunk rather than to the whole transfer so a legitimately
+  /// large file on a slow rural connection still completes.
+  static const Duration stallTimeout = Duration(seconds: 30);
+
   bool _busy = false;
+
+  /// Set in [dispose]. The download runs to completion regardless — there is no
+  /// cancel token on `http.Client.send`'s stream that would abort it cleanly
+  /// mid-write — but once unmounted we must not hand the file to an external
+  /// app. Without this, tapping Open on a large PDF and then navigating away
+  /// launched a viewer over whatever the user had moved on to.
+  bool _disposed = false;
+
+  @override
+  void dispose() {
+    _disposed = true;
+    // Only close a client this widget owns; an injected one belongs to the
+    // caller (see [_AttachViewButton.httpClient]).
+    _ownedClient?.close();
+    _ownedClient = null;
+    super.dispose();
+  }
+
+  /// The client created by [_open] when none was injected, tracked so [dispose]
+  /// can close it and abort an in-flight download's socket.
+  http.Client? _ownedClient;
 
   Future<void> _open() async {
     // Images: reuse the shared full-screen zoomable viewer.
@@ -283,26 +453,87 @@ class _AttachViewButtonState extends State<_AttachViewButton> {
     // external app/browser won't have, so fetch the bytes ourselves then open
     // the downloaded temp file.
     setState(() => _busy = true);
+    // Reuse an injected client; otherwise create one and close it below.
+    final client = widget.httpClient ?? http.Client();
+    if (widget.httpClient == null) _ownedClient = client;
+    File? target;
     try {
-      final response = await http.get(
-        Uri.parse(widget.url),
-        headers: widget.headers,
-      );
+      final request = http.Request('GET', Uri.parse(widget.url));
+      final headers = widget.headers;
+      if (headers != null) request.headers.addAll(headers);
+      // Streamed (not http.get) so the whole file is never buffered in memory:
+      // a large PDF/video used to be materialised as response.bodyBytes.
+      final response = await client.send(request).timeout(responseTimeout);
       if (response.statusCode != 200) {
         throw Exception('HTTP ${response.statusCode}');
       }
+      final declared = response.contentLength;
+      // A missing content-length (chunked responses, which the Frappe
+      // download_file proxy can produce) just means "unknown" — the running
+      // byte count below is the load-bearing guard.
+      if (declared != null && declared > maxDownloadBytes) {
+        throw const _AttachmentTooLarge();
+      }
       final dir = await getTemporaryDirectory();
-      final safeName = widget.fileName.isEmpty ? 'attachment' : widget.fileName;
-      final file = File('${dir.path}/$safeName');
-      await file.writeAsBytes(response.bodyBytes);
-      final result = await OpenFilex.open(file.path);
+      target = File(
+        '${dir.path}/$attachmentTempDirName/'
+        '${attachmentTempFileName(widget.url, widget.fileName)}',
+      );
+      await target.parent.create(recursive: true);
+      final sink = target.openWrite();
+      var received = 0;
+      try {
+        await for (final chunk in response.stream.timeout(stallTimeout)) {
+          received += chunk.length;
+          if (received > maxDownloadBytes) throw const _AttachmentTooLarge();
+          sink.add(chunk);
+        }
+        await sink.flush();
+      } finally {
+        await sink.close();
+      }
+      // The user may have navigated away while this downloaded. Launching an
+      // external viewer now would appear over an unrelated screen, so drop the
+      // file instead. Checked AFTER the write completes because the stream
+      // cannot be aborted mid-chunk.
+      if (_disposed) {
+        await _deleteQuietly(target);
+        return;
+      }
+      final result = await OpenFilex.open(target.path);
       if (result.type != ResultType.done && mounted) {
         _showError('Could not open file: ${result.message}');
       }
+    } on TimeoutException {
+      await _deleteQuietly(target);
+      if (mounted) {
+        _showError('Download timed out. Check your connection and try again.');
+      }
+    } on _AttachmentTooLarge {
+      await _deleteQuietly(target);
+      if (mounted) {
+        _showError(
+          'File is too large to open on this device '
+          '(limit ${maxDownloadBytes ~/ (1024 * 1024)} MB).',
+        );
+      }
     } catch (e) {
+      await _deleteQuietly(target);
       if (mounted) _showError('Could not open file: $e');
     } finally {
+      if (widget.httpClient == null) client.close();
       if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  /// Removes a partially written cache file so a later attempt (or a later tap)
+  /// can never hand truncated bytes to an external app.
+  Future<void> _deleteQuietly(File? file) async {
+    if (file == null) return;
+    try {
+      if (await file.exists()) await file.delete();
+    } catch (e) {
+      sdkLog('AttachField: could not delete partial download — $e');
     }
   }
 

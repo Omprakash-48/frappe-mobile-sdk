@@ -62,4 +62,86 @@ void main() {
     expect(c.errorOf('code'), 'duplicate');
     c.dispose();
   });
+
+  test(
+    'required Table field fails when the child list is empty, passes with a row',
+    () {
+      final c = FormController(
+        meta: _meta([
+          DocField(fieldname: 'items', fieldtype: 'Table', reqd: true),
+        ]),
+      );
+      // Regression: an empty child table is `[]`, and `[].toString()` is "[]"
+      // (not empty), so the old `v.toString().isEmpty` check never flagged it.
+      c.setValue('items', <dynamic>[]);
+      expect(c.validate(), false);
+      expect(c.errorOf('items'), contains('required'));
+      // A row present → satisfied.
+      c.setValue('items', <dynamic>[
+        {'x': 1},
+      ]);
+      expect(c.validate(), true);
+      expect(c.errorOf('items'), isNull);
+      c.dispose();
+    },
+  );
+
+  // "Missing" must mean the same thing here as in the legacy
+  // FrappeFormBuilder mandatory sweep, which is trim-aware — otherwise
+  // reactive and legacy mode accept different payloads for the same doctype.
+  test('whitespace-only value counts as MISSING for a required field', () {
+    final c = FormController(
+      meta: _meta([DocField(fieldname: 'a', fieldtype: 'Data', reqd: true)]),
+    );
+    c.setValue('a', '   ');
+    expect(c.validate(), false);
+    expect(c.errorOf('a'), contains('required'));
+    // A tab/newline-only value is equally blank.
+    c.setValue('a', '\t\n');
+    expect(c.validate(), false);
+    // Real content passes, including content with surrounding whitespace.
+    c.setValue('a', '  x  ');
+    expect(c.validate(), true);
+    expect(c.errorOf('a'), isNull);
+    c.dispose();
+  });
+
+  test('0 and false stay PRESENT for a required field (Frappe parity)', () {
+    final c = FormController(
+      meta: _meta([
+        DocField(fieldname: 'count', fieldtype: 'Int', reqd: true),
+        DocField(fieldname: 'flag', fieldtype: 'Check', reqd: true),
+      ]),
+    );
+    c.setValue('count', 0);
+    c.setValue('flag', false);
+    expect(c.validate(), true);
+    expect(c.errorOf('count'), isNull);
+    expect(c.errorOf('flag'), isNull);
+    // 0.0 too, so Float/Currency keep working.
+    c.setValue('count', 0.0);
+    expect(c.validate(), true);
+    c.dispose();
+  });
+
+  test('empty list stays MISSING; null stays MISSING', () {
+    final c = FormController(
+      meta: _meta([
+        DocField(
+          fieldname: 'items',
+          fieldtype: 'Table MultiSelect',
+          reqd: true,
+        ),
+      ]),
+    );
+    expect(c.validate(), false); // null
+    c.setValue('items', <dynamic>[]);
+    expect(c.validate(), false);
+    expect(c.errorOf('items'), contains('required'));
+    c.setValue('items', <dynamic>[
+      {'sector': 'AGRI'},
+    ]);
+    expect(c.validate(), true);
+    c.dispose();
+  });
 }

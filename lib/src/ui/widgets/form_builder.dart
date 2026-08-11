@@ -355,8 +355,14 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
   /// echo would NOT self-guard and would double-run the pipeline alongside the
   /// explicit cascade (PR#83 finding #1). This flag makes the echo a pure
   /// state-sync no-op so the explicit [_scheduleProgrammaticCascade] is the
-  /// single cascade path. Only raised when the cascade flag is on, so legacy
-  /// behaviour is unchanged.
+  /// single cascade path.
+  ///
+  /// Raised for the synchronous cross-field (`rest`) echo only when the cascade
+  /// flag is on (legacy behaviour otherwise), but ALWAYS for the deferred
+  /// self-key echo — an unguarded self-key echo on a typed field re-fires the
+  /// pipeline every frame with no depth cap (the cap is cascade-gated), so a
+  /// self-referential handler would hang. See the self-key echo in
+  /// [_onFieldValueChanged].
   int _programmaticEchoGuard = 0;
 
   /// Cached `fieldname → DocField` index for O(1) lookups (see [_fieldByName]),
@@ -382,6 +388,49 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
   late TabController _tabController;
   final List<_FormTab> _tabs = [];
   final Map<String, int> _fieldTabIndex = {};
+
+  /// Per-fieldname inline error for child-table (Table / Table MultiSelect)
+  /// fields, which are NOT FormBuilderFields — so `_formKey…invalidate()`
+  /// cannot surface their required-empty error. The mandatory sweep writes
+  /// here and [ChildTableField] renders it; cleared on the next edit.
+  final Map<String, String> _tableFieldErrors = {};
+
+  /// Field types whose widget surfaces a required-empty error through
+  /// [_tableFieldErrors] rather than `FormBuilderState.fields[…].invalidate()`
+  /// — neither is a `FormBuilderField`, so `invalidate()` is a silent no-op.
+  static bool _rendersInlineTableError(String? fieldtype) =>
+      fieldtype == 'Table' || fieldtype == 'Table MultiSelect';
+
+  /// Pushes the two per-form inputs onto [FieldFactory] as instance state.
+  ///
+  /// These are deliberately NOT `createField` parameters: that method is
+  /// documented as overridable, and Dart requires an override to redeclare
+  /// every named parameter of the method it overrides — so a new parameter
+  /// breaks every existing subclass at compile time, and a default value does
+  /// not help (a caller holding a `FieldFactory` reference may still pass it
+  /// explicitly). Host apps subclass this factory, so the signature is treated
+  /// as frozen. Mirrors how `linkOptionService` / `linkFieldCoordinator` are
+  /// already wired. Re-invoked from [didUpdateWidget] because `meta` can change.
+  void _configureFieldFactoryForMeta() {
+    // Frappe stores Single doctypes as mediumtext and exempts them from the
+    // implicit Data varchar(140) cap.
+    _fieldFactory.capDataLength = !widget.meta.isSingle;
+    _fieldFactory.errorTextResolver = _inlineTableErrorFor;
+  }
+
+  /// Inline error for a child-table field, for whichever mode is active.
+  /// Returns null for every other fieldtype — those ARE `FormBuilderField`s and
+  /// render their own error, so supplying one here would double-render.
+  String? _inlineTableErrorFor(String fieldname) {
+    if (!_rendersInlineTableError(widget.meta.getField(fieldname)?.fieldtype)) {
+      return null;
+    }
+    final c = _controller;
+    if (widget.mode == FormBuilderMode.reactive && c != null) {
+      return c.errorOf(fieldname);
+    }
+    return _tableFieldErrors[fieldname];
+  }
 
   // Reactive mode (FormBuilderMode.reactive): app-ownable controller.
   FormController? _controller;
@@ -478,6 +527,7 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
       _fieldFactory.linkOptionService ??= widget.linkOptionService;
       _fieldFactory.linkFieldCoordinator ??= _linkFieldCoordinator;
     }
+    _configureFieldFactoryForMeta();
 
     _buildFormStructure();
     _tabController = TabController(
@@ -490,8 +540,19 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
     if (widget.mode == FormBuilderMode.reactive) {
       _controller =
           widget.controller ??
-          FormController(meta: widget.meta, initialData: widget.initialData);
+          FormController(
+            meta: widget.meta,
+            initialData: widget.initialData,
+            parentData: widget.parentFormData,
+          );
       _ownsController = widget.controller == null;
+      // A host-supplied controller never saw the constructor argument above, so
+      // thread `parent` in here too — otherwise parentFormData is silently
+      // ignored and every `parent.<field>` condition falls back to aliasing
+      // `doc`. no-clobber: a controller that already carries parentData wins.
+      if (widget.parentFormData != null && _controller!.parentData == null) {
+        _controller!.parentData = widget.parentFormData;
+      }
       _controller!.fetchLinkedDocument = widget.fetchLinkedDocument;
       // no-clobber: only wire the bridge hook if the controller has none.
       if (widget.onFieldChange != null &&
@@ -727,6 +788,19 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
   /// for them; editable fields keep `_formData` (so user edits/clears still win,
   /// and immutable callers are unaffected since `_formData` is seeded from
   /// `initialData` at init).
+  /// Per-build memo for the merged legacy overlay. Reset at the top of every
+  /// [build] (see [_resetEvalDataCache]).
+  ///
+  /// Only the merge path is memoised, and only that path allocates: reactive
+  /// mode returns `_controller!.values` and legacy mode returns `_formData`,
+  /// both by reference. The copy fires solely in legacy mode with non-empty
+  /// `initialData` AND at least one read-only field — where a form carrying
+  /// several `depends_on` / `mandatory_depends_on` / `read_only_depends_on`
+  /// expressions rebuilt the whole map once per expression per build.
+  Map<String, dynamic>? _evalDataMemo;
+
+  void _resetEvalDataCache() => _evalDataMemo = null;
+
   Map<String, dynamic> get _evalData {
     if (widget.mode == FormBuilderMode.reactive && _controller != null) {
       return _controller!.values;
@@ -734,11 +808,13 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
     final init = widget.initialData;
     final ro = _readOnlyFieldNames;
     if (init == null || init.isEmpty || ro.isEmpty) return _formData;
+    final memo = _evalDataMemo;
+    if (memo != null) return memo;
     final merged = Map<String, dynamic>.from(_formData);
     for (final n in ro) {
       if (init.containsKey(n)) merged[n] = init[n];
     }
-    return merged;
+    return _evalDataMemo = merged;
   }
 
   DocTypeMeta? _readOnlyNamesMeta;
@@ -759,19 +835,40 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
     return _readOnlyNamesCache!;
   }
 
-  bool _evaluateDepends(String? expr, bool defaultValue) {
+  /// [defaultValue] answers an ABSENT expression; [onError] answers one that is
+  /// present but cannot be evaluated. They are deliberately separate — see
+  /// [DependsOnEvaluator.evaluate].
+  bool _evaluateDepends(
+    String? expr,
+    bool defaultValue, {
+    required bool onError,
+  }) {
     if (expr == null || expr.isEmpty) return defaultValue;
-    return DependsOnEvaluator.evaluate(expr, _evalData);
+    // [onError] is the fallback for an expression that is present but cannot be
+    // evaluated: an unparseable mandatory_depends_on must not make the field
+    // permanently mandatory.
+    return DependsOnEvaluator.evaluate(
+      expr,
+      _evalData,
+      parentData: effectiveParentFormData,
+      defaultOnError: onError,
+    );
   }
 
   bool _shouldShowField(DocField field) =>
-      _evaluateDepends(field.dependsOn, true);
+      // An unparseable expression shows the field rather than hiding data.
+      _evaluateDepends(field.dependsOn, true, onError: true);
 
   bool _isFieldRequired(DocField field) =>
-      field.reqd || _evaluateDepends(field.mandatoryDependsOn, false);
+      field.reqd ||
+      // NEVER become mandatory because an expression failed to parse — that
+      // would block the save with nothing the user could do to satisfy it.
+      _evaluateDepends(field.mandatoryDependsOn, false, onError: false);
 
   bool _isFieldReadOnly(DocField field) =>
-      field.readOnly || _evaluateDepends(field.readOnlyDependsOn, false);
+      field.readOnly ||
+      // Likewise, never lock a field because an expression failed to parse.
+      _evaluateDepends(field.readOnlyDependsOn, false, onError: false);
 
   /// Handles fetch_from: when a Link field changes, fetch the linked document
   /// and patch target fields (format: "link_field_name.source_field_name").
@@ -952,8 +1049,14 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
   /// [FrappeFormBuilder.onFieldChange], depends_on rebuild). Extracted from the
   /// field `onChanged` callback so a value set programmatically can re-enter the
   /// SAME pipeline when [FrappeFormBuilder.cascadeProgrammaticChanges] is on —
-  /// see [_scheduleProgrammaticCascade]. When the flag is off this is
-  /// byte-identical to the previous inline `onChanged`.
+  /// see [_scheduleProgrammaticCascade].
+  ///
+  /// With the flag off this is the previous inline `onChanged` **except on the
+  /// self-key path**, where two ungated fixes apply: the widget patch is
+  /// deferred one frame, and its echo is swallowed to a state-sync. So a
+  /// depth-0 change that arrives while that deferred `patchValue` is in flight
+  /// no longer re-runs the pipeline. Only reachable when a handler patches the
+  /// field currently changing; see `doc/COMPUTED_FIELD_CASCADE.md`.
   ///
   /// [cascadeDepth] > 0 marks a programmatic cascade re-fire: the field's value
   /// is already in [_formData] (the parent patch set it), so `oldValue == value`
@@ -972,7 +1075,12 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
     // cascade the explicit re-fire (cascadeDepth > 0, dispatched post-frame after
     // the guard is released) is the sole re-fire path, so this synchronous echo
     // only syncs form state and returns without re-running the pipeline.
-    if (cascade && _programmaticEchoGuard > 0 && cascadeDepth == 0) {
+    //
+    // NOT gated on [cascade]: the deferred self-key echo below raises this guard
+    // unconditionally (see the comment there), so this check must honour it with
+    // the flag off too — otherwise a self-referential handler on a typed field
+    // re-fires every frame with no depth cap (the cap is cascade-gated).
+    if (_programmaticEchoGuard > 0 && cascadeDepth == 0) {
       if (field.fieldname != null) {
         if (value == null) {
           _formData.remove(field.fieldname);
@@ -984,6 +1092,20 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
     }
 
     setState(() {
+      // A user edit (e.g. adding a child-table row) clears any pending
+      // required-empty-table error surfaced by the mandatory sweep. Keyed on
+      // fieldname alone — no fieldtype gate — so it covers Table and
+      // Table MultiSelect alike.
+      //
+      // A still-empty value is NOT such an edit: it does not satisfy the
+      // requirement, so the message stays accurate. This also matters for
+      // correctness rather than just tidiness — TableMultiSelectFieldBase
+      // emits `onChanged(<empty list>)` on mount (its clean-value echo), so a
+      // sweep that switches to a lazily-built tab would otherwise have the
+      // error it just surfaced wiped on the very next frame.
+      if (!(value == null || (value is List && value.isEmpty))) {
+        _tableFieldErrors.remove(field.fieldname);
+      }
       final oldValue = _formData[field.fieldname];
       // A programmatic re-fire (cascadeDepth > 0) forces the pipeline even
       // though the value is already present in _formData.
@@ -1088,13 +1210,23 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
             final selfValue = patches[selfKey];
             WidgetsBinding.instance.addPostFrameCallback((_) {
               if (!mounted) return;
-              if (cascade) _programmaticEchoGuard++;
+              // Guard raised UNCONDITIONALLY, not just when cascading. The
+              // deferred patchValue re-fires this field's onChanged; for a typed
+              // field (Check/Date/Rating) FieldNormalizer changes the value's
+              // representation, so the echoed value never equals the doc-space
+              // value in _formData, `changed` stays true, and a self-referential
+              // handler re-fires forever across postFrameCallbacks — an uncapped
+              // infinite hang, because the depth cap lives only in the
+              // cascade-gated [_scheduleProgrammaticCascade]. Making the echo a
+              // pure state-sync no-op bounds it regardless of the flag; no finite
+              // cascade-off case relies on this echo re-running the pipeline.
+              _programmaticEchoGuard++;
               try {
                 _formKey.currentState?.patchValue(
                   _normalizePatchValues({selfKey: selfValue}),
                 );
               } finally {
-                if (cascade) _programmaticEchoGuard--;
+                _programmaticEchoGuard--;
               }
             });
           }
@@ -1150,12 +1282,12 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
       final newValue = entry.value;
       // Child-table payloads are patched wholesale, not treated as field edits.
       if (newValue is List || newValue is Map) continue;
-      // Value-equality: skip fields whose value did not actually change.
-      if (_normForCascade(prior[entry.key]) == _normForCascade(newValue)) {
-        continue;
-      }
       final field = _fieldByName[entry.key];
       if (field == null) continue;
+      // Value-equality: skip fields whose value did not actually change.
+      if (_cascadeValuesEqual(field, prior[entry.key], newValue)) {
+        continue;
+      }
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (mounted) {
           _onFieldValueChanged(field, newValue, cascadeDepth: depth + 1);
@@ -1164,9 +1296,40 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
     }
   }
 
-  /// Normalise for cascade value-equality: trimmed string form, so `5`/`"5"`
-  /// compare equal and a null/absent value never spuriously "changes".
-  static String? _normForCascade(dynamic v) => v?.toString().trim();
+  /// Cascade value-equality for [field]. Baseline is trimmed-string equality, so
+  /// `5`/`"5"` compare equal and a null/absent value never spuriously "changes".
+  ///
+  /// For NUMERIC fieldtypes only, both operands are additionally compared as
+  /// numbers, so `10`/`"10.0"`/`10.00` are equal and a representation-only
+  /// change (e.g. a Float field re-emitting `"10.0"` for `10`) does not trigger a
+  /// spurious self-terminating re-fire. Restricted to numeric fieldtypes on
+  /// purpose: a Link/Select/Data id like `"007"` must NOT compare equal to `"7"`,
+  /// which is what an unconditional numeric compare would do.
+  static bool _cascadeValuesEqual(DocField field, dynamic a, dynamic b) {
+    if (_isNumericFieldType(field.fieldtype)) {
+      final na = _asNum(a);
+      final nb = _asNum(b);
+      if (na != null && nb != null) return na == nb;
+    }
+    return a?.toString().trim() == b?.toString().trim();
+  }
+
+  /// Fieldtypes whose values are numbers, so a representation change carries no
+  /// meaning for cascade purposes.
+  static bool _isNumericFieldType(String? fieldtype) =>
+      fieldtype == FieldTypes.int ||
+      fieldtype == FieldTypes.float ||
+      fieldtype == FieldTypes.currency ||
+      fieldtype == FieldTypes.percent ||
+      fieldtype == FieldTypes.rating;
+
+  /// Parse [v] to a [num] (int or double), or null if it is not numeric.
+  static num? _asNum(dynamic v) {
+    if (v is num) return v;
+    final s = v?.toString().trim();
+    if (s == null || s.isEmpty) return null;
+    return num.tryParse(s);
+  }
 
   Widget _buildFieldWidget(DocField field) {
     if (widget.mode == FormBuilderMode.reactive && _controller != null) {
@@ -1621,6 +1784,7 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
         });
       }
       _fieldFactory.linkFieldCoordinator = _linkFieldCoordinator;
+      _configureFieldFactoryForMeta();
       _buildFormStructure();
       _tabController.dispose();
       _tabController = TabController(
@@ -1732,7 +1896,11 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
         if (field.dependsOn != null && field.dependsOn!.isNotEmpty) {
           // Evaluate against the merged formValues so the latest user
           // changes drive the visibility decision.
-          if (!DependsOnEvaluator.evaluate(field.dependsOn, formValues)) {
+          if (!DependsOnEvaluator.evaluate(
+            field.dependsOn,
+            formValues,
+            parentData: effectiveParentFormData,
+          )) {
             continue;
           }
         }
@@ -1789,10 +1957,18 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
       if (f.fieldname == null) continue;
       final tabHidden =
           currentTabDeps != null &&
-          !DependsOnEvaluator.evaluate(currentTabDeps, dataForDepends);
+          !DependsOnEvaluator.evaluate(
+            currentTabDeps,
+            dataForDepends,
+            parentData: effectiveParentFormData,
+          );
       final secHidden =
           currentSectionDeps != null &&
-          !DependsOnEvaluator.evaluate(currentSectionDeps, dataForDepends);
+          !DependsOnEvaluator.evaluate(
+            currentSectionDeps,
+            dataForDepends,
+            parentData: effectiveParentFormData,
+          );
       if (tabHidden || secHidden) {
         hiddenByContainer.add(f.fieldname!);
       }
@@ -1805,7 +1981,11 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
       );
       if (field.fieldtype == '_missing_') return false;
       if (field.dependsOn == null || field.dependsOn!.isEmpty) return false;
-      return !DependsOnEvaluator.evaluate(field.dependsOn, dataForDepends);
+      return !DependsOnEvaluator.evaluate(
+        field.dependsOn,
+        dataForDepends,
+        parentData: effectiveParentFormData,
+      );
     });
 
     // Frappe-parity mandatory sweep over the COMPLETE payload.
@@ -1847,12 +2027,37 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
           _tabController.index = tabIndex;
         });
       }
+      // A required-empty child table ('Table' -> ChildTableField) or
+      // 'Table MultiSelect' (-> TableMultiSelectFieldBase) is NOT a
+      // FormBuilderField, so the `invalidate()` path below is a no-op for
+      // both. Route their errors into `_tableFieldErrors`, which both widgets
+      // render inline via their `errorText`. Without this a required-empty
+      // Table MultiSelect blocked submit with NO visible message anywhere.
+      // Every other field type keeps the invalidate path unchanged.
+      final tableErrors = <String, String>{};
+      for (final f in missingMandatory) {
+        final name = f.fieldname;
+        if (name == null) continue;
+        if (_rendersInlineTableError(f.fieldtype)) {
+          tableErrors[name] = sdkTr('{0} is required', [f.displayLabel]);
+        }
+      }
+      if (tableErrors.isNotEmpty) {
+        setState(() {
+          _tableFieldErrors
+            ..clear()
+            ..addAll(tableErrors);
+        });
+      }
       // Surface inline errors once the target tab's fields have mounted
       // (same delay the invalid-field scroll above uses for tab settling).
       Future.delayed(const Duration(milliseconds: 150), () {
         if (!mounted) return;
         final st = _formKey.currentState;
         for (final f in missingMandatory) {
+          if (_rendersInlineTableError(f.fieldtype)) {
+            continue; // surfaced via _tableFieldErrors above
+          }
           st?.fields[f.fieldname]?.invalidate(
             sdkTr('{0} is required', [f.displayLabel]),
           );
@@ -1949,10 +2154,19 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
     final linkSources = LinkOptionService.getDependentFieldNames(
       field.linkFilters,
     );
+    // Child-table fieldtypes ('Table' / 'Table MultiSelect') are NOT
+    // FormBuilderFields, so the controller's validation error has no way to
+    // reach the user except the widget's own inline `errorText` — without this
+    // a required-empty child table blocked Save with nothing on screen.
+    // Every other fieldtype IS a FormBuilderField that renders its own error;
+    // feeding it `errorText` too would double-render, so the channel (and the
+    // extra error listener that repaints it) stays gated to these two.
+    final inlineTableError = _rendersInlineTableError(field.fieldtype);
     return _ReactiveFieldHost(
       name: name,
       controller: c,
       watch: linkSources,
+      watchError: inlineTableError,
       build: (ui) {
         if (!ui.visible) return const SizedBox.shrink();
         FrappeFormBuilder.debugFieldBuildCounts[name] =
@@ -1987,7 +2201,19 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
           field: effective,
           value: value,
           enabled: !effectiveReadOnly,
-          onChanged: (v) => c.setValue(name, v, source: ChangeSource.user),
+          // Inline-table error only: an edit made while the message is showing
+          // re-validates the field so supplying a value clears it. Gated on an
+          // error ALREADY being displayed, so the empty-list clean-value echo
+          // TableMultiSelectFieldBase emits on mount can never create one; when
+          // the field is still empty the re-validation re-sets the identical
+          // message, which a ValueNotifier<String?> treats as no change — the
+          // error the failed submit surfaced survives instead of being wiped.
+          onChanged: (v) {
+            c.setValue(name, v, source: ChangeSource.user);
+            if (inlineTableError && c.errorOf(name) != null) {
+              c.validateField(name);
+            }
+          },
           formData: c.values,
           style: fieldStyle,
           uploadFile: widget.uploadFile,
@@ -2041,6 +2267,12 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
 
   @override
   Widget build(BuildContext context) {
+    // Drop the per-build eval-data memo. Safe as a build-scoped cache because
+    // every reader (`_shouldShowField` / `_isFieldRequired` /
+    // `_isFieldReadOnly`, via `_hasAnyVisibleField`, `_buildFieldWidget` and
+    // `_buildSectionContent`) runs inside this build; `_formData` mutations all
+    // go through setState, which lands here again before anything re-reads it.
+    _resetEvalDataCache();
     if (_tabs.isEmpty) {
       return const Center(child: Text('No fields to display'));
     }
@@ -2118,10 +2350,18 @@ class _ReactiveFieldHost extends StatefulWidget {
     required this.controller,
     required this.build,
     this.watch = const <String>[],
+    this.watchError = false,
   });
   final String name;
   final FormController controller;
   final Widget Function(FieldUiState ui) build;
+
+  /// Also rebuild when this field's validation error changes. Only child-table
+  /// fieldtypes need it: they paint the controller's error through their own
+  /// inline `errorText`, so without this listener the message is computed on
+  /// submit and never painted. FormBuilderField-backed types surface their own
+  /// error and stay off this notifier (no extra rebuilds for them).
+  final bool watchError;
 
   /// Extra field names whose value notifiers also trigger a rebuild — e.g. the
   /// fields a Link field references via `link_filters`. A change to one of them
@@ -2155,6 +2395,10 @@ class _ReactiveFieldHostState extends State<_ReactiveFieldHost> {
       widget.controller.uiStateOf(widget.name),
       widget.controller.valueOf(widget.name),
       for (final f in widget.watch) widget.controller.valueOf(f),
+      // Subscribing also CREATES the error notifier, which validate() only
+      // pushes to when it already exists — so the listener must be registered
+      // here, before the first submit, for the message to ever arrive.
+      if (widget.watchError) widget.controller.errorListenableOf(widget.name),
     ]),
     builder: (context, _) {
       final ui = widget.controller.uiStateOf(widget.name).value;

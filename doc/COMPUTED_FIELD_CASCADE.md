@@ -56,6 +56,10 @@ The cascade is bounded by two independent mechanisms:
   equal ⇒ no re-fire, so the cascade reaches a fixpoint. (A cross-field visited-set is
   deliberately **not** used — it would break legitimate fan-in, e.g. `A` sets `B` and `C`,
   both of which feed `D`.)
+  On **numeric fieldtypes** (`Int`, `Float`, `Currency`, `Percent`, `Rating`) the comparison is
+  numeric, so a representation-only change (`10` vs `"10.0"`) is *not* treated as a change.
+  Every other fieldtype compares as trimmed strings, so an opaque id like `"007"` is still a
+  real change against `"7"`.
 - **Depth cap (backstop).** Recursion is capped (currently 12 levels) to bound a
   non-converging handler (e.g. an `A ↔ B` flip-flop). Hitting the cap logs via `sdkLog` and
   stops.
@@ -74,6 +78,12 @@ is currently changing (e.g. normalising its own value:
   field's controller notifications (`StackOverflowError`) whenever the handler rewrote the
   value — a pre-existing defect independent of this flag, fixed alongside it. The document
   data (`formData`) still updates immediately; only the widget sync waits a frame.
+- That deferred echo is suppressed **regardless of the flag**. On a typed field the echoed
+  value never equals the doc-space value (`FieldNormalizer` changed its representation), so an
+  unsuppressed echo would re-fire a self-referential handler every frame — and the depth cap
+  above only runs while cascading, so nothing would bound it. Suppressing it makes the echo a
+  pure state-sync no-op in both flag states. (The *synchronous cross-field* echo stays
+  cascade-gated, so legacy cross-field behaviour is untouched.)
 - For the self-key, the "prior" value the cascade compares against is the value that was
   just set (the field's own write happens before the handler runs), so the re-fire happens
   only when the handler actually rewrote the value — an idempotent rewrite re-fires exactly
@@ -123,13 +133,18 @@ covered. Cascading native `fetch_from` patches may be addressed as a follow-up.
 ## Backwards compatibility
 
 - **Default `false`.** With the flag off there is no cascade — no re-fire, no scheduling, no
-  depth tracking. One behaviour change is deliberately **not** gated by the flag: the self-key
-  widget patch is deferred one frame unconditionally (the `StackOverflowError` fix described
-  above, a pre-existing defect). This affects only a handler that rewrites the field currently
-  changing; the document data still updates synchronously — only the widget sync waits a frame.
+  depth tracking. Two behaviour changes are deliberately **not** gated by the flag, both fixes
+  for pre-existing defects on the self-key path: the self-key widget patch is deferred one
+  frame (the `StackOverflowError` fix), and that deferred echo is suppressed (the uncapped
+  typed-field hang described above). Both affect only a handler that rewrites the field
+  currently changing; the document data still updates synchronously — only the widget sync
+  waits a frame.
 - **Per-form.** Enable it only on forms whose `onFieldChange` handlers are known to be safe to
   re-enter. Handlers that issue network calls on change should be reviewed before enabling, so
   a cascade doesn't fan out unexpected requests.
-- **Deterministic.** With the flag off, no scheduling, no re-fire, no depth tracking.
+- **Deterministic.** With the flag off there is no cascade re-fire and no depth tracking. The
+  one piece of scheduling that remains is the deferred self-key widget patch described above —
+  so "no scheduling with the flag off" is true for every path *except* a handler that patches
+  the field currently changing.
 
 See also: [`doc/FIELD_CHANGE_HANDLER.md`](FIELD_CHANGE_HANDLER.md).
