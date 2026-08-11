@@ -4,6 +4,8 @@ import 'dart:math';
 import 'package:crypto/crypto.dart';
 import 'package:http/http.dart' as http;
 
+import 'exceptions.dart';
+
 /// Builds a Frappe `api/method/<path>` URI from [baseUrl], normalising
 /// the trailing slash so `baseUrl` with or without a trailing `/`
 /// produces the same URI. Single source of truth for OAuth endpoint URL
@@ -14,10 +16,13 @@ Uri _oauthUri(String baseUrl, String path) {
 }
 
 /// Performs a form-encoded `application/x-www-form-urlencoded` POST to
-/// [uri], throws `Exception('$errorLabel failed: ...')` on non-200, and
-/// returns the decoded JSON map. Shared by [OAuth2Helper.exchangeCodeForToken]
-/// and [OAuth2Helper.refreshToken] which previously had byte-for-byte
-/// identical http.post calls.
+/// [uri], throws `ApiException('$errorLabel failed: <status>', <status>)` on
+/// non-200, and returns the decoded JSON map. Shared by
+/// [OAuth2Helper.exchangeCodeForToken] and [OAuth2Helper.refreshToken] which
+/// previously had byte-for-byte identical http.post calls.
+///
+/// The thrown exception CARRIES THE STATUS CODE — callers classify a dead
+/// credential (401/403/417) apart from a transport or server-side blip on it.
 Future<Map<String, dynamic>> _postFormEncoded(
   Uri uri,
   Map<String, String> body,
@@ -35,7 +40,21 @@ Future<Map<String, dynamic>> _postFormEncoded(
     // Do NOT embed response.body: OAuth error bodies can carry tokens,
     // client_secret echoes, or error_description PII that would then leak into
     // crash reporters and log aggregators via the exception's stack trace.
-    throw Exception('$errorLabel failed: ${response.statusCode}');
+    // `details` is left null for the same reason.
+    //
+    // [ApiException], not a bare `Exception`, SPECIFICALLY so the status
+    // survives. `AuthService` classifies a refresh failure with
+    // `isDefinitiveRefreshRejection`, which matches on [FrappeException] +
+    // status; a bare exception carried the status only inside its MESSAGE, so
+    // every OAuth failure — a genuinely dead grant and a dropped socket alike
+    // — classified identically. That is what made the OAuth leg wipe tokens
+    // while offline and never report the session as expired. ApiException
+    // implements Exception, so existing `catch (e)` / `on Exception` handlers
+    // are unaffected and the message text is unchanged.
+    throw ApiException(
+      '$errorLabel failed: ${response.statusCode}',
+      response.statusCode,
+    );
   }
   return jsonDecode(response.body) as Map<String, dynamic>;
 }
