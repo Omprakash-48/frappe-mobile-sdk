@@ -2,10 +2,16 @@
 /// every PARENT `docs__<doctype>` table.
 ///
 /// They exist offline so a filter referencing them produces real SQL. Before
-/// they were materialized, `FilterParser` silently DROPPED such a clause,
-/// which made offline results a SUPERSET of the server query — an
-/// `owner = <current user>` filter became a no-op and surfaced rows that
-/// were not the user's.
+/// they were materialized, `FilterParser.toSql` REJECTED such a clause with
+/// `Unknown column` — the filter was unusable offline rather than permissive,
+/// and callers worked around it by omitting the clause. An intermediate
+/// revision dropped the clause silently instead, which is strictly worse:
+/// dropping an AND clause makes an offline result a SUPERSET of the server
+/// query, degrading `owner = <current user>` to a no-op that surfaces rows
+/// which are not the user's. Both are gone. See the matching note on
+/// `FilterParser._parentAuditColumns`, which this deliberately mirrors — the
+/// earlier version of this docstring recorded only the silent-drop half and
+/// contradicted it.
 ///
 /// The server is AUTHORITATIVE. Frappe assigns `owner` / `creation` on insert
 /// and `modified_by` on every save, and a client must never SEND them — they
