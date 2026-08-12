@@ -116,6 +116,7 @@ class FieldFactory {
     bool Function()? isOnline,
     Map<int, String>? pendingAttachmentPaths,
     ResolveMediaFn? mediaResolver,
+    bool Function()? isOfflineMode,
   }) {
     if (field.hidden) {
       return null;
@@ -313,6 +314,7 @@ class FieldFactory {
           isOnline: isOnline,
           pendingAttachmentPaths: pendingAttachmentPaths,
           mediaResolver: mediaResolver,
+          isOfflineMode: isOfflineMode,
         );
 
       case FieldTypes.attachImage:
@@ -329,6 +331,7 @@ class FieldFactory {
           isOnline: isOnline,
           pendingAttachmentPaths: pendingAttachmentPaths,
           mediaResolver: mediaResolver,
+          isOfflineMode: isOfflineMode,
         );
 
       case FieldTypes.html:

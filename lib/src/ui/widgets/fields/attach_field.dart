@@ -145,6 +145,15 @@ class AttachField extends BaseField {
   /// DAO/filesystem stack; pass `myResolver.resolve`.
   final ResolveMediaFn? mediaResolver;
 
+  /// Returns true when the SDK is in offline-first mode.
+  ///
+  /// When it does, a pick is ALWAYS staged and queued rather than uploaded
+  /// inline, whatever the connectivity — offline-first promises that data entry
+  /// never blocks on the network, and an inline upload would also put the
+  /// attachment outside the push gate and the media cache. Null is treated as
+  /// "not offline mode", preserving the previous behaviour.
+  final bool Function()? isOfflineMode;
+
   const AttachField({
     super.key,
     required super.field,
@@ -159,6 +168,7 @@ class AttachField extends BaseField {
     this.pendingAttachmentPaths,
     this.httpClient,
     this.mediaResolver,
+    this.isOfflineMode,
   });
 
   static const Set<String> _imageExtensions = {
@@ -294,6 +304,8 @@ class AttachField extends BaseField {
                               final stored = await resolvePickedAttachment(
                                 picked: picked,
                                 online: isOnline?.call() ?? true,
+                                offlineModeEnabled:
+                                    isOfflineMode?.call() ?? false,
                                 uploadFile: uploadFile,
                               );
                               if (stored != null && stored.isNotEmpty) {

@@ -200,4 +200,103 @@ void main() {
       expect(deleted, ['/appdocs/mform_attachments/dur.jpg']);
     });
   });
+
+  group('offline mode defers the upload even when connected', () {
+    test('offline mode ON + device ONLINE: stages, does NOT upload', () async {
+      var uploads = 0;
+      final out = await resolvePickedAttachment(
+        picked: picked,
+        online: true,
+        offlineModeEnabled: true,
+        uploadFile: (f) async {
+          uploads++;
+          return 'https://server/files/x.jpg';
+        },
+        copyToStore: fakeCopy,
+        deleteCopy: fakeDelete,
+      );
+      expect(
+        uploads,
+        0,
+        reason: 'offline-first means data entry never blocks on the network',
+      );
+      expect(out, '/appdocs/mform_attachments/dur.jpg');
+      expect(deleted, isEmpty, reason: 'the staged file is what gets queued');
+    });
+
+    test(
+      'offline mode OFF + device ONLINE: uploads inline (unchanged)',
+      () async {
+        var uploads = 0;
+        final out = await resolvePickedAttachment(
+          picked: picked,
+          online: true,
+          offlineModeEnabled: false,
+          uploadFile: (f) async {
+            uploads++;
+            return 'https://server/files/x.jpg';
+          },
+          copyToStore: fakeCopy,
+          deleteCopy: fakeDelete,
+        );
+        expect(uploads, 1);
+        expect(out, 'https://server/files/x.jpg');
+      },
+    );
+
+    test('offline mode ON + device OFFLINE: stages (unchanged)', () async {
+      var uploads = 0;
+      final out = await resolvePickedAttachment(
+        picked: picked,
+        online: false,
+        offlineModeEnabled: true,
+        uploadFile: (f) async {
+          uploads++;
+          return 'x';
+        },
+        copyToStore: fakeCopy,
+        deleteCopy: fakeDelete,
+      );
+      expect(uploads, 0);
+      expect(out, '/appdocs/mform_attachments/dur.jpg');
+    });
+
+    test('the default is OFF, so existing hosts keep inline upload', () async {
+      var uploads = 0;
+      await resolvePickedAttachment(
+        picked: picked,
+        online: true,
+        uploadFile: (f) async {
+          uploads++;
+          return 'https://server/files/x.jpg';
+        },
+        copyToStore: fakeCopy,
+        deleteCopy: fakeDelete,
+      );
+      expect(uploads, 1);
+    });
+
+    test('the size guard still runs first in offline mode', () async {
+      final tmp = await Directory.systemTemp.createTemp('offguard');
+      addTearDown(() async => tmp.delete(recursive: true));
+      final big = File('${tmp.path}/big.bin')
+        ..writeAsBytesSync(List.filled(2048, 0));
+      var copied = false;
+      await expectLater(
+        resolvePickedAttachment(
+          picked: big,
+          online: true,
+          offlineModeEnabled: true,
+          maxBytes: 1024,
+          copyToStore: (f) async {
+            copied = true;
+            return '/never';
+          },
+          deleteCopy: fakeDelete,
+        ),
+        throwsA(isA<AttachmentTooLargeException>()),
+      );
+      expect(copied, isFalse);
+    });
+  });
 }

@@ -1205,6 +1205,9 @@ class _FormScreenState extends State<FormScreen> with WidgetsBindingObserver {
                   isOnline: widget.isOnline,
                   pendingAttachmentPaths: _pendingAttachmentPaths,
                   mediaResolver: _mediaResolver?.resolve,
+                  // Read live through the repository so a mid-session toggle
+                  // flip takes effect on the next pick.
+                  isOfflineMode: () => widget.repository.offlineMode.enabled,
                   fetchLinkedDocument: _fetchLinkedDocument,
                   getMeta: widget.metaService != null
                       ? (doctype) => widget.metaService!.getMeta(doctype)

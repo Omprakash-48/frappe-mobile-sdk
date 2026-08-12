@@ -47,8 +47,12 @@ class AttachmentTooLargeException implements Exception {
 /// host process can be killed mid-capture), so the durable copy is the safety
 /// net for both online and offline.
 ///
-/// - **Online** with an [uploadFile]: upload from the durable copy; on success
-///   return the server `file_url` and delete the now-redundant copy.
+/// - **Online, offline mode OFF**, with an [uploadFile]: upload from the durable
+///   copy; on success return the server `file_url` and delete the now-redundant
+///   copy.
+/// - **[offlineModeEnabled] is true**: never upload here, whatever the
+///   connectivity. Return the staged path so the save-time producer queues it
+///   and the push pipeline owns it. See the note on that parameter.
 /// - **Offline**, no uploader, or a TRANSIENT upload failure: return the durable
 ///   local path so the save-time producer can queue it for later upload.
 /// - **A TERMINAL upload failure** (oversized, wrong type, not permitted)
@@ -62,6 +66,19 @@ Future<String?> resolvePickedAttachment({
   required File picked,
   required bool online,
   AttachmentUploadFn? uploadFile,
+
+  /// When true, defer the upload to the push pipeline even if [online].
+  ///
+  /// Offline-first mode promises that data entry never blocks on the network.
+  /// Uploading inline here would break that promise on a connected device, and
+  /// would also put the attachment OUTSIDE the offline pipeline: no
+  /// `pending_attachments` row, so no push gate, no `rejected` state, no cache
+  /// entry, and — because nothing records the upload — a discarded draft would
+  /// leave an orphaned File on the server that the SDK cannot even name.
+  ///
+  /// Defaults to false so a host that does not supply it keeps the previous
+  /// inline-upload behaviour.
+  bool offlineModeEnabled = false,
   int maxBytes = kDefaultMaxAttachmentBytes,
   Future<String> Function(File source) copyToStore = copyToAttachmentStore,
   Future<void> Function(String path) deleteCopy = deleteAttachmentCopy,
@@ -86,7 +103,7 @@ Future<String?> resolvePickedAttachment({
   }
 
   final durablePath = await copyToStore(picked);
-  if (uploadFile != null && online) {
+  if (uploadFile != null && online && !offlineModeEnabled) {
     try {
       final url = await uploadFile(File(durablePath));
       if (url != null && url.isNotEmpty) {

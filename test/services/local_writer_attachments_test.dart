@@ -6,6 +6,7 @@ import 'package:frappe_mobile_sdk/src/database/schema/system_tables.dart';
 import 'package:frappe_mobile_sdk/src/models/doc_field.dart';
 import 'package:frappe_mobile_sdk/src/models/doc_type_meta.dart';
 import 'package:frappe_mobile_sdk/src/services/local_writer.dart';
+import 'package:frappe_mobile_sdk/src/utils/attachment_pick.dart';
 import 'package:frappe_mobile_sdk/src/utils/media_store.dart';
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 
@@ -215,6 +216,57 @@ void main() {
       )).single;
       expect(row['mime_type'], isNull);
       expect(row['size_bytes'], 2);
+    },
+  );
+
+  test(
+    'offline mode + connectivity: the pick is QUEUED, back under the gate',
+    () async {
+      // Before this, an online pick in offline mode uploaded inline and left NO
+      // pending_attachments row — so the push gate, the rejected state and the
+      // media cache all had nothing to act on, and a discarded draft orphaned a
+      // File the SDK could not even name.
+      final root = await Directory.systemTemp.createTemp('offmodeq');
+      MediaStore.overrideRootForTest(root.path);
+      addTearDown(() async {
+        MediaStore.overrideRootForTest(null);
+        if (await root.exists()) await root.delete(recursive: true);
+      });
+
+      var uploads = 0;
+      final picked = File('${root.path}/Site Photo.jpg')
+        ..writeAsBytesSync(List.filled(32, 0));
+
+      final stored = await resolvePickedAttachment(
+        picked: picked,
+        online: true, // device IS connected
+        offlineModeEnabled: true, // ...but offline-first mode is on
+        uploadFile: (f) async {
+          uploads++;
+          return '/files/should-not-happen.jpg';
+        },
+      );
+
+      expect(uploads, 0, reason: 'no network call during data entry');
+      expect(stored, contains('/outbox/'), reason: 'staged, not uploaded');
+
+      final data = saveData();
+      data['photo'] = stored;
+      await writer.writeParent(parentDoctype: 'Order', data: data);
+
+      final row = (await db.query(
+        'pending_attachments',
+        where: 'parent_fieldname = ?',
+        whereArgs: ['photo'],
+      )).single;
+      expect(row['state'], 'pending', reason: 'the push pipeline now owns it');
+      expect(row['top_parent_uuid'], 'p-uuid-1');
+      expect(row['file_name'], 'Site Photo.jpg');
+      expect(row['size_bytes'], 32);
+      expect(
+        (await db.query('docs__order')).single['photo'],
+        startsWith('pending:'),
+      );
     },
   );
 }

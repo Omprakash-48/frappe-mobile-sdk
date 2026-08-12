@@ -224,6 +224,11 @@ class FrappeFormBuilder extends StatefulWidget {
   /// offline previews. Forwarded to Attach / Attach Image / Image fields.
   final ResolveMediaFn? mediaResolver;
 
+  /// Returns true when the SDK is in offline-first mode; forwarded to
+  /// Attach / Attach Image / Image so a pick is queued rather than uploaded
+  /// inline. See [AttachField.isOfflineMode].
+  final bool Function()? isOfflineMode;
+
   /// Fetches a linked document by doctype and name (for fetch_from).
   /// Try local repository first, then server. Return null if not found.
   final Future<Map<String, dynamic>?> Function(
@@ -319,6 +324,7 @@ class FrappeFormBuilder extends StatefulWidget {
     this.isOnline,
     this.pendingAttachmentPaths,
     this.mediaResolver,
+    this.isOfflineMode,
   });
 
   @override
@@ -1385,6 +1391,7 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
       isOnline: widget.isOnline,
       pendingAttachmentPaths: widget.pendingAttachmentPaths,
       mediaResolver: widget.mediaResolver,
+      isOfflineMode: widget.isOfflineMode,
       getMeta: widget.getMeta,
       parentFormData: effectiveParentFormData,
       getLinkFilterBuilder: widget.getLinkFilterBuilder,
@@ -1404,6 +1411,7 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
                   isOnline: widget.isOnline,
                   pendingAttachmentPaths: widget.pendingAttachmentPaths,
                   mediaResolver: widget.mediaResolver,
+                  isOfflineMode: widget.isOfflineMode,
                   // fetch linked document for child doctype.
                   fetchLinkedDocument: widget.fetchLinkedDocument,
                   translate: widget.translate,
@@ -2230,6 +2238,7 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
           isOnline: widget.isOnline,
           pendingAttachmentPaths: widget.pendingAttachmentPaths,
           mediaResolver: widget.mediaResolver,
+          isOfflineMode: widget.isOfflineMode,
           getMeta: widget.getMeta,
           getLinkFilterBuilder: widget.getLinkFilterBuilder,
           onButtonPressed: widget.onButtonPressed,
@@ -2254,6 +2263,7 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
                       isOnline: widget.isOnline,
                       pendingAttachmentPaths: widget.pendingAttachmentPaths,
                       mediaResolver: widget.mediaResolver,
+                      isOfflineMode: widget.isOfflineMode,
                       fetchLinkedDocument: widget.fetchLinkedDocument,
                       translate: widget.translate,
                       onButtonPressed: widget.onButtonPressed,

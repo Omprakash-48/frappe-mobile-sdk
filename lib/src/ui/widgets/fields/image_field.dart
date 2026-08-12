@@ -144,6 +144,15 @@ class ImageField extends BaseField {
   /// DAO/filesystem stack; pass `myResolver.resolve`.
   final ResolveMediaFn? mediaResolver;
 
+  /// Returns true when the SDK is in offline-first mode.
+  ///
+  /// When it does, a pick is ALWAYS staged and queued rather than uploaded
+  /// inline, whatever the connectivity — offline-first promises that data entry
+  /// never blocks on the network, and an inline upload would also put the
+  /// attachment outside the push gate and the media cache. Null is treated as
+  /// "not offline mode", preserving the previous behaviour.
+  final bool Function()? isOfflineMode;
+
   const ImageField({
     super.key,
     required super.field,
@@ -157,6 +166,7 @@ class ImageField extends BaseField {
     this.isOnline,
     this.pendingAttachmentPaths,
     this.mediaResolver,
+    this.isOfflineMode,
   });
 
   /// Only Frappe server file paths or full URLs are treated as server URLs.
@@ -245,6 +255,7 @@ class ImageField extends BaseField {
       stored = await resolvePickedAttachment(
         picked: file,
         online: isOnline?.call() ?? true,
+        offlineModeEnabled: isOfflineMode?.call() ?? false,
         uploadFile: uploadFile,
       );
     } on AttachmentTooLargeException catch (e) {
