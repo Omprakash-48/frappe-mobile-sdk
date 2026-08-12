@@ -26,6 +26,11 @@ class DoctypePermissionDao {
   /// One query rather than a `findByDoctype` per candidate, and it filters in
   /// SQL rather than through an `IN (...)` list, so it neither scales with the
   /// caller's list length nor risks SQLite's bound-variable ceiling.
+  ///
+  /// `can_read = 0` is exactly the negation the entity applies in Dart
+  /// (`(map['can_read'] as int? ?? 0) == 1`): the column is declared
+  /// `INTEGER NOT NULL DEFAULT 0`, so there is no NULL for the two to disagree
+  /// about, and any non-zero value is truthy on both sides.
   Future<Set<String>> findReadDeniedDoctypes() async {
     final maps = await _database.query(
       'doctype_permission',
