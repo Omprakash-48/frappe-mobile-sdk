@@ -507,4 +507,33 @@ The size guard runs **before** the durable copy is made, so an oversized pick ne
 | Memoised resolve for widgets | `lib/src/ui/widgets/fields/media_resolve_builder.dart` |
 | Upload endpoint fields | `lib/src/api/attachment_service.dart` |
 
-Regression coverage for the three marker-corruption paths: `test/sync/marker_resolution_regression_test.dart`. Case matrix: `test/sync/attachment_pipeline_cases_test.dart`.
+---
+
+## 15. Test coverage
+
+Where to look when changing any of this, and what each file is protecting.
+
+| Test | Pins |
+|---|---|
+| `test/sync/marker_resolution_regression_test.dart` | The three marker-corruption paths (§8 cases 1–6b). Began as repros asserting the **bug**; the inverted assertions are the proof of the fix. |
+| `test/sync/attachment_pipeline_cases_test.dart` | The case matrix, asserting uploader **call counts** — "no duplicate uploads" is a claim about invocations. |
+| `test/sync/attachment_multi_field_test.dart` | N parent + X child rows x M fields: one-query fan-out, per-row writeback targets, serial-failure semantics, resume without re-upload (§3b). |
+| `test/sync/attachment_error_classifier_test.dart` | terminal vs transient, per exception type and status (§9). |
+| `test/sync/attachment_pipeline_test.dart` | Backoff, the H3 no-re-upload guard, `inlinePayload` including the **throw** on an unresolved marker. |
+| `test/sync/attachment_pipeline_cleanup_test.dart` | Staged copy leaves `outbox/` on success — and is still reclaimed when the cache move fails. |
+| `test/sync/attachment_pipeline_child_discovery_test.dart` | Child-row attachments are found via `top_parent_uuid`. |
+| `test/sync/offline_attachment_e2e_test.dart` | Multi-marker resolution into the right slots. |
+| `test/services/attachment_file_reclaim_test.dart` | `deleteForTopParent` removes files with rows, spares other documents, and **never touches the cache**. |
+| `test/services/media_resolver_test.dart` | All four resolution branches, self-healing on a missing file, and that a `pending:` value is never fetched over HTTP. |
+| `test/services/media_wipe_test.dart` | Logout clears staged **and** cached media; `storeSizeBytes` counts nested staged files. |
+| `test/services/local_writer_attachments_test.dart` | Marker write, no double-enqueue on re-save, and that size / MIME / **original filename** are recorded. |
+| `test/utils/media_store_test.dart` | Directory layout, deterministic cache paths, idempotent `moveToCache`, collision safety. |
+| `test/utils/attachment_pick_test.dart` | Size guard before staging, and the terminal-vs-transient split at pick time. |
+| `test/utils/attachment_paths_test.dart` | Marker parsing and local-path classification. |
+| `test/utils/attachment_storage_test.dart` | The legacy `copyToAttachmentStore` entry point still lands in `outbox/`. |
+| `test/database/media_cache_migration_test.dart` | v6 → v7, idempotently, with `file_url` as the primary key. |
+| `test/database/daos/media_cache_dao_test.dart` | Upsert-not-duplicate, `touch`, `totalBytes` tolerating NULL sizes. |
+| `test/database/daos/pending_attachment_dao_test.dart` | `findUnresolved` returns every non-done state — including `rejected`, which must still block. |
+| `test/api/attachment_service_test.dart` | The `doctype` / `docname` / `file_name` keys, and that the multipart part carries the **original** filename. |
+
+**What no test in this repo covers**, and therefore has to be checked on a device: the platform file and image pickers, camera lost-capture recovery, `OpenFilex` handoff of a cached file, real `path_provider` paths, and whether `mform_attachments/` is actually gone after a logout. The Frappe-side contract in §3a is verified against three Frappe checkouts' **source**, not against a running site.
