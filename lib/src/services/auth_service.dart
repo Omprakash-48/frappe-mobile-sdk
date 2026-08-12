@@ -1237,8 +1237,9 @@ const Set<String> _definitiveOAuthErrorCodes = <String>{
 bool isDefinitiveOAuthRejection(Object error) {
   if (error is ApiException) {
     final code = error.details;
-    if (code is String && _definitiveOAuthErrorCodes.contains(code))
+    if (code is String && _definitiveOAuthErrorCodes.contains(code)) {
       return true;
+    }
   }
   return error is FrappeException &&
       (error.statusCode == 400 ||
