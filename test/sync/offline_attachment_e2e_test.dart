@@ -55,62 +55,81 @@ void main() {
     );
   }
 
-  test('4 markers (2 parent + 2 child) each resolve to their own file_url',
-      () async {
-    // N=2 parent attach fields
-    final idPhoto = await enqueueLocal(
-      parentUuid: 'P1', parentDoctype: 'Order', field: 'photo', content: 'A');
-    final idScan = await enqueueLocal(
-      parentUuid: 'P1', parentDoctype: 'Order', field: 'scan', content: 'B');
-    // M=2 child rows, K=1 attach field each
-    final idR0 = await enqueueLocal(
-      parentUuid: 'C0', parentDoctype: 'Order Item', field: 'receipt', content: 'C');
-    final idR1 = await enqueueLocal(
-      parentUuid: 'C1', parentDoctype: 'Order Item', field: 'receipt', content: 'D');
+  test(
+    '4 markers (2 parent + 2 child) each resolve to their own file_url',
+    () async {
+      // N=2 parent attach fields
+      final idPhoto = await enqueueLocal(
+        parentUuid: 'P1',
+        parentDoctype: 'Order',
+        field: 'photo',
+        content: 'A',
+      );
+      final idScan = await enqueueLocal(
+        parentUuid: 'P1',
+        parentDoctype: 'Order',
+        field: 'scan',
+        content: 'B',
+      );
+      // M=2 child rows, K=1 attach field each
+      final idR0 = await enqueueLocal(
+        parentUuid: 'C0',
+        parentDoctype: 'Order Item',
+        field: 'receipt',
+        content: 'C',
+      );
+      final idR1 = await enqueueLocal(
+        parentUuid: 'C1',
+        parentDoctype: 'Order Item',
+        field: 'receipt',
+        content: 'D',
+      );
 
-    // Payload shaped exactly as PayloadAssembler produces it from docs__:
-    // parent user fields + a child list of maps, each holding its marker.
-    final payload = <String, Object?>{
-      'doctype': 'Order',
-      'photo': 'pending:$idPhoto',
-      'scan': 'pending:$idScan',
-      'title': 'plain field untouched',
-      'items': [
-        {'idx': 0, 'receipt': 'pending:$idR0', 'label': 'row0'},
-        {'idx': 1, 'receipt': 'pending:$idR1', 'label': 'row1'},
-      ],
-    };
+      // Payload shaped exactly as PayloadAssembler produces it from docs__:
+      // parent user fields + a child list of maps, each holding its marker.
+      final payload = <String, Object?>{
+        'doctype': 'Order',
+        'photo': 'pending:$idPhoto',
+        'scan': 'pending:$idScan',
+        'title': 'plain field untouched',
+        'items': [
+          {'idx': 0, 'receipt': 'pending:$idR0', 'label': 'row0'},
+          {'idx': 1, 'receipt': 'pending:$idR1', 'label': 'row1'},
+        ],
+      };
 
-    // Real pipeline; uploader returns a unique url per file so mis-mapping
-    // would surface as a wrong url in a slot.
-    final uploaded = <String, String>{};
-    final pipeline = AttachmentPipeline(
-      dao: dao,
-      uploader: (file, {doctype, docname, fileName, isPrivate = true}) async {
-        final content = await file.readAsString();
-        final url = '/files/${fileName}_$content';
-        uploaded[content] = url;
-        return {'file_url': url, 'name': fileName};
-      },
-    );
+      // Real pipeline; uploader returns a unique url per file so mis-mapping
+      // would surface as a wrong url in a slot.
+      final uploaded = <String, String>{};
+      final pipeline = AttachmentPipeline(
+        dao: dao,
+        db: db,
+        uploader: (file, {doctype, docname, fileName, isPrivate = true}) async {
+          final content = await file.readAsString();
+          final url = '/files/${fileName}_$content';
+          uploaded[content] = url;
+          return {'file_url': url, 'name': fileName};
+        },
+      );
 
-    final resolved = await pipeline.uploadPendingForTopParent('P1');
-    expect(resolved.length, 4);
+      final resolved = await pipeline.resolveForTopParent('P1');
+      expect(resolved.length, 4);
 
-    final out = AttachmentPipeline.inlinePayload(payload, resolved: resolved);
+      final out = AttachmentPipeline.inlinePayload(payload, resolved: resolved);
 
-    // Each marker resolved to ITS OWN file_url in ITS OWN slot.
-    expect(out['photo'], '/files/photo.bin_A');
-    expect(out['scan'], '/files/scan.bin_B');
-    expect(out['title'], 'plain field untouched');
-    final items = (out['items'] as List).cast<Map>();
-    expect(items[0]['receipt'], '/files/receipt.bin_C');
-    expect(items[1]['receipt'], '/files/receipt.bin_D');
+      // Each marker resolved to ITS OWN file_url in ITS OWN slot.
+      expect(out['photo'], '/files/photo.bin_A');
+      expect(out['scan'], '/files/scan.bin_B');
+      expect(out['title'], 'plain field untouched');
+      final items = (out['items'] as List).cast<Map>();
+      expect(items[0]['receipt'], '/files/receipt.bin_C');
+      expect(items[1]['receipt'], '/files/receipt.bin_D');
 
-    // No marker left behind anywhere.
-    expect(out.toString().contains('pending:'), isFalse);
+      // No marker left behind anywhere.
+      expect(out.toString().contains('pending:'), isFalse);
 
-    // Durable copies reclaimed after upload.
-    expect(Directory(tmp.path).listSync().isEmpty, isTrue);
-  });
+      // Durable copies reclaimed after upload.
+      expect(Directory(tmp.path).listSync().isEmpty, isTrue);
+    },
+  );
 }

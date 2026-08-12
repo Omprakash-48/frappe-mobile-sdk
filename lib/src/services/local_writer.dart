@@ -1,3 +1,5 @@
+import 'dart:io';
+
 import 'package:sqflite/sqflite.dart';
 import 'package:uuid/uuid.dart';
 
@@ -10,6 +12,7 @@ import '../database/table_name.dart';
 import '../models/doc_type_meta.dart';
 import '../models/meta_resolver.dart';
 import '../sync/child_table_info.dart';
+import '../utils/media_store.dart';
 import '../utils/attachment_paths.dart';
 import '../utils/sdk_log.dart';
 
@@ -251,12 +254,43 @@ class LocalWriter {
       final path = (value as String).trim();
       // Idempotency: the (parent_uuid, parent_fieldname) index is not UNIQUE,
       // so a re-pick/re-save would otherwise stack duplicate rows. Drop any
-      // prior queue row for this exact field before inserting the fresh one.
+      // prior queue row for this exact field — AND its staged file, or the
+      // bytes leak with nothing left referencing them.
+      //
+      // This is also how a `rejected` attachment is replaced: the old row is
+      // destroyed and a fresh `pending` one takes its place, so it never
+      // inherits a stale retry count or error. A rejected row is never
+      // resurrected in place.
+      final priorRows = await txn.query(
+        'pending_attachments',
+        columns: ['local_path'],
+        where: 'parent_uuid = ? AND parent_fieldname = ?',
+        whereArgs: [rowUuid, fieldname],
+      );
       await txn.delete(
         'pending_attachments',
         where: 'parent_uuid = ? AND parent_fieldname = ?',
         whereArgs: [rowUuid, fieldname],
       );
+      for (final r in priorRows) {
+        final prior = r['local_path'] as String?;
+        // `prior != path` matters: a re-save that re-supplies the SAME staged
+        // path must not delete the file it is about to queue.
+        if (prior != null && prior.isNotEmpty && prior != path) {
+          await MediaStore.deleteOutboxCopy(prior);
+        }
+      }
+      // Size and MIME are derived HERE rather than carried from the pick:
+      // the staged file is on disk and its path is the field value, so there is
+      // nothing to plumb through the form. `fileName` is the staged basename,
+      // which IS the user's original filename — staging keeps the name and puts
+      // uniqueness in the parent directory.
+      int? sizeBytes;
+      try {
+        sizeBytes = await File(path).length();
+      } catch (e, st) {
+        sdkLog('LocalWriter: could not stat staged attachment $path — $e\n$st');
+      }
       final id = await attachDao.enqueue(
         parentDoctype: rowDoctype,
         parentUuid: rowUuid,
@@ -265,6 +299,8 @@ class LocalWriter {
         topParentDoctype: parentDoctype,
         localPath: path,
         fileName: path.split('/').last,
+        mimeType: mimeTypeForPath(path),
+        sizeBytes: sizeBytes,
       );
       return 'pending:$id';
     }

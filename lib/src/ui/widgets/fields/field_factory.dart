@@ -9,6 +9,7 @@ import '../../../models/link_filter_result.dart';
 import '../../../services/link_option_service.dart';
 import '../../../services/link_field_coordinator.dart';
 import 'attach_field.dart';
+import '../../../services/media_resolver.dart';
 import 'base_field.dart';
 import 'button_field.dart';
 import 'check_field.dart';
@@ -114,6 +115,7 @@ class FieldFactory {
     ValueChanged<bool>? onIsLocalChanged,
     bool Function()? isOnline,
     Map<int, String>? pendingAttachmentPaths,
+    ResolveMediaFn? mediaResolver,
   }) {
     if (field.hidden) {
       return null;
@@ -310,6 +312,7 @@ class FieldFactory {
           imageHeaders: imageHeaders,
           isOnline: isOnline,
           pendingAttachmentPaths: pendingAttachmentPaths,
+          mediaResolver: mediaResolver,
         );
 
       case FieldTypes.attachImage:
@@ -325,6 +328,7 @@ class FieldFactory {
           imageHeaders: imageHeaders,
           isOnline: isOnline,
           pendingAttachmentPaths: pendingAttachmentPaths,
+          mediaResolver: mediaResolver,
         );
 
       case FieldTypes.html:

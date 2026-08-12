@@ -65,10 +65,7 @@ void main() {
     test('server urls and local paths pass through unchanged', () {
       expect(attachmentDisplaySource('/files/x.png', null), '/files/x.png');
       expect(attachmentDisplaySource('/data/local.jpg', {}), '/data/local.jpg');
-      expect(
-        attachmentDisplaySource('https://h/f.png', {}),
-        'https://h/f.png',
-      );
+      expect(attachmentDisplaySource('https://h/f.png', {}), 'https://h/f.png');
     });
     test('null / empty -> null', () {
       expect(attachmentDisplaySource(null, {}), isNull);

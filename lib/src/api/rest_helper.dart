@@ -447,6 +447,7 @@ class RestHelper {
     String fieldName,
     File file, {
     Map<String, String>? fields,
+    String? filename,
   }) async {
     var uri = Uri.parse('$baseUrl$endpoint');
     var request = http.MultipartRequest('POST', uri);
@@ -464,7 +465,9 @@ class RestHelper {
       fieldName,
       stream,
       length,
-      filename: basename(file.path),
+      // Falls back to the on-disk basename, which for a staged attachment is
+      // the generated uuid rather than anything the user would recognise.
+      filename: filename ?? basename(file.path),
     );
 
     request.files.add(multipartFile);

@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:http/http.dart' as http;
 
 import '../api/client.dart';
 import '../api/exceptions.dart';
@@ -12,6 +13,7 @@ import '../models/outbox_row.dart';
 import '../models/workflow_transition.dart';
 import '../services/link_option_service.dart';
 import '../services/meta_service.dart';
+import '../services/media_resolver.dart';
 import '../services/offline_repository.dart';
 import '../services/sync_controller.dart';
 import '../services/sync_service.dart';
@@ -29,6 +31,7 @@ import 'widgets/form_builder.dart'
         FormValidator;
 import 'form/form_controller.dart' show FormController;
 import 'widgets/fields/field_factory.dart' show FieldFactory;
+import '../utils/attachment_paths.dart';
 import '../utils/sdk_log.dart';
 
 /// Visual customization for [FormScreen] action area.
@@ -215,6 +218,46 @@ class _FormScreenState extends State<FormScreen> with WidgetsBindingObserver {
   /// never goes stale against the field markers.
   Map<int, String> _pendingAttachmentPaths = const {};
 
+  /// Resolves an attach-field value to a local file for preview. Built once per
+  /// screen so the memoised futures inside the field widgets stay stable across
+  /// rebuilds. Null when there is no API client to fetch through — the fields
+  /// then fall back to their previous network-only behaviour.
+  MediaResolver? _mediaResolver;
+
+  /// Fetches the bytes behind a stored attach value, with auth. Returns null on
+  /// any failure: a media fetch must never break form rendering.
+  Future<List<int>?> _fetchMediaBytes(String value) async {
+    final api = widget.api;
+    if (api == null) return null;
+    final url = frappeFileFetchUrl(value, api.baseUrl);
+    if (url == null || !url.startsWith('http')) return null;
+    http.Client? client;
+    try {
+      client = http.Client();
+      final res = await client
+          .get(Uri.parse(url), headers: api.requestHeaders)
+          .timeout(const Duration(seconds: 30));
+      if (res.statusCode < 200 || res.statusCode >= 300) return null;
+      return res.bodyBytes;
+    } catch (e, st) {
+      sdkLog('FormScreen._fetchMediaBytes($value) failed — $e\n$st');
+      return null;
+    } finally {
+      client?.close();
+    }
+  }
+
+  void _buildMediaResolver() {
+    if (widget.api == null) {
+      _mediaResolver = null;
+      return;
+    }
+    _mediaResolver = widget.repository.mediaResolver(
+      fetch: _fetchMediaBytes,
+      isOnline: () => widget.isOnline?.call() ?? true,
+    );
+  }
+
   /// Baseline form data for dirty check. When current form data differs, show Save.
   Map<String, dynamic>? _baselineFormData;
 
@@ -296,6 +339,7 @@ class _FormScreenState extends State<FormScreen> with WidgetsBindingObserver {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     _workflowService = widget.api != null ? WorkflowService(widget.api!) : null;
+    _buildMediaResolver();
     _baselineFormData = Map<String, dynamic>.from(_currentDocData);
     _loadWorkflowTransitions();
     _loadSyncErrors();
@@ -372,6 +416,7 @@ class _FormScreenState extends State<FormScreen> with WidgetsBindingObserver {
         oldWidget.initialData != widget.initialData) {
       _workflowTransitions = null;
       _workflowUpdatedDocData = null;
+      _buildMediaResolver();
       _workflowService = widget.api != null
           ? WorkflowService(widget.api!)
           : null;
@@ -1159,6 +1204,7 @@ class _FormScreenState extends State<FormScreen> with WidgetsBindingObserver {
                   imageHeaders: widget.api?.requestHeaders,
                   isOnline: widget.isOnline,
                   pendingAttachmentPaths: _pendingAttachmentPaths,
+                  mediaResolver: _mediaResolver?.resolve,
                   fetchLinkedDocument: _fetchLinkedDocument,
                   getMeta: widget.metaService != null
                       ? (doctype) => widget.metaService!.getMeta(doctype)

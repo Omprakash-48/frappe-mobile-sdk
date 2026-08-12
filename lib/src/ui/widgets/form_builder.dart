@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_form_builder/flutter_form_builder.dart';
 import '../../models/doc_type_meta.dart';
+import '../../services/media_resolver.dart';
 import '../../models/doc_field.dart';
 import '../../models/link_filter_result.dart';
 import '../../constants/field_types.dart';
@@ -219,6 +220,10 @@ class FrappeFormBuilder extends StatefulWidget {
   /// uploaded) previews from its local file. Display-only.
   final Map<int, String>? pendingAttachmentPaths;
 
+  /// Resolves an attach-field value to a local file for display, enabling
+  /// offline previews. Forwarded to Attach / Attach Image / Image fields.
+  final ResolveMediaFn? mediaResolver;
+
   /// Fetches a linked document by doctype and name (for fetch_from).
   /// Try local repository first, then server. Return null if not found.
   final Future<Map<String, dynamic>?> Function(
@@ -313,6 +318,7 @@ class FrappeFormBuilder extends StatefulWidget {
     this.cascadeProgrammaticChanges = false,
     this.isOnline,
     this.pendingAttachmentPaths,
+    this.mediaResolver,
   });
 
   @override
@@ -1378,6 +1384,7 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
       imageHeaders: widget.imageHeaders,
       isOnline: widget.isOnline,
       pendingAttachmentPaths: widget.pendingAttachmentPaths,
+      mediaResolver: widget.mediaResolver,
       getMeta: widget.getMeta,
       parentFormData: effectiveParentFormData,
       getLinkFilterBuilder: widget.getLinkFilterBuilder,
@@ -1396,6 +1403,7 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
                   imageHeaders: widget.imageHeaders,
                   isOnline: widget.isOnline,
                   pendingAttachmentPaths: widget.pendingAttachmentPaths,
+                  mediaResolver: widget.mediaResolver,
                   // fetch linked document for child doctype.
                   fetchLinkedDocument: widget.fetchLinkedDocument,
                   translate: widget.translate,
@@ -2221,6 +2229,7 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
           imageHeaders: widget.imageHeaders,
           isOnline: widget.isOnline,
           pendingAttachmentPaths: widget.pendingAttachmentPaths,
+          mediaResolver: widget.mediaResolver,
           getMeta: widget.getMeta,
           getLinkFilterBuilder: widget.getLinkFilterBuilder,
           onButtonPressed: widget.onButtonPressed,
@@ -2244,6 +2253,7 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
                       imageHeaders: widget.imageHeaders,
                       isOnline: widget.isOnline,
                       pendingAttachmentPaths: widget.pendingAttachmentPaths,
+                      mediaResolver: widget.mediaResolver,
                       fetchLinkedDocument: widget.fetchLinkedDocument,
                       translate: widget.translate,
                       onButtonPressed: widget.onButtonPressed,

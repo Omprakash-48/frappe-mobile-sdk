@@ -55,3 +55,75 @@ String? attachmentDisplaySource(Object? value, Map<int, String>? pendingPaths) {
   if (id != null) return pendingPaths?[id];
   return p;
 }
+
+/// Builds the absolute, authenticated URL used to fetch a stored attach-field
+/// value from Frappe.
+///
+/// - Full `http(s)` URLs (S3 and friends) pass through unchanged.
+/// - `/files/` and `/private/files/` go through `frappe.handler.download_file`
+///   so the request carries auth and private files resolve.
+/// - Any other rooted path just gets [baseUrl] prepended.
+///
+/// Returns the input unchanged when there is no usable [baseUrl], so callers
+/// degrade to "not fetchable" rather than building a broken request.
+///
+/// NOTE: `AttachField._fullFileUrl` and `ImageField._fullImageUrl` still hold
+/// private copies of this logic. They are left alone here to keep this change
+/// small; collapsing all three onto this helper is a follow-up.
+String? frappeFileFetchUrl(String? path, String? baseUrl) {
+  if (path == null || path.isEmpty) return path;
+  final p = path.trim();
+  if (p.isEmpty) return path;
+  if (p.startsWith('http://') || p.startsWith('https://')) return p;
+  if (!p.startsWith('/') || baseUrl == null || baseUrl.trim().isEmpty) {
+    return p;
+  }
+  final base = baseUrl.trim();
+  final baseNoSlash = base.endsWith('/')
+      ? base.substring(0, base.length - 1)
+      : base;
+  if (p.startsWith('/private/files/') || p.startsWith('/files/')) {
+    return '$baseNoSlash/api/method/frappe.handler.download_file'
+        '?file_url=${Uri.encodeComponent(p)}';
+  }
+  return '$baseNoSlash$p';
+}
+
+/// Extension → MIME type for the attachment kinds a Frappe mobile form
+/// realistically carries.
+///
+/// A small table rather than the `mime` package: this SDK ships to pub.dev and
+/// a new direct dependency is a heavier cost than a dozen mappings. Returns
+/// null for anything unrecognised — `pending_attachments.mime_type` is
+/// diagnostic metadata, and the server derives the authoritative type itself.
+const Map<String, String> _mimeByExtension = <String, String>{
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.png': 'image/png',
+  '.gif': 'image/gif',
+  '.webp': 'image/webp',
+  '.bmp': 'image/bmp',
+  '.heic': 'image/heic',
+  '.pdf': 'application/pdf',
+  '.txt': 'text/plain',
+  '.csv': 'text/csv',
+  '.doc': 'application/msword',
+  '.docx':
+      'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  '.xls': 'application/vnd.ms-excel',
+  '.xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  '.mp4': 'video/mp4',
+  '.m4a': 'audio/mp4',
+  '.mp3': 'audio/mpeg',
+  '.zip': 'application/zip',
+};
+
+/// Best-effort MIME type for [path], or null when the extension is unknown.
+String? mimeTypeForPath(String? path) {
+  if (path == null) return null;
+  final trimmed = path.trim();
+  final dot = trimmed.lastIndexOf('.');
+  if (dot <= 0 || dot == trimmed.length - 1) return null;
+  if (dot < trimmed.lastIndexOf('/')) return null;
+  return _mimeByExtension[trimmed.substring(dot).toLowerCase()];
+}

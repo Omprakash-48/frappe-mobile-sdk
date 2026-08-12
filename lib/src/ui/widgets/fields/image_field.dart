@@ -7,11 +7,14 @@ import 'package:flutter_form_builder/flutter_form_builder.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:path_provider/path_provider.dart';
 import '../../../models/doc_field.dart';
+import '../../../services/media_resolver.dart';
+import '../../../sync/attachment_error_classifier.dart';
 import '../../../utils/attachment_paths.dart';
 import '../../../utils/attachment_pick.dart';
 import '../../../utils/sdk_log.dart';
 import 'base_field.dart';
 import 'field_helpers.dart';
+import 'media_resolve_builder.dart';
 
 /// Shows [image] full-screen in a zoomable, dismissible viewer with a dark
 /// scrim and a close (X) button. Pinch-zoom / pan via [InteractiveViewer];
@@ -129,6 +132,18 @@ class ImageField extends BaseField {
   /// stored marker value.
   final Map<int, String>? pendingAttachmentPaths;
 
+  /// Resolves a field value to a LOCAL file for the preview: a cache hit, or a
+  /// download stored in the cache on the way through.
+  ///
+  /// When it yields a path the preview renders from disk instead of
+  /// [Image.network], which is what makes a pulled document's image visible
+  /// offline. Optional and additive — hosts that wire nothing keep the previous
+  /// network-only behaviour. Display-only: never changes the stored value.
+  ///
+  /// A function rather than a [MediaResolver] so this widget stays off the
+  /// DAO/filesystem stack; pass `myResolver.resolve`.
+  final ResolveMediaFn? mediaResolver;
+
   const ImageField({
     super.key,
     required super.field,
@@ -141,6 +156,7 @@ class ImageField extends BaseField {
     this.imageHeaders,
     this.isOnline,
     this.pendingAttachmentPaths,
+    this.mediaResolver,
   });
 
   /// Only Frappe server file paths or full URLs are treated as server URLs.
@@ -224,11 +240,31 @@ class ImageField extends BaseField {
     // empty-URL branches that used to be spelled out here, falling back to the
     // durable copy in all three — so none of them is a user-visible failure any
     // more, and none of them notifies.
-    final stored = await resolvePickedAttachment(
-      picked: file,
-      online: isOnline?.call() ?? true,
-      uploadFile: uploadFile,
-    );
+    final String? stored;
+    try {
+      stored = await resolvePickedAttachment(
+        picked: file,
+        online: isOnline?.call() ?? true,
+        uploadFile: uploadFile,
+      );
+    } on AttachmentTooLargeException catch (e) {
+      // Surfaced at pick time so the user can retake at a lower resolution,
+      // rather than discovering it as a blocked document after sync.
+      if (messenger != null) _notify(messenger, attachmentTooLargeMessage(e));
+      return false;
+    } catch (e, st) {
+      sdkLog('ImageField: attach failed — $e\n$st');
+      if (messenger != null) {
+        _notify(
+          messenger,
+          isTerminalAttachmentError(e)
+              ? 'The server rejected this photo, so it was not attached.'
+              : 'Could not attach the photo. Check your connection and '
+                    'storage permissions.',
+        );
+      }
+      return false;
+    }
     if (stored != null && stored.isNotEmpty) {
       fieldState.didChange(stored);
       onChanged?.call(stored);
@@ -371,8 +407,7 @@ class ImageField extends BaseField {
           pendingAttachmentPaths,
         );
         final isUrl = _isServerUrl(displaySource);
-        final isLocalFile = !isUrl && displaySource != null;
-        final displayUrl = isUrl ? _fullImageUrl(displaySource) : null;
+        final displayUrlRaw = isUrl ? _fullImageUrl(displaySource) : null;
 
         // BaseField.build (the enclosing widget) already renders the
         // external label with required-asterisk; the inline label that
@@ -381,85 +416,104 @@ class ImageField extends BaseField {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             if (currentValue != null && currentValue.isNotEmpty)
-              Padding(
-                padding: const EdgeInsets.only(bottom: 8.0),
-                child: GestureDetector(
-                  // Viewing is always allowed — even when the field is
-                  // read-only/disabled the user can still open the full-screen
-                  // viewer (QA #11).
-                  onTap: () {
-                    if (_isFullUrl(displayUrl)) {
-                      showFullScreenImage(context, displayUrl!, imageHeaders);
-                    } else if (isLocalFile) {
-                      showFullScreenImageProvider(
-                        context,
-                        FileImage(File(displaySource)),
-                      );
-                    }
-                  },
-                  child: Stack(
-                    children: [
-                      ClipRRect(
-                        borderRadius: BorderRadius.circular(8),
-                        child: _isFullUrl(displayUrl)
-                            ? Image.network(
-                                displayUrl!,
-                                height: 150,
-                                width: double.infinity,
-                                fit: BoxFit.cover,
-                                headers: imageHeaders,
-                                errorBuilder: (context, error, stackTrace) {
-                                  return Container(
+              // A resolved cache path makes the preview render from DISK rather
+              // than over the network, which is what lets a pulled document's
+              // image appear offline. Null (resolving / offline miss / failed
+              // fetch) keeps the previous network-or-placeholder behaviour.
+              MediaResolveBuilder(
+                resolver: mediaResolver,
+                value: currentValue,
+                pendingPaths: pendingAttachmentPaths,
+                builder: (context, cachedPath) {
+                  final localPath =
+                      cachedPath ?? (isUrl ? null : displaySource);
+                  final isLocalFile = localPath != null;
+                  final displayUrl = isLocalFile ? null : displayUrlRaw;
+                  return Padding(
+                    padding: const EdgeInsets.only(bottom: 8.0),
+                    child: GestureDetector(
+                      // Viewing is always allowed — even when the field is
+                      // read-only/disabled the user can still open the full-screen
+                      // viewer (QA #11).
+                      onTap: () {
+                        if (_isFullUrl(displayUrl)) {
+                          showFullScreenImage(
+                            context,
+                            displayUrl!,
+                            imageHeaders,
+                          );
+                        } else if (isLocalFile) {
+                          showFullScreenImageProvider(
+                            context,
+                            FileImage(File(localPath)),
+                          );
+                        }
+                      },
+                      child: Stack(
+                        children: [
+                          ClipRRect(
+                            borderRadius: BorderRadius.circular(8),
+                            child: _isFullUrl(displayUrl)
+                                ? Image.network(
+                                    displayUrl!,
+                                    height: 150,
+                                    width: double.infinity,
+                                    fit: BoxFit.cover,
+                                    headers: imageHeaders,
+                                    errorBuilder: (context, error, stackTrace) {
+                                      return Container(
+                                        height: 150,
+                                        color: Colors.grey[300],
+                                        child: const Icon(Icons.broken_image),
+                                      );
+                                    },
+                                  )
+                                : isLocalFile
+                                ? Image.file(
+                                    File(localPath),
+                                    height: 150,
+                                    width: double.infinity,
+                                    fit: BoxFit.cover,
+                                    errorBuilder: (context, error, stackTrace) {
+                                      return Container(
+                                        height: 150,
+                                        color: Colors.grey[300],
+                                        child: const Icon(Icons.broken_image),
+                                      );
+                                    },
+                                  )
+                                : Container(
                                     height: 150,
                                     color: Colors.grey[300],
-                                    child: const Icon(Icons.broken_image),
-                                  );
-                                },
-                              )
-                            : isLocalFile
-                            ? Image.file(
-                                File(displaySource),
-                                height: 150,
-                                width: double.infinity,
-                                fit: BoxFit.cover,
-                                errorBuilder: (context, error, stackTrace) {
-                                  return Container(
-                                    height: 150,
-                                    color: Colors.grey[300],
-                                    child: const Icon(Icons.broken_image),
-                                  );
-                                },
-                              )
-                            : Container(
-                                height: 150,
-                                color: Colors.grey[300],
-                                child: const Center(
-                                  child: Icon(Icons.broken_image, size: 48),
+                                    child: const Center(
+                                      child: Icon(Icons.broken_image, size: 48),
+                                    ),
+                                  ),
+                          ),
+                          // 'Tap to view' affordance — only shown when the image is
+                          // actually viewable full-screen.
+                          if (_isFullUrl(displayUrl) || isLocalFile)
+                            Positioned(
+                              right: 8,
+                              bottom: 8,
+                              child: Container(
+                                padding: const EdgeInsets.all(4),
+                                decoration: BoxDecoration(
+                                  color: Colors.black54,
+                                  borderRadius: BorderRadius.circular(6),
+                                ),
+                                child: const Icon(
+                                  Icons.fullscreen,
+                                  color: Colors.white,
+                                  size: 20,
                                 ),
                               ),
+                            ),
+                        ],
                       ),
-                      // 'Tap to view' affordance — only shown when the image is
-                      // actually viewable full-screen.
-                      if (_isFullUrl(displayUrl) || isLocalFile)
-                        Positioned(
-                          right: 8,
-                          bottom: 8,
-                          child: Container(
-                            padding: const EdgeInsets.all(4),
-                            decoration: BoxDecoration(
-                              color: Colors.black54,
-                              borderRadius: BorderRadius.circular(6),
-                            ),
-                            child: const Icon(
-                              Icons.fullscreen,
-                              color: Colors.white,
-                              size: 20,
-                            ),
-                          ),
-                        ),
-                    ],
-                  ),
-                ),
+                    ),
+                  );
+                },
               ),
             Row(
               children: [

@@ -48,6 +48,7 @@ void main() {
     final capturedDoctypes = <String?>[];
     final pipeline = AttachmentPipeline(
       dao: dao,
+      db: db,
       uploader: (file, {doctype, docname, isPrivate = true, fileName}) async {
         capturedPaths.add(file.path);
         capturedDoctypes.add(doctype);
@@ -60,7 +61,7 @@ void main() {
       fileFromPath: (p) => _FakeFile(p),
     );
 
-    final result = await pipeline.uploadPendingForTopParent('survey-1');
+    final result = await pipeline.resolveForTopParent('survey-1');
 
     expect(result, hasLength(2));
     expect(capturedPaths, containsAll(['/tmp/cover.jpg', '/tmp/item-1.jpg']));

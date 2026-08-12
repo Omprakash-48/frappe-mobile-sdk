@@ -8,6 +8,7 @@ import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 
 import '../api/client.dart';
+import '../utils/media_store.dart';
 import '../utils/sdk_log.dart';
 import '../api/exceptions.dart';
 import '../concurrency/concurrency_pool.dart';
@@ -119,7 +120,8 @@ class FrappeSDK {
   /// Liveness of the stored credential. Null before [initialize]. Hosts should
   /// prompt for re-login on [SessionHealth.expired] and stay quiet on
   /// [SessionHealth.degraded], which clears by itself.
-  ValueNotifier<SessionHealth>? get sessionHealth => _authService?.sessionHealth;
+  ValueNotifier<SessionHealth>? get sessionHealth =>
+      _authService?.sessionHealth;
 
   /// The tamper-detection service. Non-null after [initialize] completes.
   FrappeSecurityService get security {
@@ -916,6 +918,14 @@ class FrappeSDK {
       // Wipe the translation SQLite cache and in-memory map so a different
       // user logging in on the same device doesn't see stale translations.
       await _translationService?.clearAll();
+      // Cached and staged media must not outlive the data they belong to. The
+      // DB wipe drops `media_cache` and `pending_attachments`, but the FILES
+      // live outside SQLite, so without this the previous user's private survey
+      // photos stay readable on a shared device after the next sign-in.
+      //
+      // Destructive by design: this also clears `outbox/`, which holds the only
+      // copy of any attachment that never uploaded.
+      await MediaStore.clearAll();
       // In-memory mirrors of the now-dropped DB state. Without these, the
       // next session would short-circuit table-existence checks against a
       // cache that still remembers tables that no longer exist.
@@ -931,6 +941,19 @@ class FrappeSDK {
     // unreachable-server state.
     _syncStateNotifier?.clearLastError();
   }
+
+  /// Total bytes held by the on-device media store (staged picks + cache).
+  ///
+  /// Exists so a host can show usage and offer a manual "Clear cached media"
+  /// control while automatic eviction is still unbuilt (Phase 2).
+  Future<int> mediaStoreSize() => MediaStore.storeSizeBytes();
+
+  /// Clears the on-device media store.
+  ///
+  /// DESTRUCTIVE: staged files are the ONLY copy of an attachment that has not
+  /// uploaded yet, so this can lose un-pushed attachments. Expose it behind an
+  /// explicit user confirmation. Cached downloads are always re-fetchable.
+  Future<void> clearMediaCache() => MediaStore.clearAll();
 
   /// Throws if [initialize] hasn't run. Called as the first line of every
   /// public service getter so the (12+) "if (!_initialized) throw ..."

@@ -24,35 +24,45 @@ void main() {
     if (await tmp.exists()) await tmp.delete(recursive: true);
   });
 
-  test('copies file into mform_attachments preserving extension', () async {
-    final src = File('${tmp.path}/cache_IMG_1.jpg')..writeAsStringSync('BYTES');
+  // Staged picks live under `outbox/<uid>/` so they are separable from the
+  // evictable `cache/` — un-uploaded bytes are the only copy in existence and
+  // must never be reclaimed by a cache sweep. The FILE keeps the user's
+  // original name; uniqueness comes from the generated parent directory.
+  test(
+    'copies file into mform_attachments/outbox keeping the original name',
+    () async {
+      final src = File('${tmp.path}/cache_IMG_1.jpg')
+        ..writeAsStringSync('BYTES');
 
-    final out = await copyToAttachmentStore(src, nameGen: () => 'fixed');
+      final out = await copyToAttachmentStore(src, nameGen: () => 'fixed');
 
-    expect(out, '${tmp.path}/mform_attachments/fixed.jpg');
-    expect(File(out).existsSync(), isTrue);
-    expect(File(out).readAsStringSync(), 'BYTES');
-  });
+      expect(out, '${tmp.path}/mform_attachments/outbox/fixed/cache_IMG_1.jpg');
+      expect(File(out).existsSync(), isTrue);
+      expect(File(out).readAsStringSync(), 'BYTES');
+    },
+  );
 
   test('handles a source with no extension', () async {
     final src = File('${tmp.path}/noext')..writeAsStringSync('X');
 
     final out = await copyToAttachmentStore(src, nameGen: () => 'id');
 
-    expect(out, '${tmp.path}/mform_attachments/id');
+    expect(out, '${tmp.path}/mform_attachments/outbox/id/noext');
     expect(File(out).existsSync(), isTrue);
   });
 
-  test('deleteAttachmentCopy removes the file and is safe when absent',
-      () async {
-    final src = File('${tmp.path}/a.png')..writeAsStringSync('Y');
-    final out = await copyToAttachmentStore(src, nameGen: () => 'del');
-    expect(File(out).existsSync(), isTrue);
+  test(
+    'deleteAttachmentCopy removes the file and is safe when absent',
+    () async {
+      final src = File('${tmp.path}/a.png')..writeAsStringSync('Y');
+      final out = await copyToAttachmentStore(src, nameGen: () => 'del');
+      expect(File(out).existsSync(), isTrue);
 
-    await deleteAttachmentCopy(out);
-    expect(File(out).existsSync(), isFalse);
+      await deleteAttachmentCopy(out);
+      expect(File(out).existsSync(), isFalse);
 
-    // second delete must not throw
-    await deleteAttachmentCopy(out);
-  });
+      // second delete must not throw
+      await deleteAttachmentCopy(out);
+    },
+  );
 }

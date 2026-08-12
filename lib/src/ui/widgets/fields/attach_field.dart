@@ -11,11 +11,14 @@ import 'package:file_picker/file_picker.dart';
 import 'package:http/http.dart' as http;
 import 'package:path_provider/path_provider.dart';
 import 'package:open_filex/open_filex.dart';
+import '../../../services/media_resolver.dart';
+import '../../../sync/attachment_error_classifier.dart';
 import '../../../utils/attachment_paths.dart';
 import '../../../utils/attachment_pick.dart';
 import '../../../utils/sdk_log.dart';
 import 'base_field.dart';
 import 'field_helpers.dart';
+import 'media_resolve_builder.dart';
 // Reuse the shared full-screen zoomable image viewer (showFullScreenImage /
 // showFullScreenImageProvider) so image attachments open exactly like
 // ImageField previews, with the same auth headers.
@@ -130,6 +133,18 @@ class AttachField extends BaseField {
   /// widget. Exists so the download path can be exercised in tests.
   final http.Client? httpClient;
 
+  /// Resolves a field value to a LOCAL file for viewing: a cache hit, or a
+  /// download that is stored in the cache on the way through so the next view
+  /// works offline.
+  ///
+  /// Optional and additive — hosts that wire nothing keep the previous
+  /// behaviour, where every open re-downloads to a temp path. Display-only:
+  /// it never changes the stored value.
+  ///
+  /// A function rather than a [MediaResolver] so this widget stays off the
+  /// DAO/filesystem stack; pass `myResolver.resolve`.
+  final ResolveMediaFn? mediaResolver;
+
   const AttachField({
     super.key,
     required super.field,
@@ -143,6 +158,7 @@ class AttachField extends BaseField {
     this.isOnline,
     this.pendingAttachmentPaths,
     this.httpClient,
+    this.mediaResolver,
   });
 
   static const Set<String> _imageExtensions = {
@@ -226,7 +242,8 @@ class AttachField extends BaseField {
           current,
           pendingAttachmentPaths,
         );
-        final isPendingUnresolved = hasValue &&
+        final isPendingUnresolved =
+            hasValue &&
             parsePendingMarkerId(current) != null &&
             displaySource == null;
         final isServer = displaySource != null && _isServerUrl(displaySource);
@@ -236,8 +253,10 @@ class AttachField extends BaseField {
         final label = !hasValue
             ? 'Select file'
             : (displaySource != null
-                ? _getFileName(displaySource)
-                : (isPendingUnresolved ? 'Pending upload…' : _getFileName(current)));
+                  ? _getFileName(displaySource)
+                  : (isPendingUnresolved
+                        ? 'Pending upload…'
+                        : _getFileName(current)));
         return Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
@@ -293,12 +312,22 @@ class AttachField extends BaseField {
                                 messenger,
                                 'Upload failed — the file was not attached.',
                               );
+                            } on AttachmentTooLargeException catch (e) {
+                              // Refused before staging, so nothing to clean up.
+                              // The message names the real limit: "too large"
+                              // alone leaves the user guessing how much to trim.
+                              _notify(messenger, attachmentTooLargeMessage(e));
                             } catch (e, st) {
                               sdkLog('AttachField: attach failed — $e\n$st');
                               _notify(
                                 messenger,
-                                'Could not attach the file. Check your '
-                                'connection and storage permissions.',
+                                isTerminalAttachmentError(e)
+                                    // The server refused it outright; a retry
+                                    // cannot help, so do not imply otherwise.
+                                    ? 'The server rejected this file, so it was '
+                                          'not attached.'
+                                    : 'Could not attach the file. Check your '
+                                          'connection and storage permissions.',
                               );
                             }
                           }
@@ -312,20 +341,36 @@ class AttachField extends BaseField {
                 // (QA #11). Hidden for an unresolved pending pick (nothing to
                 // open yet).
                 if (hasViewable)
-                  _AttachViewButton(
-                    // Images open in the shared full-screen viewer; other files
-                    // are downloaded then opened externally.
-                    url: isServer
-                        ? (_fullFileUrl(displaySource) ?? displaySource)
-                        : displaySource,
-                    isLocal: isLocalFile,
-                    isImage: isImage,
-                    headers: imageHeaders,
-                    // `displaySource`, not `current`: a `pending:<id>` marker
-                    // resolves to its durable local file, so the label shows the
-                    // real filename rather than the marker text.
-                    fileName: _getFileName(displaySource),
-                    httpClient: httpClient,
+                  // The RESOLVED path only ever replaces the view TARGET.
+                  // Labels stay derived from `displaySource` (the value or the
+                  // staged path) — routing them through the cache path would
+                  // show sha256(file_url) instead of "report.pdf".
+                  MediaResolveBuilder(
+                    resolver: mediaResolver,
+                    value: current,
+                    pendingPaths: pendingAttachmentPaths,
+                    builder: (context, localPath) {
+                      // Null (resolving, offline miss, failed fetch) falls back
+                      // to the server URL, so the button downloads as it always
+                      // did rather than losing the ability to open the file.
+                      final hasLocal = localPath != null;
+                      return _AttachViewButton(
+                        url: hasLocal
+                            ? localPath
+                            : (isServer
+                                  ? (_fullFileUrl(displaySource) ??
+                                        displaySource)
+                                  : displaySource),
+                        isLocal: hasLocal ? true : isLocalFile,
+                        isImage: isImage,
+                        headers: imageHeaders,
+                        // `displaySource`, not `current`: a `pending:<id>`
+                        // marker resolves to its durable local file, so the
+                        // label shows the real filename not the marker text.
+                        fileName: _getFileName(displaySource),
+                        httpClient: httpClient,
+                      );
+                    },
                   ),
               ],
             ),

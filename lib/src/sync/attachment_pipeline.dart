@@ -1,10 +1,15 @@
 import 'dart:io';
 
-import 'package:flutter/foundation.dart';
+import 'package:sqflite/sqflite.dart';
 
+import '../concurrency/write_queue.dart';
+import '../database/daos/media_cache_dao.dart';
 import '../database/daos/pending_attachment_dao.dart';
+import '../models/media_cache_entry.dart';
 import '../models/pending_attachment.dart';
-import '../utils/attachment_storage.dart';
+import '../utils/media_store.dart';
+import '../utils/sdk_log.dart';
+import 'attachment_error_classifier.dart';
 import 'push_error.dart';
 
 typedef AttachmentUploadFn =
@@ -34,77 +39,126 @@ class AttachmentUploadResult {
   const AttachmentUploadResult({required this.fileName, required this.fileUrl});
 }
 
-/// Uploads any `pending_attachments` rows queued for a given parent doc
-/// before the parent itself is pushed. Spec §5.3.
+/// Resolves every attachment for a document before its parent is pushed.
 ///
-/// Each upload retries with backoff: with the default [backoff] of
-/// `[2s, 5s, 10s]` and 3 attempts, the engine waits 2s before retry 1
-/// and 5s before retry 2; the third slot is the cap for a hypothetical
-/// fourth attempt and is unused at 3 attempts. On terminal failure
-/// throws [BlockedByUpstream] so the caller flips the outbox row to
-/// `blocked` until the user reattaches or retries.
+/// ## The commitment model
 ///
-/// Once attachments are uploaded, [inlinePayload] walks the assembled
-/// payload and rewrites every `pending:<id>` marker (left there by
-/// `attach_field.dart` on offline pick) with the resolved server
-/// `file_url`.
+/// A `server_file_url` COMMITTED TO SQLITE is the correctness boundary. Once
+/// committed, the file is uploaded — permanently — regardless of whether the
+/// parent document ever syncs, and no later attempt may re-upload it. A url
+/// that was received but not yet committed is NOT a fact the pipeline may rely
+/// on: that window degrades to a re-upload, which Frappe's content-hash dedup
+/// resolves by returning the same url for identical bytes.
+///
+/// ## The push gate
+///
+/// A parent doc may only push when EVERY one of its attachments is `done`.
+/// Anything else throws [BlockedByUpstream]. Silently skipping a non-done row
+/// is what previously let a raw `pending:<id>` marker reach Frappe verbatim.
+///
+/// ## Ordering
+///
+/// There is no transaction spanning the filesystem and SQLite, so the steps are
+/// ordered to make every crash point resumable:
+///
+///   1. upload                       (nothing durable yet)
+///   2. recordUpload                 <- the correctness boundary
+///   3. move staged bytes -> cache/  (idempotent)
+///   4. ONE txn: markDone + writeback + media_cache insert
+///
+/// Because step 2 commits first, a crash anywhere after it means the next
+/// dispatch skips the upload entirely and resumes where it stopped.
 class AttachmentPipeline {
   final PendingAttachmentDao dao;
   final AttachmentUploadFn uploader;
   final List<Duration> backoff;
   final FileFromPathFn fileFromPath;
+  final Database db;
+
+  /// Resolves the `docs__<doctype>` mirror table for the writeback.
+  final Future<String?> Function(String doctype)? tableNameFor;
+
+  /// Resolves the per-doctype [WriteQueue] that serializes `docs__` writes.
+  ///
+  /// Null in tests and when the host wires no resolver; the step-4 txn then
+  /// falls back to a bare `db.transaction`, matching push_engine's own
+  /// if/else. Writing to `docs__<doctype>` outside that queue would race the
+  /// response-writeback and the auto-merge persist.
+  final WriteQueue? Function(String doctype)? writeQueueFor;
 
   AttachmentPipeline({
     required this.dao,
     required this.uploader,
+    required this.db,
     this.backoff = kDefaultSyncBackoff,
     this.fileFromPath = _defaultFileFromPath,
+    this.tableNameFor,
+    this.writeQueueFor,
   });
 
   static File _defaultFileFromPath(String p) => File(p);
 
-  /// Uploads every pending attachment for [topParentUuid] (the outbox
-  /// row's mobile_uuid). Includes attachments queued against child-row
-  /// uuids whose `top_parent_uuid` was set to [topParentUuid] at enqueue.
-  /// Returns a map of `pending_attachments.id` → upload result. Throws
-  /// BlockedByUpstream if any attachment exhausts its retries.
-  Future<Map<int, AttachmentUploadResult>> uploadPendingForTopParent(
+  /// Resolves all attachments for [topParentUuid], uploading what is
+  /// outstanding.
+  ///
+  /// Returns `pending_attachments.id` -> result for every row resolved in this
+  /// pass. Throws [BlockedByUpstream] if any attachment cannot be resolved —
+  /// that is the push gate.
+  Future<Map<int, AttachmentUploadResult>> resolveForTopParent(
     String topParentUuid,
   ) async {
-    final pending = await dao.findPendingForTopParent(topParentUuid);
+    final outstanding = await dao.findUnresolvedForTopParent(topParentUuid);
     final results = <int, AttachmentUploadResult>{};
-    for (final p in pending) {
-      results[p.id] = await _uploadOne(p);
+    for (final p in outstanding) {
+      results[p.id] = await _resolveOne(p);
     }
     return results;
   }
 
-  Future<AttachmentUploadResult> _uploadOne(PendingAttachment p) async {
-    await dao.markUploading(p.id);
-    Object? lastError;
-    // If a prior attempt already uploaded the binary (url recorded via
-    // recordUpload, but the done-state write failed or was interrupted), do
-    // NOT upload again — reuse the recorded url. Re-uploading would make
-    // Frappe's attach hook create a duplicate File row (PR#36 round-4 H3).
-    String? fileUrl = p.serverFileUrl;
-    String? fileName = p.serverFileName;
-    for (var attempt = 0; attempt < backoff.length; attempt++) {
-      try {
-        if (fileUrl == null) {
-          // No `doctype` and no `docname` — File row is created fully
-          // unattached (all attached_to_* are NULL). v16's File controller
-          // rejects `attached_to_doctype` without a non-empty
-          // `attached_to_name` (file.py:151), so we can't ship `dt` alone.
-          //
-          // Relink path:
-          //   - Parent docs: Frappe's stock `attach_files_to_document`
-          //     (registered on `*.on_update` in apps/frappe/frappe/hooks.py)
-          //     finds unattached File rows by file_url and rewires them.
-          //   - Child rows: stock skips children (they save via raw
-          //     `db_update`, no lifecycle hooks). The mobile_control hook
-          //     `relink_mobile_files` walks the parent's child tables on
-          //     `*.on_update` and rewires per-child.
-          // Spec §5.3.
+  /// Builds the marker-resolution map from EVERY row for the doc, including
+  /// `done` ones.
+  ///
+  /// Backstop for a marker whose writeback was interrupted. Given the atomic
+  /// step-4 txn this should be unreachable — a hit means the atomicity
+  /// assumption broke, not normal operation.
+  Future<Map<int, AttachmentUploadResult>> resolutionMapFor(
+    String topParentUuid,
+  ) async {
+    final all = await dao.findAllForTopParent(topParentUuid);
+    final out = <int, AttachmentUploadResult>{};
+    for (final p in all) {
+      final url = p.serverFileUrl;
+      if (url == null) continue;
+      out[p.id] = AttachmentUploadResult(
+        fileName: p.serverFileName ?? url,
+        fileUrl: url,
+      );
+    }
+    return out;
+  }
+
+  Future<AttachmentUploadResult> _resolveOne(PendingAttachment p) async {
+    // A terminal rejection is never retried. Block immediately so the user
+    // sees an actionable reason instead of an endless retry loop.
+    if (p.state == AttachmentState.rejected) {
+      throw _blocked(p, p.errorMessage ?? 'previously rejected');
+    }
+
+    // STEPS 1-2: upload, then COMMIT the url before anything else can fail.
+    var fileUrl = p.serverFileUrl;
+    var fileName = p.serverFileName;
+    if (fileUrl == null) {
+      await dao.markUploading(p.id);
+      Object? lastError;
+      for (var attempt = 0; attempt < backoff.length; attempt++) {
+        try {
+          // No `doctype`/`docname`: the File row is created fully unattached
+          // (all attached_to_* NULL). v16's File controller rejects
+          // `attached_to_doctype` without a non-empty `attached_to_name`, so
+          // we cannot ship the doctype alone. Frappe's stock
+          // `attach_files_to_document` rewires parents; mobile_control's
+          // `relink_mobile_files` handles child rows, which stock skips
+          // because children save via raw db_update with no lifecycle hooks.
           final resp = await uploader(
             fileFromPath(p.localPath),
             fileName: p.fileName,
@@ -112,57 +166,135 @@ class AttachmentPipeline {
           );
           fileUrl = resp['file_url'] as String;
           fileName = resp['name'] as String? ?? fileUrl;
-          // Persist the upload result BEFORE the done transition so a failure
-          // in markDone (below) does not cause a re-upload on the next try.
           await dao.recordUpload(
             p.id,
             serverFileName: fileName,
             serverFileUrl: fileUrl,
           );
-        }
-        await dao.markDone(
-          p.id,
-          serverFileName: fileName ?? fileUrl,
-          serverFileUrl: fileUrl,
-        );
-        // The durable local copy has served its purpose — reclaim the disk.
-        // Best-effort; a leftover file is harmless (re-upload is guarded by
-        // the recorded server_file_url above).
-        await deleteAttachmentCopy(p.localPath);
-        return AttachmentUploadResult(fileName: fileName ?? fileUrl, fileUrl: fileUrl);
-      } catch (e, st) {
-        debugPrint(
-          'AttachmentPipeline.upload(${p.id}) attempt $attempt failed — $e\n$st',
-        );
-        lastError = e;
-        // Delay BEFORE the next attempt (the last attempt has no
-        // "next", so no delay). Indices 0..N-2 are consumed across N
-        // attempts; the last backoff entry is reserved for a future
-        // attempt count and intentionally unused at the default of 3.
-        if (attempt < backoff.length - 1) {
-          await Future<void>.delayed(backoff[attempt]);
+          break;
+        } catch (e, st) {
+          sdkLog(
+            'AttachmentPipeline.upload(${p.id}) attempt $attempt failed — $e\n$st',
+          );
+          lastError = e;
+          if (isTerminalAttachmentError(e)) {
+            await dao.markRejected(p.id, errorMessage: '$e');
+            throw _blocked(p, '$e');
+          }
+          // Delay BEFORE the next attempt; the last attempt has no "next".
+          if (attempt < backoff.length - 1) {
+            await Future<void>.delayed(backoff[attempt]);
+          }
         }
       }
+      if (fileUrl == null) {
+        final reason = lastError?.toString() ?? 'unknown error';
+        await dao.markFailed(p.id, errorMessage: reason);
+        throw _blocked(p, reason);
+      }
     }
-    final reason = lastError?.toString() ?? 'unknown error';
-    await dao.markFailed(p.id, errorMessage: reason);
-    // Surface the underlying upload error via BlockedByUpstream.reason so
-    // PushEngine writes it into the outbox row's `error_message` — that's
-    // what `SyncErrorsScreen` shows. Without this the user sees a generic
-    // "blocked by upstream File/<id>" entry and has to query
-    // `pending_attachments` directly to find out what actually failed.
-    throw BlockedByUpstream(
-      field: p.parentFieldname,
-      targetDoctype: 'File',
-      targetUuid: '${p.id}',
-      reason: reason,
-    );
+
+    // STEP 3: move staged bytes into the cache. Idempotent, so an interrupted
+    // run resumes here. Cache failure NEVER fails the upload — the url is
+    // already committed, so the upload genuinely succeeded.
+    var cachedPath = '';
+    var moved = false;
+    try {
+      moved = await MediaStore.moveToCache(p.localPath, fileUrl);
+      if (moved) cachedPath = await MediaStore.cachePathFor(fileUrl);
+    } catch (e, st) {
+      sdkLog('AttachmentPipeline: cache move failed for ${p.id} — $e\n$st');
+    }
+    if (!moved) {
+      // The bytes are already on the server, so the staged copy is redundant.
+      // Without this it would linger forever: nothing else reclaims outbox/,
+      // and the row is about to go `done` so no later pass would revisit it.
+      // We lose the cache entry (the file re-downloads on first view), not
+      // the data.
+      await MediaStore.deleteOutboxCopy(p.localPath);
+    }
+
+    // Pre-resolved OUTSIDE the txn: querying through the outer Database while
+    // holding a txn deadlocks sqflite's non-reentrant lock (a Dart deadlock,
+    // not SQLITE_BUSY).
+    final table = await _tableFor(p.parentDoctype);
+    final resolvedUrl = fileUrl;
+    final resolvedName = fileName ?? fileUrl;
+
+    // STEP 4: ONE txn — markDone + writeback + cache index. Atomic so the
+    // column and the row can never disagree.
+    Future<void> writes(Transaction txn) async {
+      await PendingAttachmentDao(txn).markDone(
+        p.id,
+        serverFileName: resolvedName,
+        serverFileUrl: resolvedUrl,
+      );
+      if (table != null) {
+        await txn.update(
+          table,
+          <String, Object?>{p.parentFieldname: resolvedUrl},
+          where: 'mobile_uuid = ?',
+          whereArgs: [p.parentUuid],
+        );
+      }
+      if (cachedPath.isNotEmpty) {
+        await MediaCacheDao(txn).upsert(
+          fileUrl: resolvedUrl,
+          localPath: cachedPath,
+          sizeBytes: p.sizeBytes,
+          mimeType: p.mimeType,
+          isPrivate: p.isPrivate,
+          source: MediaSource.uploaded,
+        );
+      }
+    }
+
+    try {
+      final wq = writeQueueFor?.call(p.parentDoctype);
+      if (wq != null) {
+        await wq.submit<void>(writes);
+      } else {
+        await db.transaction(writes);
+      }
+    } catch (e, st) {
+      // Never rethrown: the url is already committed, so reporting a failure
+      // here would contradict the commitment model. The next dispatch skips
+      // the upload and retries the move + txn.
+      sdkLog('AttachmentPipeline: step-4 txn failed for ${p.id} — $e\n$st');
+    }
+
+    return AttachmentUploadResult(fileName: resolvedName, fileUrl: resolvedUrl);
   }
 
-  /// Walks a payload (parent + children), replacing any `pending:<id>`
-  /// string value with the uploaded `file_url` from [resolved]. Markers
-  /// without a matching entry pass through unchanged (caller can decide
-  /// whether to retry later).
+  Future<String?> _tableFor(String doctype) async {
+    final resolver = tableNameFor;
+    if (resolver == null) return null;
+    try {
+      return await resolver(doctype);
+    } catch (e, st) {
+      sdkLog('AttachmentPipeline: tableNameFor($doctype) failed — $e\n$st');
+      return null;
+    }
+  }
+
+  /// Names the FILE and FIELD, not a row id — a user cannot act on `File/42`.
+  BlockedByUpstream _blocked(PendingAttachment p, String reason) =>
+      BlockedByUpstream(
+        field: p.parentFieldname,
+        targetDoctype: 'File',
+        targetUuid: p.fileName ?? '${p.id}',
+        reason:
+            '${p.fileName ?? 'attachment'} (${p.parentFieldname}) — $reason',
+      );
+
+  /// Walks a payload (parent + children), replacing every `pending:<id>`
+  /// marker with its resolved `file_url`.
+  ///
+  /// THROWS on an unresolved marker. An unresolved marker on the wire is never
+  /// correct, and it used to be indistinguishable from a legitimate value — a
+  /// document would push "successfully" with the literal string `pending:42`
+  /// stored in Frappe. Under the push gate this should be unreachable; it
+  /// exists so any future regression is loud instead of silent.
   static Map<String, Object?> inlinePayload(
     Map<String, Object?> payload, {
     required Map<int, AttachmentUploadResult> resolved,
@@ -173,7 +305,14 @@ class AttachmentPipeline {
       if (v is String && v.startsWith('pending:')) {
         final id = int.tryParse(v.substring('pending:'.length));
         final r = id == null ? null : resolved[id];
-        out[entry.key] = r?.fileUrl ?? v;
+        if (r == null) {
+          throw StateError(
+            'Unresolved attachment marker "$v" for field "${entry.key}" '
+            'reached the payload. The push gate should have blocked this '
+            'document.',
+          );
+        }
+        out[entry.key] = r.fileUrl;
       } else if (v is List) {
         out[entry.key] = v.map((e) {
           if (e is Map) {

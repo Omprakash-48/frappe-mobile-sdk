@@ -407,11 +407,23 @@ class PushEngine {
     final attachments = AttachmentPipeline(
       dao: attachmentDao,
       uploader: attachmentUploader,
+      db: db,
       backoff: attachmentBackoff,
+      tableNameFor: (dt) => metaDao.tableNameFor(dt),
+      // Same lazy per-doctype cache the auto-merge persist uses, so the
+      // attachment writeback serializes against the other `docs__` writers
+      // instead of racing them.
+      writeQueueFor: writeQueueResolver == null
+          ? null
+          : (dt) => _writeQueues.putIfAbsent(dt, () => writeQueueResolver!(dt)),
     );
-    final uploaded = await attachments.uploadPendingForTopParent(
-      row.mobileUuid,
-    );
+    // Push gate: throws BlockedByUpstream unless every attachment is `done`.
+    // Runs BEFORE PayloadAssembler.assemble below so the writeback has already
+    // replaced each marker in `docs__` by the time the payload is built.
+    await attachments.resolveForTopParent(row.mobileUuid);
+    // Built from ALL rows, so a marker left by an interrupted writeback still
+    // resolves rather than reaching the wire.
+    final uploaded = await attachments.resolutionMapFor(row.mobileUuid);
 
     final childMetas = await _childMetasFor(meta);
     final parentTable = await metaDao.tableNameFor(row.doctype);
