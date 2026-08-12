@@ -5,7 +5,13 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [2.0.0-beta.2] - 2026-08-12
+
+Second prerelease on the 2.0 line. Everything below was previously staged under
+`[Unreleased]`; the heading is dated here so the published version and this file
+agree, as `[2.0.0-beta]` does. Still a **prerelease** — `pub.dev` continues to
+serve 1.2.0 as the default install, and this version is only resolved by asking
+for it explicitly.
 
 ### Changed
 
