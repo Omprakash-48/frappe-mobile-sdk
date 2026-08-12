@@ -156,43 +156,58 @@ The "skip" is why a missing or failed child upload leaves a silent gap rather th
 
 ### How N parent fields and X child rows x M fields are identified
 
-The thing to internalise: **`file_url` is the correlation token, not the device's uuids.**
+Identification happens **twice**, at two different stages, with two different keys. Conflating them is easy and wrong.
 
-`parent_uuid`, `parent_doctype` and `top_parent_uuid` never cross the wire for relink purposes. They exist only to route the writeback into the right *local* column. Once each url sits in its own column and the document is POSTed, the server re-derives every coordinate by **walking the saved document** and reading what each attach field actually holds.
+#### Stage 1 — the push pipeline, on device: the uuid triple + fieldname
+
+This is where each attachment is matched to its exact slot, and it is done **entirely** with the identifiers the device already holds. `file_url` is the *value being written*, never the key.
+
+| Column | Selects | In code |
+|---|---|---|
+| `top_parent_uuid` | the **set** of attachments belonging to one outbox row | `findUnresolvedForTopParent` → `where: 'top_parent_uuid = ? AND state != ?'` |
+| `parent_doctype` | **which table** — `docs__order` vs `docs__order_item` | `_tableFor(p.parentDoctype)` |
+| `parent_uuid` | **which row** in that table | `where: 'mobile_uuid = ?', whereArgs: [p.parentUuid]` |
+| `parent_fieldname` | **which column** on that row | `<String, Object?>{p.parentFieldname: resolvedUrl}` |
+
+So for N parent fields and X child rows carrying M each:
 
 ```mermaid
 flowchart TD
-    subgraph DEV["On device — uuids route the writeback"]
-        A1["N parent fields<br/>parent_uuid = P1"] --> W1["docs__order.photo = /files/a<br/>docs__order.scan = /files/b"]
-        A2["X child rows x M fields<br/>parent_uuid = C0..Cx"] --> W2["docs__order_item.receipt = /files/c<br/>(WHERE mobile_uuid = C0)"]
-        A1 --> U["N + X*M uploads<br/>-> N + X*M unattached File rows"]
-        A2 --> U
-    end
+    Q["findUnresolvedForTopParent('P1')<br/>top_parent_uuid = P1"] --> R1["photo<br/>parent_uuid=P1, doctype=Order"]
+    Q --> R2["scan<br/>parent_uuid=P1, doctype=Order"]
+    Q --> R3["receipt<br/>parent_uuid=C0, doctype=Order Item"]
+    Q --> R4["signature<br/>parent_uuid=C0, doctype=Order Item"]
+    Q --> R5["receipt<br/>parent_uuid=C1, doctype=Order Item"]
+    Q --> R6["... X*M rows total"]
 
-    W1 --> POST["POST document<br/>children nested inline"]
-    W2 --> POST
-    U --> SRV
+    R1 --> W1["UPDATE docs__order SET photo=url<br/>WHERE mobile_uuid='P1'"]
+    R2 --> W2["UPDATE docs__order SET scan=url<br/>WHERE mobile_uuid='P1'"]
+    R3 --> W3["UPDATE docs__order_item SET receipt=url<br/>WHERE mobile_uuid='C0'"]
+    R4 --> W4["UPDATE docs__order_item SET signature=url<br/>WHERE mobile_uuid='C0'"]
+    R5 --> W5["UPDATE docs__order_item SET receipt=url<br/>WHERE mobile_uuid='C1'"]
 
-    subgraph SRV["On server — the url is the join key"]
-        POST --> SAVE["parent saved; child rows inserted<br/>Frappe assigns child names"]
-        SAVE --> H1["stock hook walks the PARENT's<br/>N attach fields"]
-        SAVE --> H2["relink_mobile_files walks<br/>X child rows x M fields"]
-        H1 --> L1["claims N File rows"]
-        H2 --> L2["claims X*M File rows,<br/>one per field"]
-    end
-
-    style U fill:#1d3557,color:#fff
-    style L1 fill:#2d6a4f,color:#fff
-    style L2 fill:#2d6a4f,color:#fff
+    style Q fill:#1d3557,color:#fff
 ```
 
-Three properties follow, and they are the reason this works at all:
+`top_parent_uuid` is the only thing that makes this **one** operation: it is stamped with the parent's `mobile_uuid` for every attachment at any depth, so a single query gathers the whole set and the push gate can block on all of it together. The other three then disambiguate completely — `(parent_uuid, parent_fieldname)` is unique per queued attachment, which is also the key the re-pick replacement uses.
 
-1. **Child-row identity never has to survive the round trip.** Frappe assigns child `name`s at insert time; the device's `C0`/`C1` uuids are irrelevant to relinking. The hook reads the child row *after* it is saved, so it uses the real server name.
-2. **Order and reordering do not matter.** Matching is by value, not position. A child table that Frappe renumbers, reorders, or renames still relinks correctly, because each field's own value is what locates its `File`.
-3. **Shared bytes still resolve one-to-one.** If two child rows hold the same url, there are two `File` rows for it (one per upload, §3a step 3), both unattached. The hook's `LIMIT 1` claims one per iteration, and the claimed row stops matching the `IS NULL` filter — so the second row gets the second `File`. The comment in `attachment_relink.py` calls this out explicitly.
+Note `parent_uuid` is matched against `mobile_uuid` in the target table, **not** against `parent` or a server name. That is what lets the writeback work before the document has ever been to the server: a child row created offline has a `mobile_uuid` and no server identity at all.
 
-The failure mode to watch is the arithmetic: the hook claims **one `File` per attach field it walks**. If fewer unattached rows exist than fields referencing that url — an upload that never happened, or a `File` already claimed by an earlier save — the surplus fields are skipped and stay unlinked. The SDK's push gate is what keeps that from happening, by refusing to push until every attachment is `done`.
+Marker resolution in `inlinePayload` is likewise by **row id** (`pending:<id>`), not by url.
+
+#### Stage 2 — the server's relink hook, post-save: `file_url`
+
+None of the four columns above cross the wire — they are device-local identity. So after the document saves, the relink hooks have no way to ask "which field did this file belong to". They re-derive it by **walking the saved document** and reading what each attach field actually holds, matching that value against `File.file_url` where `attached_to_*` is still unset.
+
+That is why the two stages use different keys, and why the SDK's job ends at putting the right url in the right column: once it has done that, the url *is* sufficient for the server to reconstruct the coordinate it needs.
+
+Three properties follow on the server side:
+
+1. **Child identity never has to survive the round trip.** Frappe assigns child `name`s at insert; the device's `C0`/`C1` uuids are irrelevant to relinking. The hook reads each child row *after* it is saved, so it uses the real server name.
+2. **Order and reordering do not matter.** Matching is by value, so a child table Frappe renumbers or reorders still relinks correctly.
+3. **Shared bytes still resolve one-to-one.** Each upload produces its own `File` row even when the blob is deduped, and a claimed row stops matching the `IS NULL` filter — so the next field gets the next row.
+
+The failure mode to watch on the server side is arithmetic: the hook claims **one `File` per attach field it walks**. Fewer unattached rows than referencing fields leaves the surplus unlinked — which is what the push gate prevents by refusing to push until every attachment is `done`.
 
 ### What the SDK guarantees, and what it does not
 
