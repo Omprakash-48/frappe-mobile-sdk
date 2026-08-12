@@ -19,7 +19,7 @@ void main() {
     databaseFactory = databaseFactoryFfi;
   });
 
-  test('uploadPendingForTopParent uploads BOTH parent-field and '
+  test('resolveForTopParent uploads BOTH parent-field and '
       'child-row attachments belonging to the same outbox row', () async {
     final db = await databaseFactory.openDatabase(inMemoryDatabasePath);
     for (final s in systemTablesDDL()) {

@@ -12,9 +12,16 @@ typedef AttachmentUploadFn = Future<String?> Function(File file);
 /// Default ceiling on a picked attachment, matching Frappe's stock System
 /// Settings `max_file_size` (10 MB).
 ///
-/// Host-overridable. Reading the true server value would need `mobile_control`
-/// to expose it; until then a wrong default only ever refuses early, which is
-/// recoverable, rather than letting an unuploadable file into the queue.
+/// **Not currently reachable from a host.** It is the default for
+/// [resolvePickedAttachment]'s `maxBytes`, and the only callers are this SDK's
+/// own `AttachField` / `ImageField`, which do not expose an override — so a
+/// deployment whose server limit differs cannot change it without threading a
+/// parameter through `FormScreen` -> `FormBuilder` -> `FieldFactory`.
+///
+/// Reading the true server value would need `mobile_control` to expose
+/// System Settings' `max_file_size`. Until either exists, a wrong default only
+/// ever refuses early, which is recoverable, rather than letting an
+/// unuploadable file into the queue.
 const int kDefaultMaxAttachmentBytes = 10 * 1024 * 1024;
 
 /// Thrown when a picked file exceeds the size limit.

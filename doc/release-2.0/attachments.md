@@ -519,7 +519,7 @@ The wipe is **destructive by design** — it also clears `outbox/`, which holds 
 |---|---|
 | `FrappeSDK.mediaStoreSize()` | total bytes on disk (staged + cached) |
 | `FrappeSDK.clearMediaCache()` | clear the store — **destructive**, put it behind a confirmation |
-| `kDefaultMaxAttachmentBytes` | 10 MB, matching Frappe's stock `max_file_size` |
+| `kDefaultMaxAttachmentBytes` | 10 MB, matching Frappe's stock `max_file_size`. **Not host-overridable yet** — see §13 |
 | `AttachmentTooLargeException` | thrown at pick, carries `sizeBytes` and `limitBytes` |
 | `attachmentTooLargeMessage(e)` | user-facing message naming the real limit |
 | `ResolveMediaFn` | what the field widgets accept; pass `resolver.resolve` |
@@ -533,6 +533,7 @@ The size guard runs **before** the durable copy is made, so an oversized pick ne
 - **Media storage is unbounded until logout.** There is no automatic eviction in this release. `size_bytes` and `last_accessed_at` are populated from day one so Phase 2's policy has real data, and `mediaStoreSize()` / `clearMediaCache()` exist so a host can expose usage and a manual clear meanwhile.
 - **No compression.** `pickImage` is called with no `imageQuality` / `maxWidth` / `maxHeight`, so a capture is full-resolution — 3–12 MB on a current phone. Frappe strips EXIF server-side and accepts `optimize` / `max_width` / `max_height` on `upload_file`, none of which the SDK sends yet.
 - **No background prefetch.** Media for a pulled document is cached on first view, not ahead of time.
+- **The size limit is not host-configurable.** `kDefaultMaxAttachmentBytes` (10 MB) is the default for `resolvePickedAttachment`'s `maxBytes`, but the only callers are this SDK's own `AttachField` / `ImageField` and neither exposes an override. A deployment whose System Settings `max_file_size` differs will either refuse files the server would have accepted, or accept files it will reject at upload (which the pipeline then handles correctly as a terminal rejection — the document blocks with a named reason rather than corrupting). Making it configurable means threading a parameter through `FormScreen` -> `FormBuilder` -> `FieldFactory`, the same path `mediaResolver` takes.
 - **Child-row relinking depends on `mobile_control`.** See §3.
 - **Orphaned server `File` rows** after a delete or re-pick are not collected. See §8.
 - **Not verified on a device.** The platform pickers, camera lost-capture recovery, `OpenFilex` handoff and the real logout wipe are covered by no automated test in this repo.

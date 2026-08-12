@@ -100,7 +100,7 @@ class PendingAttachmentDao {
   /// [markDone] write fails (or the process is interrupted), a later attempt
   /// reuses the already-uploaded binary instead of re-uploading it and
   /// creating a duplicate File row (PR#36 round-4 H3). The row stays in
-  /// `uploading` so it is still picked up by [findPendingForTopParent].
+  /// `uploading` so it is still picked up by [findUnresolvedForTopParent].
   Future<void> recordUpload(
     int id, {
     required String serverFileName,
