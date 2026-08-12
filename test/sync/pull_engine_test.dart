@@ -1497,12 +1497,16 @@ void main() {
       metaResolver: (dt) async =>
           DocTypeMeta(name: dt, fields: [f('title', 'Data')]),
     );
-    await engine.run(const ClosureResult(
-      doctypes: ['X'],
-      graph: {'X': DepGraph(doctype: 'X', tier: 0, outgoing: [], incoming: [])},
-      childDoctypes: {},
-      warnings: [],
-    ));
+    await engine.run(
+      const ClosureResult(
+        doctypes: ['X'],
+        graph: {
+          'X': DepGraph(doctype: 'X', tier: 0, outgoing: [], incoming: []),
+        },
+        childDoctypes: {},
+        warnings: [],
+      ),
+    );
 
     final row = await metaDao.findByDoctype('X');
     expect(row, isNotNull);
@@ -1513,43 +1517,50 @@ void main() {
     );
   });
 
-  test('does NOT demote a mobile form on a transient network failure', () async {
-    final metaY = DocTypeMeta(name: 'Y', fields: [f('title', 'Data')]);
-    for (final s in buildParentSchemaDDL(metaY, tableName: 'docs__y')) {
-      await db.execute(s);
-    }
-    await db.insert('doctype_meta', {
-      'doctype': 'Y',
-      'metaJson': '{"name":"Y"}',
-      'isMobileForm': 1,
-      'table_name': 'docs__y',
-    });
-    final engine = PullEngine(
-      db: db,
-      metaDao: metaDao,
-      outboxDao: OutboxDao(db),
-      pool: ConcurrencyPool(maxConcurrent: 2),
-      fetcher: PullPageFetcher(
-        listHttp: (doctype, params) async =>
-            throw NetworkException('Cannot reach server'),
-      ),
-      pageSize: 500,
-      notifier: SyncStateNotifier(),
-      metaResolver: (dt) async =>
-          DocTypeMeta(name: dt, fields: [f('title', 'Data')]),
-    );
-    await engine.run(const ClosureResult(
-      doctypes: ['Y'],
-      graph: {'Y': DepGraph(doctype: 'Y', tier: 0, outgoing: [], incoming: [])},
-      childDoctypes: {},
-      warnings: [],
-    ));
+  test(
+    'does NOT demote a mobile form on a transient network failure',
+    () async {
+      final metaY = DocTypeMeta(name: 'Y', fields: [f('title', 'Data')]);
+      for (final s in buildParentSchemaDDL(metaY, tableName: 'docs__y')) {
+        await db.execute(s);
+      }
+      await db.insert('doctype_meta', {
+        'doctype': 'Y',
+        'metaJson': '{"name":"Y"}',
+        'isMobileForm': 1,
+        'table_name': 'docs__y',
+      });
+      final engine = PullEngine(
+        db: db,
+        metaDao: metaDao,
+        outboxDao: OutboxDao(db),
+        pool: ConcurrencyPool(maxConcurrent: 2),
+        fetcher: PullPageFetcher(
+          listHttp: (doctype, params) async =>
+              throw NetworkException('Cannot reach server'),
+        ),
+        pageSize: 500,
+        notifier: SyncStateNotifier(),
+        metaResolver: (dt) async =>
+            DocTypeMeta(name: dt, fields: [f('title', 'Data')]),
+      );
+      await engine.run(
+        const ClosureResult(
+          doctypes: ['Y'],
+          graph: {
+            'Y': DepGraph(doctype: 'Y', tier: 0, outgoing: [], incoming: []),
+          },
+          childDoctypes: {},
+          warnings: [],
+        ),
+      );
 
-    final row = await metaDao.findByDoctype('Y');
-    expect(
-      row!.isMobileForm,
-      isTrue,
-      reason: 'a transient network failure must NOT demote the form',
-    );
-  });
+      final row = await metaDao.findByDoctype('Y');
+      expect(
+        row!.isMobileForm,
+        isTrue,
+        reason: 'a transient network failure must NOT demote the form',
+      );
+    },
+  );
 }

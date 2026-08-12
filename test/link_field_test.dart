@@ -314,29 +314,25 @@ void main() {
         '[["Other DocType","target_field","=",'
         '"eval:(doc.category||\'\').replace(/^prefix\\\\s*/, \'\')"]]';
 
-    testWidgets(
-      'recognizes dependent field inside a wrapped JS expression',
-      (tester) async {
-        final service = _FakeLinkOptionService();
+    testWidgets('recognizes dependent field inside a wrapped JS expression', (
+      tester,
+    ) async {
+      final service = _FakeLinkOptionService();
 
-        await tester.pumpWidget(
-          _wrap(
-            LinkField(
-              field: _linkField(linkFilters: kComplexLinkFilters),
-              linkOptionService: service,
-              formData: {}, // category left blank
-            ),
+      await tester.pumpWidget(
+        _wrap(
+          LinkField(
+            field: _linkField(linkFilters: kComplexLinkFilters),
+            linkOptionService: service,
+            formData: {}, // category left blank
           ),
-        );
-        await tester.pump();
+        ),
+      );
+      await tester.pump();
 
-        expect(
-          find.text('Select category first'),
-          findsAtLeastNWidgets(1),
-        );
-        expect(find.text('No options available'), findsNothing);
-      },
-    );
+      expect(find.text('Select category first'), findsAtLeastNWidgets(1));
+      expect(find.text('No options available'), findsNothing);
+    });
 
     testWidgets('options load when dependent field value is filled in', (
       tester,
