@@ -43,6 +43,7 @@ class MediaResolver {
   /// Resolution order:
   ///
   ///   `pending:<id>` -> staged path (this device, not yet uploaded)
+  ///   `/abs/device/path` -> itself, if the file exists (never fetched)
   ///   `<file_url>`   -> cache hit  -> local path
   ///                  -> miss + online  -> fetch, store, return
   ///                  -> miss + offline -> null (caller shows a placeholder)
@@ -62,6 +63,20 @@ class MediaResolver {
       final markerId = parsePendingMarkerId(v);
       if (markerId == null) return null;
       return pendingPaths?[markerId];
+    }
+
+    // A device filesystem path is not a server reference and can never be
+    // fetched. Between pick and save the field holds exactly that — a staged
+    // path — and treating it as a url prepends the base url and issues a
+    // guaranteed 404. In offline mode that is precisely the network call the
+    // mode exists to avoid.
+    if (isLocalAttachmentPath(v)) {
+      try {
+        return await File(v).exists() ? v : null;
+      } catch (e, st) {
+        sdkLog('MediaResolver.resolve: stat($v) failed — $e\n$st');
+        return null;
+      }
     }
 
     try {

@@ -146,4 +146,37 @@ void main() {
     expect(await resolver().resolve('   '), isNull);
     expect(fetches, 0);
   });
+
+  test('a raw LOCAL path is returned directly, never fetched', () async {
+    // Between pick and save the field holds a staged path, not a marker and
+    // not a server url. Fetching it would prepend the base url and issue a
+    // guaranteed 404 — and in offline mode that is precisely the network call
+    // the mode exists to avoid.
+    final f = File('${root.path}/staged.jpg')..writeAsStringSync('S');
+    expect(await resolver().resolve(f.path), f.path);
+    expect(fetches, 0);
+  });
+
+  test(
+    'a local path whose file is gone resolves to null, still no fetch',
+    () async {
+      expect(await resolver().resolve('${root.path}/missing.jpg'), isNull);
+      expect(fetches, 0);
+    },
+  );
+
+  test('a cache path is also local and is returned as-is', () async {
+    final cached = File('${root.path}/deadbeef.jpg')..writeAsStringSync('C');
+    expect(await resolver().resolve(cached.path), cached.path);
+    expect(fetches, 0);
+  });
+
+  test(
+    'a server url is still fetched (the local check must not over-match)',
+    () async {
+      final p = await resolver(bytes: [1]).resolve('/files/real.jpg');
+      expect(fetches, 1);
+      expect(p, isNotNull);
+    },
+  );
 }
