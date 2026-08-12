@@ -178,6 +178,68 @@ Two things follow that are worth stating plainly:
 
 ---
 
+## 3b. Many fields: N on the parent, X child rows with M each
+
+A realistic survey form is not one photo. Take **N** attach fields on the parent and **X** child rows carrying **M** each — total **N + (X x M)** attachments for one document. Behaviour is pinned by `test/sync/attachment_multi_field_test.dart` (N=2, M=2, X=3, so 8 attachments).
+
+### One document, one query, one gate
+
+Every row — parent field or child-row field — is stamped with the **top parent's** `mobile_uuid`, while `parent_uuid` stays the row's own. So the identity split is:
+
+| | `parent_uuid` | `parent_doctype` | `top_parent_uuid` |
+|---|---|---|---|
+| Parent field | `P1` | `Order` | `P1` |
+| Child row C0 field | `C0` | `Order Item` | `P1` |
+| Child row C2 field | `C2` | `Order Item` | `P1` |
+
+`findUnresolvedForTopParent('P1')` therefore returns all 8 in one query at any nesting depth, and the push gate blocks on the whole set together. `parent_uuid` + `parent_fieldname` is the precise coordinate the writeback uses, so each resolved url lands in its **own** row's column — a child's `receipt` updates `docs__order_item` `WHERE mobile_uuid = 'C0'`, not the parent's table.
+
+The uniqueness key for a queued attachment is `(parent_uuid, parent_fieldname)`. N parent fields produce N rows sharing `parent_uuid = P1` with distinct fieldnames; each child row produces M rows under its own uuid. A re-pick replaces exactly one of them.
+
+### Uploads are serial, and the first failure stops the pass
+
+`resolveForTopParent` is a plain `for` loop with an `await` inside — **not** a `Future.wait`. So:
+
+```mermaid
+flowchart LR
+    A["photo<br/>done"] --> B["scan<br/>done"] --> C["receipt0<br/>done"] --> D["signature0<br/>done"] --> E["receipt1<br/>FAILS"] --> F["signature1<br/>never attempted"] --> G["receipt2<br/>never attempted"] --> H["signature2<br/>never attempted"]
+
+    style A fill:#2d6a4f,color:#fff
+    style B fill:#2d6a4f,color:#fff
+    style C fill:#2d6a4f,color:#fff
+    style D fill:#2d6a4f,color:#fff
+    style E fill:#9d0208,color:#fff
+    style F fill:#6c584c,color:#fff
+    style G fill:#6c584c,color:#fff
+    style H fill:#6c584c,color:#fff
+```
+
+`_resolveOne` throws, which aborts the loop. Three consequences, all deliberate:
+
+1. **Progress is never thrown away.** Each attachment commits in its own transaction, so `photo`, `scan`, `receipt0` and `signature0` are already `done` with their columns written back. The document is blocked, not reset.
+2. **The rest stay `pending`,** untouched — they were never attempted, so they carry no retry count or error.
+3. **The next dispatch finishes the set** and re-uploads nothing that already landed: `done` rows are outside `findUnresolvedForTopParent`, and a row holding a committed `server_file_url` skips the upload entirely.
+
+That is why total upload count across a recovered document is *(attempts on the failing item)* + *(one per attachment that had not yet succeeded)* — never one per attachment per dispatch.
+
+### Cost, and where it bites
+
+- **N + (X x M) sequential round trips.** 20 photos are 20 uploads, one after another. There is no parallelism and no batching; a slow link multiplies.
+- **A transient failure costs its full backoff before the loop aborts** — with the default `[2s, 5s, 10s]` that is 2s + 5s of waiting across 3 attempts, and the attachments behind it wait for all of it before being deferred to the next dispatch.
+- **One rejected attachment out of fifty blocks the document indefinitely.** That is the gate working as designed — the document cannot be represented faithfully without that file — but the error must identify *which* one, which is why `BlockedByUpstream` carries the file and field rather than a row id.
+
+### Identical bytes in several fields
+
+If the same photo is attached to M fields, each gets its own `pending_attachments` row and its own upload call — the SDK does not deduplicate client-side. Frappe's content-hash dedup then returns the **same** `file_url` for all of them, so:
+
+- one set of bytes on the server,
+- one `media_cache` entry on the device (keyed by url; the second `moveToCache` finds the destination present, reports success, and discards its now-redundant staged copy),
+- but **one `File` record per field**, because the stock relink hook claims the unattached row for the first field and inserts a fresh record for the rest (§3a, step 3).
+
+So the wasted work is the upload bandwidth, not storage on either side.
+
+---
+
 ## 4. Resolution mechanism
 
 Three layers, each covering what the one before it cannot.
