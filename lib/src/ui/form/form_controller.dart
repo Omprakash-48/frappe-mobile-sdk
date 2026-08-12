@@ -376,13 +376,30 @@ class FormController extends ChangeNotifier {
       orElse: () => DocField(fieldtype: '_missing_'),
     );
     if (!_isDynamic(f) && !f.reqd && !f.readOnly) return FieldUiState.editable;
+    // `depends_on` keeps the `onError: true` default — an unparseable
+    // expression SHOWS the field rather than silently hiding data.
     final visible = DependsOnEvaluator.evaluate(f.dependsOn, _rawValues);
+    // The other two must invert it: erring towards required blocks the save
+    // with nothing the user can do about it, and erring towards locked makes
+    // the field permanently uneditable. FormBuilder's `_isFieldRequired` /
+    // `_isFieldReadOnly` already pass `false`; reactive mode must agree with
+    // them or the same field disagrees between the two engines.
     final required =
         f.reqd ||
-        DependsOnEvaluator.evaluate2(f.mandatoryDependsOn, _rawValues, false);
+        DependsOnEvaluator.evaluate2(
+          f.mandatoryDependsOn,
+          _rawValues,
+          false,
+          onError: false,
+        );
     final readOnly =
         f.readOnly ||
-        DependsOnEvaluator.evaluate2(f.readOnlyDependsOn, _rawValues, false);
+        DependsOnEvaluator.evaluate2(
+          f.readOnlyDependsOn,
+          _rawValues,
+          false,
+          onError: false,
+        );
     return FieldUiState(
       visible: visible,
       required: required,

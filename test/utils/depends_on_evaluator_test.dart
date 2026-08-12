@@ -281,7 +281,10 @@ void main() {
 
   group('leading ! (JS logical NOT)', () {
     test('negates a falsy field to true', () {
-      expect(DependsOnEvaluator.evaluate('eval:!doc.flag', {'flag': 0}), isTrue);
+      expect(
+        DependsOnEvaluator.evaluate('eval:!doc.flag', {'flag': 0}),
+        isTrue,
+      );
       expect(DependsOnEvaluator.evaluate('eval:!doc.flag', {}), isTrue);
       expect(
         DependsOnEvaluator.evaluate('eval:!doc.flag', {'flag': ''}),
@@ -323,17 +326,17 @@ void main() {
 
     test('composes with && and ||', () {
       expect(
-        DependsOnEvaluator.evaluate('eval:!doc.verified && doc.docstatus === 0', {
-          'verified': 0,
-          'docstatus': 0,
-        }),
+        DependsOnEvaluator.evaluate(
+          'eval:!doc.verified && doc.docstatus === 0',
+          {'verified': 0, 'docstatus': 0},
+        ),
         isTrue,
       );
       expect(
-        DependsOnEvaluator.evaluate('eval:!doc.verified && doc.docstatus === 0', {
-          'verified': 1,
-          'docstatus': 0,
-        }),
+        DependsOnEvaluator.evaluate(
+          'eval:!doc.verified && doc.docstatus === 0',
+          {'verified': 1, 'docstatus': 0},
+        ),
         isFalse,
       );
       expect(
@@ -356,10 +359,7 @@ void main() {
         isFalse,
       );
       // Unspaced forms go through operator-spacing normalization first.
-      expect(
-        DependsOnEvaluator.evaluate('eval:doc.x!=1', {'x': 2}),
-        isTrue,
-      );
+      expect(DependsOnEvaluator.evaluate('eval:doc.x!=1', {'x': 2}), isTrue);
     });
 
     test('referencedFields sees through a negation', () {
@@ -374,8 +374,14 @@ void main() {
       // In Frappe a document always has a docstatus — 0 while it is a draft —
       // so desk treats eval:doc.docstatus === 0 as true on a new doc. Client
       // form data does not always carry the key.
-      expect(DependsOnEvaluator.evaluate('eval:doc.docstatus === 0', {}), isTrue);
-      expect(DependsOnEvaluator.evaluate('eval:doc.docstatus == 0', {}), isTrue);
+      expect(
+        DependsOnEvaluator.evaluate('eval:doc.docstatus === 0', {}),
+        isTrue,
+      );
+      expect(
+        DependsOnEvaluator.evaluate('eval:doc.docstatus == 0', {}),
+        isTrue,
+      );
       expect(
         DependsOnEvaluator.evaluate('eval:doc.docstatus !== 0', {}),
         isFalse,
@@ -445,19 +451,21 @@ void main() {
       }
     });
 
-    test('a division-position slash does not swallow the rest of the expression',
-        () {
-      // Only a value position opens a regex; after an identifier `/` is
-      // division. If it were treated as a regex opener it would consume through
-      // the ' == ', losing the comparison entirely and falling back to a
-      // truthiness check on `a` — which would be TRUE here. Asserting false
-      // proves the ' == ' survived. (The evaluator does no arithmetic, so
-      // `a/2` is simply not a resolvable field.)
-      expect(
-        DependsOnEvaluator.evaluate('eval:doc.a/2 == 5', {'a': 10}),
-        isFalse,
-      );
-    });
+    test(
+      'a division-position slash does not swallow the rest of the expression',
+      () {
+        // Only a value position opens a regex; after an identifier `/` is
+        // division. If it were treated as a regex opener it would consume through
+        // the ' == ', losing the comparison entirely and falling back to a
+        // truthiness check on `a` — which would be TRUE here. Asserting false
+        // proves the ' == ' survived. (The evaluator does no arithmetic, so
+        // `a/2` is simply not a resolvable field.)
+        expect(
+          DependsOnEvaluator.evaluate('eval:doc.a/2 == 5', {'a': 10}),
+          isFalse,
+        );
+      },
+    );
 
     test('unspaced operators are still normalized', () {
       // The behaviour this normalizer exists for must survive both guards.
@@ -516,9 +524,7 @@ void main() {
     test('eval:!doc.district; matches the real Frappe read_only_depends_on '
         'for "block"', () {
       expect(
-        DependsOnEvaluator.evaluate('eval:!doc.district;', {
-          'district': 'D',
-        }),
+        DependsOnEvaluator.evaluate('eval:!doc.district;', {'district': 'D'}),
         isFalse, // district set -> not read-only -> editable
       );
       expect(DependsOnEvaluator.evaluate('eval:!doc.district;', {}), isTrue);
@@ -528,31 +534,24 @@ void main() {
       );
     });
 
-    test(
-      'eval:!doc.district || !doc.block; matches read_only_depends_on for '
-      '"village" across all four combinations',
-      () {
-        bool ro(Map<String, dynamic> d) =>
-            DependsOnEvaluator.evaluate('eval:!doc.district || !doc.block;', d);
+    test('eval:!doc.district || !doc.block; matches read_only_depends_on for '
+        '"village" across all four combinations', () {
+      bool ro(Map<String, dynamic> d) =>
+          DependsOnEvaluator.evaluate('eval:!doc.district || !doc.block;', d);
 
-        expect(ro({'district': 'D', 'block': 'B'}), isFalse);
-        expect(ro({'district': 'D', 'block': ''}), isTrue);
-        expect(ro({'district': '', 'block': 'B'}), isTrue);
-        expect(ro({'district': '', 'block': ''}), isTrue);
-      },
-    );
+      expect(ro({'district': 'D', 'block': 'B'}), isFalse);
+      expect(ro({'district': 'D', 'block': ''}), isTrue);
+      expect(ro({'district': '', 'block': 'B'}), isTrue);
+      expect(ro({'district': '', 'block': ''}), isTrue);
+    });
 
     test('eval:doc.some_check; truthy path with trailing semicolon', () {
       expect(
-        DependsOnEvaluator.evaluate('eval:doc.some_check;', {
-          'some_check': 1,
-        }),
+        DependsOnEvaluator.evaluate('eval:doc.some_check;', {'some_check': 1}),
         isTrue,
       );
       expect(
-        DependsOnEvaluator.evaluate('eval:doc.some_check;', {
-          'some_check': 0,
-        }),
+        DependsOnEvaluator.evaluate('eval:doc.some_check;', {'some_check': 0}),
         isFalse,
       );
       expect(DependsOnEvaluator.evaluate('eval:doc.some_check;', {}), isFalse);
@@ -561,15 +560,12 @@ void main() {
     test('regression: comparison operators with a trailing ; still work '
         '(already covered by _extractValue, must not regress)', () {
       expect(DependsOnEvaluator.evaluate('eval:doc.x == 1;', {'x': 1}), isTrue);
-      expect(DependsOnEvaluator.evaluate('eval:doc.x == 1;', {'x': 2}), isFalse);
       expect(
-        DependsOnEvaluator.evaluate('eval:doc.x != 1;', {'x': 2}),
-        isTrue,
+        DependsOnEvaluator.evaluate('eval:doc.x == 1;', {'x': 2}),
+        isFalse,
       );
-      expect(
-        DependsOnEvaluator.evaluate('eval:doc.x >= 3;', {'x': 3}),
-        isTrue,
-      );
+      expect(DependsOnEvaluator.evaluate('eval:doc.x != 1;', {'x': 2}), isTrue);
+      expect(DependsOnEvaluator.evaluate('eval:doc.x >= 3;', {'x': 3}), isTrue);
       // includes() has its own fully-anchored regex and never reached
       // _extractFieldName's bare-truthy path even before the fix — confirm
       // it is genuinely untouched (no trailing `;` support was added or
@@ -590,14 +586,10 @@ void main() {
     // from its stripped form too, so it was mistaken for a bare `doc.field`
     // reference and returned whole instead of falling through to the regex.
     test('bare eval:doc.x; still takes the fast path', () {
-      expect(
-        DependsOnEvaluator.extractEvalDocField('eval:doc.x;'),
-        'x',
-      );
+      expect(DependsOnEvaluator.extractEvalDocField('eval:doc.x;'), 'x');
     });
 
-    test(
-        'a complex expression ending in ; falls through to the doc.<field> '
+    test('a complex expression ending in ; falls through to the doc.<field> '
         'regex instead of returning the whole expression', () {
       expect(
         DependsOnEvaluator.extractEvalDocField(
@@ -618,7 +610,10 @@ void main() {
     // the link picker silently stopped filtering — it looks like "no filter
     // configured", not like an error, which is why it survived review.
     test('a && b expression returns the FIRST field, not the whole string', () {
-      expect(DependsOnEvaluator.extractEvalDocField('eval:doc.a && doc.b'), 'a');
+      expect(
+        DependsOnEvaluator.extractEvalDocField('eval:doc.a && doc.b'),
+        'a',
+      );
     });
 
     test('the same without the eval: prefix', () {
@@ -652,4 +647,91 @@ void main() {
       expect(DependsOnEvaluator.extractEvalDocField('eval:1 == 1'), isNull);
     });
   });
+
+  group('onError — the verdict for an expression that THROWS', () {
+    // `onError` only fires on a genuine evaluation failure, not on a false
+    // condition and not on an expression that merely falls through to the
+    // truthy fallback. Reaching it needs a value that throws while being
+    // compared, which is what [_ThrowOnEquals] is for. Without such a value
+    // this parameter has no test at all — which is how the reactive-mode and
+    // mandatory-sweep call sites below shipped taking the wrong default.
+    const expr = "eval:doc.a == 'x'";
+    final data = <String, dynamic>{'a': _ThrowOnEquals()};
+
+    test('evaluate defaults to TRUE — correct only for depends_on', () {
+      expect(DependsOnEvaluator.evaluate(expr, data), isTrue);
+    });
+
+    test('evaluate honours onError: false', () {
+      expect(DependsOnEvaluator.evaluate(expr, data, onError: false), isFalse);
+    });
+
+    test('evaluate2 FORWARDS onError to evaluate', () {
+      // The bug: evaluate2 dropped the argument, so `mandatory_depends_on` and
+      // `read_only_depends_on` in reactive mode took the `true` default — an
+      // unparseable expression made the field required (blocking Save with
+      // nothing the user could do) or read-only (permanently uneditable).
+      expect(
+        DependsOnEvaluator.evaluate2(expr, data, false, onError: false),
+        isFalse,
+      );
+      // Default preserved, so the signature stays source-compatible.
+      expect(DependsOnEvaluator.evaluate2(expr, data, false), isTrue);
+    });
+
+    test('defaultWhenEmpty still answers an ABSENT expression', () {
+      // The two questions are independent: onError must not leak into the
+      // null/empty case.
+      expect(
+        DependsOnEvaluator.evaluate2(null, data, false, onError: false),
+        isFalse,
+      );
+      expect(
+        DependsOnEvaluator.evaluate2('', data, true, onError: false),
+        isTrue,
+      );
+    });
+
+    test('a negated failing sub-expression still surfaces as onError', () {
+      // `!` inverts the error default on the way down so the `!` on the way
+      // back up cancels it — the caller's declared safe answer survives.
+      expect(
+        DependsOnEvaluator.evaluate(
+          "eval:!(doc.a == 'x')",
+          data,
+          onError: false,
+        ),
+        isFalse,
+      );
+      expect(DependsOnEvaluator.evaluate("eval:!(doc.a == 'x')", data), isTrue);
+    });
+
+    test('a && / || branch propagates onError to each part', () {
+      expect(
+        DependsOnEvaluator.evaluate("eval:doc.a == 'x' && doc.b == 1", {
+          ...data,
+          'b': 1,
+        }, onError: false),
+        isFalse,
+      );
+    });
+  });
+}
+
+/// Throws while being COMPARED, but stringifies normally.
+///
+/// `==` is the narrowest hook into [DependsOnEvaluator]'s failure path:
+/// `_compareValues` compares before it stringifies. Throwing from `toString`
+/// instead would also break the callers' own blank-value probes
+/// (`v.toString().isEmpty`), which would test the harness rather than the
+/// evaluator.
+class _ThrowOnEquals {
+  @override
+  bool operator ==(Object other) => throw StateError('comparison exploded');
+
+  @override
+  int get hashCode => 0;
+
+  @override
+  String toString() => 'boom';
 }

@@ -35,11 +35,24 @@ class DependsOnEvaluator {
   /// Like [evaluate] but returns [defaultWhenEmpty] for a null/empty expression.
   /// `depends_on` defaults visible=true; `mandatory_depends_on` /
   /// `read_only_depends_on` must default false when absent.
+  ///
+  /// [onError] is forwarded to [evaluate] and answers an expression that is
+  /// PRESENT but unparseable — a different question from [defaultWhenEmpty],
+  /// which answers an ABSENT one. It is a named optional defaulting to `true`
+  /// so the signature stays source-compatible (this file is exported from the
+  /// package barrel), but callers gating MANDATORY or READ-ONLY must pass
+  /// `false`: without it a `mandatory_depends_on` that fails to parse makes the
+  /// field required and blocks the save with nothing the user can do about it,
+  /// and a `read_only_depends_on` that fails to parse makes the field
+  /// permanently uneditable. See [evaluate].
   static bool evaluate2(
     String? expr,
     Map<String, dynamic> data,
-    bool defaultWhenEmpty,
-  ) => (expr == null || expr.isEmpty) ? defaultWhenEmpty : evaluate(expr, data);
+    bool defaultWhenEmpty, {
+    bool onError = true,
+  }) => (expr == null || expr.isEmpty)
+      ? defaultWhenEmpty
+      : evaluate(expr, data, onError: onError);
 
   /// Comparison / boolean operators, longest first so `===`/`!==`/`>=`/`<=`
   /// are matched before their shorter substrings tear them apart.
@@ -207,15 +220,17 @@ class DependsOnEvaluator {
       // Handle && (AND) operator — split outside brackets to avoid breaking .includes([...])
       final andParts = _splitOutsideBrackets(expr, ' && ');
       if (andParts.length > 1) {
-        return andParts
-            .every((part) => evaluate(part.trim(), formData, onError: onError));
+        return andParts.every(
+          (part) => evaluate(part.trim(), formData, onError: onError),
+        );
       }
 
       // Handle || (OR) operator — same bracket-aware splitting
       final orParts = _splitOutsideBrackets(expr, ' || ');
       if (orParts.length > 1) {
-        return orParts
-            .any((part) => evaluate(part.trim(), formData, onError: onError));
+        return orParts.any(
+          (part) => evaluate(part.trim(), formData, onError: onError),
+        );
       }
 
       // Handle a leading `!` (JS logical NOT), e.g. `!doc.__islocal` — the
@@ -232,8 +247,7 @@ class DependsOnEvaluator {
           !expr.startsWith('!==')) {
         // Invert the error default too, so that a failure inside the negated
         // sub-expression still surfaces as [onError] after the `!`.
-        return !evaluate(expr.substring(1).trim(), formData,
-            onError: !onError);
+        return !evaluate(expr.substring(1).trim(), formData, onError: !onError);
       }
 
       // Handle child-table membership:
