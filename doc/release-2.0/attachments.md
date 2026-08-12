@@ -128,38 +128,71 @@ The match key in step E is the `file_url` **plus** all three `attached_to_*` bei
 Note the two consequences of that final `else`:
 
 - **`is_private` is recomputed from the url prefix during relink**, overriding what the SDK sent. A file uploaded privately that ends up at a `/files/...` url becomes public, and vice versa. The url wins.
-- **If the unattached row was already claimed**, Frappe inserts a *second* `File` row pointing at the same `file_url`. This is exactly case 9 in §8: two documents referencing identical bytes share one file on disk (content-hash dedup) but end up with one `File` record each. The bytes are never duplicated; the records are.
+- **If no unattached row is left**, stock **inserts a new `File`** pointing at the same `file_url`. So a parent attach field always ends up with a record, even when the url was already claimed. (The child-row hook behaves differently — see step 4.)
+
+One upload always produces one `File` row, even when the bytes are deduped: `save_file` reuses the existing `file_url` and skips writing the blob, but still inserts the record. N uploads of identical bytes therefore give N `File` rows sharing one url and one file on disk — which is exactly what makes the per-row claiming in step 4 work.
 
 ### Step 4 — child table rows need a second hook
 
-Stock `attach_files_to_document` reads `doc.meta.get("fields", ...)` — the fields of **the document being saved**. A child table row is a different doctype, and children are persisted through raw `db_update` **without firing lifecycle hooks**. So a child row's `Attach` field is never visited by the stock hook: the file uploads fine, the docfield holds the right url, and the `File` stays orphaned forever.
+Stock `attach_files_to_document` reads `doc.meta.get("fields", ...)` — the fields of **the document being saved**. A child table row is a different doctype, and in v16 children persist through raw `db_update()` **without firing lifecycle hooks**. So a child row's `Attach` field is never visited by the stock hook: the file uploads fine, the docfield holds the right url, and the `File` stays orphaned forever.
 
-`mobile_control`'s `relink_mobile_files` closes that: it runs on the **parent's** `on_update`, walks the parent's `Table` / `Table MultiSelect` fields, and applies the same match-and-rewire per child row — with `attached_to_doctype` set to the *child* doctype and `attached_to_name` to the *child row's* name.
+`mobile_control/attachment_relink.py::relink_mobile_files` closes that. Verified against the installed app:
+
+- Registered on `doc_events["*"]["on_update"]` **and** `["on_update_after_submit"]`, so it is a catch-all like stock's.
+- **Fast-exits unless the doc has a `mobile_uuid`**, so non-mobile saves site-wide pay one attribute lookup.
+- Walks `doc.meta.get_table_fields()` → each child row → each `Attach` / `Attach Image` field on that child.
+- Skips a field already linked to `(url, child.doctype, child.name, fieldname)`, which makes re-saves idempotent.
+- Claims **one** unattached `File` per field, `ORDER BY creation ASC LIMIT 1`, matching `attached_to_*` as NULL **or empty string** (stock matches only `None`).
+- Writes via `frappe.db.set_value` — a raw UPDATE, so it does not recurse into its own `on_update` registration.
+
+Two behavioural differences from stock worth knowing, both verified in source:
+
+| | Stock (parent fields) | `mobile_control` (child rows) |
+|---|---|---|
+| No unattached `File` left | **Inserts a new one** | **Skips** — the row stays unlinked |
+| `is_private` | **Recomputed** from the url prefix | Left untouched |
+
+The "skip" is why a missing or failed child upload leaves a silent gap rather than a bogus record — but it also means a child row can end up with a correct docfield and no `File` link.
+
+### How N parent fields and X child rows x M fields are identified
+
+The thing to internalise: **`file_url` is the correlation token, not the device's uuids.**
+
+`parent_uuid`, `parent_doctype` and `top_parent_uuid` never cross the wire for relink purposes. They exist only to route the writeback into the right *local* column. Once each url sits in its own column and the document is POSTed, the server re-derives every coordinate by **walking the saved document** and reading what each attach field actually holds.
 
 ```mermaid
-flowchart LR
-    subgraph Device
-        PU["parent<br/>mobile_uuid = P1"]
-        CU["child row<br/>mobile_uuid = C1"]
-        PA1["pending_attachments<br/>parent_uuid = P1<br/>top_parent_uuid = P1"]
-        PA2["pending_attachments<br/>parent_uuid = C1<br/>top_parent_uuid = P1"]
-        PU --- PA1
-        CU --- PA2
+flowchart TD
+    subgraph DEV["On device — uuids route the writeback"]
+        A1["N parent fields<br/>parent_uuid = P1"] --> W1["docs__order.photo = /files/a<br/>docs__order.scan = /files/b"]
+        A2["X child rows x M fields<br/>parent_uuid = C0..Cx"] --> W2["docs__order_item.receipt = /files/c<br/>(WHERE mobile_uuid = C0)"]
+        A1 --> U["N + X*M uploads<br/>-> N + X*M unattached File rows"]
+        A2 --> U
     end
-    subgraph Server
-        PD["Order / ORD-0001"]
-        CD["Order Item / abc123"]
-        F1["File (photo)<br/>attached_to = Order/ORD-0001"]
-        F2["File (receipt)<br/>attached_to = Order Item/abc123"]
-        PD --- F1
-        CD --- F2
+
+    W1 --> POST["POST document<br/>children nested inline"]
+    W2 --> POST
+    U --> SRV
+
+    subgraph SRV["On server — the url is the join key"]
+        POST --> SAVE["parent saved; child rows inserted<br/>Frappe assigns child names"]
+        SAVE --> H1["stock hook walks the PARENT's<br/>N attach fields"]
+        SAVE --> H2["relink_mobile_files walks<br/>X child rows x M fields"]
+        H1 --> L1["claims N File rows"]
+        H2 --> L2["claims X*M File rows,<br/>one per field"]
     end
-    PA1 -->|stock hook| F1
-    PA2 -->|relink_mobile_files| F2
-    PD -.->|parent| CD
+
+    style U fill:#1d3557,color:#fff
+    style L1 fill:#2d6a4f,color:#fff
+    style L2 fill:#2d6a4f,color:#fff
 ```
 
-**`top_parent_uuid` is what makes this one operation.** Every attachment — parent field or child-row field — is stamped with the **top parent's** `mobile_uuid` at enqueue (`local_writer::queueIfLocalAttachment` passes `topParentUuid: mobileUuid` while `parentUuid` is the row's own uuid). One query per outbox row therefore finds every attachment the document needs, at any nesting depth, and the push gate can block on all of them together. `parent_uuid` + `parent_doctype` + `parent_fieldname` remain the precise coordinate for the writeback, which targets the child's own `docs__<child>` table row.
+Three properties follow, and they are the reason this works at all:
+
+1. **Child-row identity never has to survive the round trip.** Frappe assigns child `name`s at insert time; the device's `C0`/`C1` uuids are irrelevant to relinking. The hook reads the child row *after* it is saved, so it uses the real server name.
+2. **Order and reordering do not matter.** Matching is by value, not position. A child table that Frappe renumbers, reorders, or renames still relinks correctly, because each field's own value is what locates its `File`.
+3. **Shared bytes still resolve one-to-one.** If two child rows hold the same url, there are two `File` rows for it (one per upload, §3a step 3), both unattached. The hook's `LIMIT 1` claims one per iteration, and the claimed row stops matching the `IS NULL` filter — so the second row gets the second `File`. The comment in `attachment_relink.py` calls this out explicitly.
+
+The failure mode to watch is the arithmetic: the hook claims **one `File` per attach field it walks**. If fewer unattached rows exist than fields referencing that url — an upload that never happened, or a `File` already claimed by an earlier save — the surplus fields are skipped and stay unlinked. The SDK's push gate is what keeps that from happening, by refusing to push until every attachment is `done`.
 
 ### What the SDK guarantees, and what it does not
 
@@ -169,7 +202,7 @@ flowchart LR
 | The bytes exist on the server before the document POST | **SDK** — the commitment boundary |
 | Identical bytes are stored once | **Frappe** — content-hash dedup |
 | A parent `Attach` / `Attach Image` field gets its `File` linked | **Frappe** — stock `on_update` hook |
-| A child-row attach field gets its `File` linked | **`mobile_control`** — `relink_mobile_files` |
+| A child-row attach field gets its `File` linked | **`mobile_control`** — `relink_mobile_files`, one `File` claimed per field |
 
 Two things follow that are worth stating plainly:
 
@@ -234,9 +267,9 @@ If the same photo is attached to M fields, each gets its own `pending_attachment
 
 - one set of bytes on the server,
 - one `media_cache` entry on the device (keyed by url; the second `moveToCache` finds the destination present, reports success, and discards its now-redundant staged copy),
-- but **one `File` record per field**, because the stock relink hook claims the unattached row for the first field and inserts a fresh record for the rest (§3a, step 3).
+- and **one `File` record per field** — one per upload — which is precisely what lets each field claim its own during relink (§3a, step 4).
 
-So the wasted work is the upload bandwidth, not storage on either side.
+So the wasted work is upload bandwidth, not storage on either side.
 
 ---
 
