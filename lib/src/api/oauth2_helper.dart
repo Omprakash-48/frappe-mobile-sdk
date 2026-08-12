@@ -189,6 +189,10 @@ class OAuth2Helper {
   /// Refreshes the access token using [refreshToken].
   ///
   /// [clientSecret] is required for confidential OAuth clients.
+  ///
+  /// THROWS rather than returning a response that is not a usable token. A
+  /// return from this method means "there is a live access token"; every other
+  /// outcome is an exception the caller classifies. See the two guards below.
   static Future<OAuth2TokenResponse> refreshToken({
     required String baseUrl,
     required String clientId,
@@ -205,7 +209,42 @@ class OAuth2Helper {
       body['client_secret'] = clientSecret;
     }
     final json = await _postFormEncoded(uri, body, 'OAuth refresh');
-    return OAuth2TokenResponse.fromJson(json);
+    // An RFC 6749 §5.2 error object. [exchangeCodeForToken] hits the SAME
+    // endpoint and has always checked for this on a 200, so the shape occurs;
+    // this leg never did, and `fromJson` happily produced an empty token from it.
+    //
+    // ONLY the `error` CODE travels into the exception. It is an RFC 6749 enum
+    // (`invalid_grant`, `invalid_client`, …), so it carries no PII and does not
+    // reopen the body-leak reason the rest of the body — `error_description`
+    // included — stays out (see [_postFormEncoded]). `AuthService`
+    // classifies on it via `isDefinitiveOAuthRejection`.
+    final error = json['error'];
+    if (error != null) {
+      throw ApiException(
+        'OAuth refresh rejected: $error',
+        null,
+        error.toString(),
+      );
+    }
+    final parsed = OAuth2TokenResponse.fromJson(_unwrapFrappeResponse(json));
+    // `OAuth2TokenResponse.fromJson` defaults a missing `access_token` to ''.
+    // Returning that made the caller store an empty token, call
+    // `setBearerToken('')` and report SUCCESS — after which
+    // `_doRefreshMobileAuthToken` ran `markSessionRecovered()`, clearing the
+    // dead-session latch and publishing `healthy` for a session that now 401s
+    // on every request. The mobile leg has always had this guard
+    // (`newAccessToken != null && newAccessToken.isNotEmpty`); this is its
+    // OAuth-leg equivalent, and it lives HERE so both callers get it — the
+    // reactive `_tryRefreshOAuthToken` and the launch-time `restoreSession`
+    // leg, which had the same hole.
+    //
+    // No status: a 200 that is not a token response says nothing about the
+    // grant, so callers must keep the tokens and arm a cooldown rather than
+    // treat it as a rejection.
+    if (parsed.accessToken.isEmpty) {
+      throw ApiException('OAuth refresh returned no access_token');
+    }
+    return parsed;
   }
 
   /// Verifies [accessToken] by calling the OpenID userinfo endpoint.

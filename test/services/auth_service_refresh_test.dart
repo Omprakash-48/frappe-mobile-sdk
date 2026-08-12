@@ -103,14 +103,22 @@ void main() {
 
     test('429 is NOT definitive — the limiter is per-user, so the token is '
         'still good and must survive the lockout', () {
-      expect(isDefinitiveRefreshRejection(ApiException('slow down', 429)),
-          isFalse);
+      expect(
+        isDefinitiveRefreshRejection(ApiException('slow down', 429)),
+        isFalse,
+      );
     });
 
     test('transport and 5xx are NOT definitive', () {
-      expect(isDefinitiveRefreshRejection(NetworkException('offline')), isFalse);
+      expect(
+        isDefinitiveRefreshRejection(NetworkException('offline')),
+        isFalse,
+      );
       expect(isDefinitiveRefreshRejection(ApiException('boom', 500)), isFalse);
-      expect(isDefinitiveRefreshRejection(FrappeException('no status')), isFalse);
+      expect(
+        isDefinitiveRefreshRejection(FrappeException('no status')),
+        isFalse,
+      );
     });
 
     test('the general auth classifier is NOT widened — 417 there would wipe '
@@ -119,6 +127,79 @@ void main() {
         isDefinitiveAuthRejection(ValidationException('bad payload')),
         isFalse,
       );
+    });
+  });
+
+  group('isDefinitiveOAuthRejection', () {
+    test('400 is definitive HERE — `get_token` forces it for a dead grant', () {
+      // The whole reason this predicate exists. oauthlib`s `invalid_grant`
+      // arrives in the response body and Frappe sets
+      // `http_status_code = 400` on it, so the status set the mobile leg uses
+      // ({401, 403, 417}) can never match an expired refresh token here.
+      expect(isDefinitiveOAuthRejection(ApiException('nope', 400)), isTrue);
+      expect(isDefinitiveOAuthRejection(ApiException('nope', 401)), isTrue);
+      expect(isDefinitiveOAuthRejection(ApiException('nope', 403)), isTrue);
+    });
+
+    test(
+      'an RFC 6749 grant-refusal code is definitive whatever the status',
+      () {
+        // The 200-with-error shape: no useful status, so the code decides.
+        for (final code in const [
+          'invalid_grant',
+          'invalid_client',
+          'unauthorized_client',
+          'invalid_scope',
+        ]) {
+          expect(
+            isDefinitiveOAuthRejection(
+              ApiException('rejected: $code', null, code),
+            ),
+            isTrue,
+            reason: '$code refuses the grant itself',
+          );
+        }
+      },
+    );
+
+    test('invalid_request is NOT definitive — that is an SDK bug, not a dead '
+        'credential', () {
+      expect(
+        isDefinitiveOAuthRejection(
+          ApiException('rejected: invalid_request', null, 'invalid_request'),
+        ),
+        isFalse,
+      );
+      expect(
+        isDefinitiveOAuthRejection(
+          ApiException('later', null, 'temporarily_unavailable'),
+        ),
+        isFalse,
+      );
+    });
+
+    test('transport, 5xx and 429 are NOT definitive', () {
+      expect(isDefinitiveOAuthRejection(NetworkException('offline')), isFalse);
+      expect(isDefinitiveOAuthRejection(ApiException('boom', 500)), isFalse);
+      expect(isDefinitiveOAuthRejection(ApiException('gateway', 502)), isFalse);
+      expect(
+        isDefinitiveOAuthRejection(ApiException('slow down', 429)),
+        isFalse,
+      );
+      expect(isDefinitiveOAuthRejection(FrappeException('no status')), isFalse);
+    });
+
+    test('417 is NOT adopted here, and 400 is NOT leaked into the shared '
+        'predicates', () {
+      // `get_token` does not emit 417; and on `mobile_auth.refresh_token` a 400
+      // is a malformed request, so widening the shared predicate would wipe a
+      // live token over a client-side defect.
+      expect(isDefinitiveOAuthRejection(ValidationException('meh')), isFalse);
+      expect(
+        isDefinitiveRefreshRejection(ApiException('bad body', 400)),
+        isFalse,
+      );
+      expect(isDefinitiveAuthRejection(ApiException('bad body', 400)), isFalse);
     });
   });
 }
