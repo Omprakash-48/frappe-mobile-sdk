@@ -16,6 +16,30 @@ That is harder than it looks, because the payload is rebuilt from the local mirr
 
 ---
 
+## 1a. Which flows this touches — it is **not** push-only
+
+A reasonable first assumption is that this is a sync/push feature. It is not. The work spans six flows, and only one of them is the push pipeline:
+
+| Flow | What changes here | Push pipeline involved? |
+|---|---|---|
+| **Pick** | size guard before staging, terminal/transient split, staging layout, inline upload when online | No |
+| **Save** | enqueue + marker write, size / MIME / original-name capture, re-pick file reclaim | No |
+| **Push** | upload, the commitment boundary, writeback, the gate, payload inlining, `rejected` | **Yes — this is it** |
+| **Read / preview** | `MediaResolver`, `media_cache`, lazy download, rendering from disk | No |
+| **Delete / discard** | staged-file reclaim on all three document-removal paths | No |
+| **Logout / wipe** | `MediaStore.clearAll` | No |
+| **Schema** | v6 → v7 `media_cache` | Cross-cutting |
+
+### The corollary worth internalising
+
+**For a fully-online user, the push pipeline's attachment half is inert.** An online pick uploads immediately and stores a real `file_url`; `isLocalAttachmentPath` excludes `/files/` and `/private/files/`, so `queueIfLocalAttachment` never fires, no `pending_attachments` row is ever created, and the gate passes trivially with nothing to resolve.
+
+That means the corruption this release fixes (§4) could **only ever** affect an attachment that was picked while offline or whose inline upload failed transiently. It was never reachable on a purely online device — which is also why it survived so long.
+
+The read path is the mirror image: it is entirely independent of push and runs for **every** document, including ones pulled from the server that this device never created.
+
+---
+
 ## 2. The commitment model
 
 Two rules carry the whole design:
@@ -533,6 +557,7 @@ The size guard runs **before** the durable copy is made, so an oversized pick ne
 - **Media storage is unbounded until logout.** There is no automatic eviction in this release. `size_bytes` and `last_accessed_at` are populated from day one so Phase 2's policy has real data, and `mediaStoreSize()` / `clearMediaCache()` exist so a host can expose usage and a manual clear meanwhile.
 - **No compression.** `pickImage` is called with no `imageQuality` / `maxWidth` / `maxHeight`, so a capture is full-resolution — 3–12 MB on a current phone. Frappe strips EXIF server-side and accepts `optimize` / `max_width` / `max_height` on `upload_file`, none of which the SDK sends yet.
 - **No background prefetch.** Media for a pulled document is cached on first view, not ahead of time.
+- **An ONLINE pick does not populate the cache.** `resolvePickedAttachment` deletes the staged copy after a successful inline upload rather than moving it into `cache/`, so a photo taken while online is uploaded and its local bytes discarded — previewing it later costs a download. Only the **push** path (offline pick, or a transient-failure fallback) promotes bytes into the cache via `moveToCache`. Closing this is a small change in the pick path, not a design change: the bytes, the url and the store are all already in hand at that point.
 - **The size limit is not host-configurable.** `kDefaultMaxAttachmentBytes` (10 MB) is the default for `resolvePickedAttachment`'s `maxBytes`, but the only callers are this SDK's own `AttachField` / `ImageField` and neither exposes an override. A deployment whose System Settings `max_file_size` differs will either refuse files the server would have accepted, or accept files it will reject at upload (which the pipeline then handles correctly as a terminal rejection — the document blocks with a named reason rather than corrupting). Making it configurable means threading a parameter through `FormScreen` -> `FormBuilder` -> `FieldFactory`, the same path `mediaResolver` takes.
 - **Child-row relinking depends on `mobile_control`.** See §3.
 - **Orphaned server `File` rows** after a delete or re-pick are not collected. See §8.
