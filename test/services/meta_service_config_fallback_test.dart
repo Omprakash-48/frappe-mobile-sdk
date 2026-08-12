@@ -199,6 +199,25 @@ void main() {
     test('an empty input yields an empty result', () async {
       expect(await svc.dropDeniedFormsForTest([]), isEmpty);
     });
+
+    test(
+      'a permission-table read failure keeps EVERY form (fails open)',
+      () async {
+        await seedPermission('Secret Ledger', read: false);
+        // The lookup is now one bulk query instead of one per doctype, so its
+        // failure mode is all-or-nothing. It must still fail OPEN: a workspace
+        // that shrinks because a local read failed is worse than a form that
+        // 403s per doctype. Closing the database is the cheapest real failure.
+        await appDb.close();
+        final kept = await svc.dropDeniedFormsForTest([
+          _form('Customer'),
+          _form('Secret Ledger'),
+        ]);
+        expect(kept.map((f) => f.mobileDoctype), ['Customer', 'Secret Ledger']);
+        // Reopen so tearDown's close() has something valid to close.
+        appDb = await AppDatabase.inMemoryDatabase();
+      },
+    );
   });
 
   test(

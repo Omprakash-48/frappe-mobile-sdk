@@ -17,6 +17,24 @@ class DoctypePermissionDao {
     return DoctypePermissionEntity.fromDb(maps.first);
   }
 
+  /// Doctypes with an EXPLICIT read denial — a cached row whose `can_read` is 0.
+  ///
+  /// Deliberately not "doctypes the user cannot read": an ABSENT row means
+  /// "never synced", which the read getters default to ALLOW, so a caller must
+  /// be able to tell the two apart. Only rows present and denied come back here.
+  ///
+  /// One query rather than a `findByDoctype` per candidate, and it filters in
+  /// SQL rather than through an `IN (...)` list, so it neither scales with the
+  /// caller's list length nor risks SQLite's bound-variable ceiling.
+  Future<Set<String>> findReadDeniedDoctypes() async {
+    final maps = await _database.query(
+      'doctype_permission',
+      columns: ['doctype'],
+      where: 'can_read = 0',
+    );
+    return {for (final row in maps) row['doctype'] as String};
+  }
+
   Future<void> upsert(DoctypePermissionEntity entity) async {
     await _database.insert(
       'doctype_permission',

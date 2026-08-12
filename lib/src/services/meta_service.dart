@@ -433,29 +433,29 @@ class MetaService {
   Future<List<MobileFormName>> _dropDeniedForms(
     List<MobileFormName> mobileFormNames,
   ) async {
+    // ONE query for the whole list. The affirmative-denial set is what this
+    // method needs, and asking for it directly keeps the subtract-only
+    // semantics intact: an absent row is not in the set, so it is kept.
+    final Set<String> readDenied;
+    try {
+      readDenied = await _database.doctypePermissionDao
+          .findReadDeniedDoctypes();
+    } catch (e, st) {
+      // A permission-table read failure must not shrink the workspace.
+      // Fail OPEN — keep every form and let the per-doctype 403 handle it.
+      sdkLog(
+        'MetaService._dropDeniedForms: permission lookup failed, keeping '
+        'every form — $e\n$st',
+      );
+      return mobileFormNames;
+    }
     final kept = <MobileFormName>[];
     final dropped = <String>[];
     for (final mfn in mobileFormNames) {
       final doctype = mfn.mobileDoctype;
-      if (doctype.isEmpty) {
-        kept.add(mfn);
+      if (doctype.isNotEmpty && readDenied.contains(doctype)) {
+        dropped.add(doctype);
         continue;
-      }
-      try {
-        final perm = await _database.doctypePermissionDao.findByDoctype(
-          doctype,
-        );
-        if (perm != null && !perm.read) {
-          dropped.add(doctype);
-          continue;
-        }
-      } catch (e, st) {
-        // A permission-table read failure must not shrink the workspace.
-        // Fail OPEN — keep the form and let the per-doctype 403 handle it.
-        sdkLog(
-          'MetaService._dropDeniedForms($doctype): permission lookup failed, '
-          'keeping the form — $e\n$st',
-        );
       }
       kept.add(mfn);
     }
