@@ -119,7 +119,16 @@ class FrappeSDK {
   /// Liveness of the stored credential. Null before [initialize]. Hosts should
   /// prompt for re-login on [SessionHealth.expired] and stay quiet on
   /// [SessionHealth.degraded], which clears by itself.
-  ValueNotifier<SessionHealth>? get sessionHealth => _authService?.sessionHealth;
+  ///
+  /// DELIBERATELY NOT disposed by [dispose], unlike the notifiers torn down
+  /// there. [dispose]'s contract keeps the instance reusable, and a host that
+  /// wired this notifier into a long-lived widget (an auth gate outliving one
+  /// SDK lifecycle is the normal shape) would get "used after dispose" on the
+  /// next rebuild. It holds no stream, subscription or timer, so leaving it
+  /// alive costs nothing; the [AuthService] that owns it is dropped with the
+  /// rest and a fresh [initialize] publishes a new one.
+  ValueNotifier<SessionHealth>? get sessionHealth =>
+      _authService?.sessionHealth;
 
   /// The tamper-detection service. Non-null after [initialize] completes.
   FrappeSecurityService get security {

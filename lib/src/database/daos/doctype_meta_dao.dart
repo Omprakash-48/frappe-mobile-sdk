@@ -215,9 +215,15 @@ class DoctypeMetaDao {
   /// cannot read it) or a meta 5xx (e.g. a doctype missing its server-side
   /// controller). This stops `isOfflineBootstrapComplete` and the workspace
   /// from requiring/showing a form the user can never load. No-op when the row
-  /// is absent or already not a mobile form. Self-healing: the next
-  /// `resyncMobileConfiguration` re-marks every configured form, so a transient
-  /// failure that slipped through is re-attempted on the following sync.
+  /// is absent or already not a mobile form.
+  ///
+  /// NOT self-healing within a session. `resyncMobileConfiguration` re-marks
+  /// every configured form and is the ONLY thing that re-promotes, but the SDK
+  /// calls it at login and `initialize()` — not per sync cycle. A doctype
+  /// demoted here therefore stays out of `getMobileFormDoctypeNames()` and out
+  /// of the workspace until the app is relaunched. Callers must classify
+  /// narrowly: see `PullEngine._isTerminalPullFailure`, which excludes the
+  /// gateway 5xx (502/503/504) for exactly this reason.
   Future<bool> demoteFromMobileForm(String doctype) async {
     final updated = await _database.update(
       'doctype_meta',

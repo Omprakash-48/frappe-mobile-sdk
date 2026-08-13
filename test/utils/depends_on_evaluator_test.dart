@@ -612,9 +612,7 @@ void main() {
     test('eval:!doc.district; matches the real Frappe read_only_depends_on '
         'for "block"', () {
       expect(
-        DependsOnEvaluator.evaluate('eval:!doc.district;', {
-          'district': 'D',
-        }),
+        DependsOnEvaluator.evaluate('eval:!doc.district;', {'district': 'D'}),
         isFalse, // district set -> not read-only -> editable
       );
       expect(DependsOnEvaluator.evaluate('eval:!doc.district;', {}), isTrue);
@@ -624,31 +622,24 @@ void main() {
       );
     });
 
-    test(
-      'eval:!doc.district || !doc.block; matches read_only_depends_on for '
-      '"village" across all four combinations',
-      () {
-        bool ro(Map<String, dynamic> d) =>
-            DependsOnEvaluator.evaluate('eval:!doc.district || !doc.block;', d);
+    test('eval:!doc.district || !doc.block; matches read_only_depends_on for '
+        '"village" across all four combinations', () {
+      bool ro(Map<String, dynamic> d) =>
+          DependsOnEvaluator.evaluate('eval:!doc.district || !doc.block;', d);
 
-        expect(ro({'district': 'D', 'block': 'B'}), isFalse);
-        expect(ro({'district': 'D', 'block': ''}), isTrue);
-        expect(ro({'district': '', 'block': 'B'}), isTrue);
-        expect(ro({'district': '', 'block': ''}), isTrue);
-      },
-    );
+      expect(ro({'district': 'D', 'block': 'B'}), isFalse);
+      expect(ro({'district': 'D', 'block': ''}), isTrue);
+      expect(ro({'district': '', 'block': 'B'}), isTrue);
+      expect(ro({'district': '', 'block': ''}), isTrue);
+    });
 
     test('eval:doc.some_check; truthy path with trailing semicolon', () {
       expect(
-        DependsOnEvaluator.evaluate('eval:doc.some_check;', {
-          'some_check': 1,
-        }),
+        DependsOnEvaluator.evaluate('eval:doc.some_check;', {'some_check': 1}),
         isTrue,
       );
       expect(
-        DependsOnEvaluator.evaluate('eval:doc.some_check;', {
-          'some_check': 0,
-        }),
+        DependsOnEvaluator.evaluate('eval:doc.some_check;', {'some_check': 0}),
         isFalse,
       );
       expect(DependsOnEvaluator.evaluate('eval:doc.some_check;', {}), isFalse);
@@ -657,15 +648,12 @@ void main() {
     test('regression: comparison operators with a trailing ; still work '
         '(already covered by _extractValue, must not regress)', () {
       expect(DependsOnEvaluator.evaluate('eval:doc.x == 1;', {'x': 1}), isTrue);
-      expect(DependsOnEvaluator.evaluate('eval:doc.x == 1;', {'x': 2}), isFalse);
       expect(
-        DependsOnEvaluator.evaluate('eval:doc.x != 1;', {'x': 2}),
-        isTrue,
+        DependsOnEvaluator.evaluate('eval:doc.x == 1;', {'x': 2}),
+        isFalse,
       );
-      expect(
-        DependsOnEvaluator.evaluate('eval:doc.x >= 3;', {'x': 3}),
-        isTrue,
-      );
+      expect(DependsOnEvaluator.evaluate('eval:doc.x != 1;', {'x': 2}), isTrue);
+      expect(DependsOnEvaluator.evaluate('eval:doc.x >= 3;', {'x': 3}), isTrue);
       // includes() has its own fully-anchored regex and never reached
       // _extractFieldName's bare-truthy path even before the fix — confirm
       // it is genuinely untouched (no trailing `;` support was added or
@@ -686,14 +674,10 @@ void main() {
     // from its stripped form too, so it was mistaken for a bare `doc.field`
     // reference and returned whole instead of falling through to the regex.
     test('bare eval:doc.x; still takes the fast path', () {
-      expect(
-        DependsOnEvaluator.extractEvalDocField('eval:doc.x;'),
-        'x',
-      );
+      expect(DependsOnEvaluator.extractEvalDocField('eval:doc.x;'), 'x');
     });
 
-    test(
-        'a complex expression ending in ; falls through to the doc.<field> '
+    test('a complex expression ending in ; falls through to the doc.<field> '
         'regex instead of returning the whole expression', () {
       expect(
         DependsOnEvaluator.extractEvalDocField(

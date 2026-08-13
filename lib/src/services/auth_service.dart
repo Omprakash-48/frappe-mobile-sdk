@@ -27,9 +27,15 @@ class AuthService {
   static const String _keyOAuthClientSecret = 'frappe_oauth_client_secret';
   static const String _keyMobileUuid = 'frappe_mobile_uuid';
 
-  final FlutterSecureStorage _storage = const FlutterSecureStorage(
-    mOptions: MacOsOptions(usesDataProtectionKeychain: false),
-  );
+  // Deliberately left on the plugin's DEFAULT options. A
+  // `MacOsOptions(usesDataProtectionKeychain: false)` override was added here
+  // and has been reverted: it moves macOS reads/writes to the legacy
+  // file-based keychain, so every already-stored credential becomes invisible
+  // and the user is silently logged out on upgrade. Nothing in this package
+  // needs it — `pubspec.yaml` declares `android` and `ios` only, and there is
+  // no macOS target anywhere in the repo. Do not reintroduce it without a
+  // migration path and an entry in "Notes for upgraders".
+  final FlutterSecureStorage _storage = const FlutterSecureStorage();
   static const Uuid _uuid = Uuid();
   FrappeClient? _client;
   bool _isAuthenticated = false;
@@ -102,7 +108,16 @@ class AuthService {
   DateTime Function() clock = DateTime.now;
 
   /// True when a refresh may be attempted right now.
-  @visibleForTesting
+  ///
+  /// NAMING — the `debug` prefix is historical and inaccurate: this and
+  /// [debugRecordTransientFailure] are PRODUCTION logic on the refresh path
+  /// ([_tryRefreshMobileAuthToken] gates every refresh on this), not test
+  /// seams. They are deliberately NOT renamed: `auth_service.dart` is
+  /// exported wholesale from the package barrel, so a rename is a
+  /// source-breaking change to public API, which is not worth spending on a
+  /// cosmetic fix. The `@visibleForTesting` annotation is dropped because it
+  /// was the actively misleading half — it claimed test-only for a method the
+  /// SDK itself depends on.
   bool debugRefreshAllowed() {
     if (_sessionDead) return false;
     final until = _refreshCooldownUntil;
@@ -110,8 +125,35 @@ class AuthService {
   }
 
   /// Records a non-definitive failure and arms the next cooldown.
-  @visibleForTesting
-  void debugRecordTransientFailure({required bool rateLimited}) {
+  ///
+  /// [transport] marks a failure that NEVER REACHED THE SERVER — offline, DNS,
+  /// socket, timeout. Those arm ONE short, non-climbing rung instead of
+  /// stepping the ladder, because the ladder exists to protect the backend's
+  /// per-user RATE LIMITER (see [_tryRefreshMobileAuthToken]) and a request
+  /// that never arrived cannot have consumed any of that budget. Climbing on
+  /// transport errors meant a spell offline ratcheted the gate to 15 minutes
+  /// and nothing lowered it when connectivity returned: the user was back
+  /// online and still locked out of refreshing, with no way to force it.
+  ///
+  /// A transport failure never SHORTENS a cooldown the server itself asked
+  /// for — an offline blip in the middle of a 429 lockout must not hand the
+  /// client an early retry.
+  ///
+  /// See [debugRefreshAllowed] on why the `debug` prefix stays despite this
+  /// being production logic.
+  void debugRecordTransientFailure({
+    required bool rateLimited,
+    bool transport = false,
+  }) {
+    if (transport) {
+      final shortRung = clock().add(_refreshBackoff.first);
+      final existing = _refreshCooldownUntil;
+      _refreshCooldownUntil = (existing != null && existing.isAfter(shortRung))
+          ? existing
+          : shortRung;
+      sessionHealth.value = SessionHealth.degraded;
+      return;
+    }
     final index = rateLimited
         ? _refreshBackoff.length - 1
         : _consecutiveRefreshFailures.clamp(0, _refreshBackoff.length - 1);
@@ -616,11 +658,42 @@ class AuthService {
           _isAuthenticated = true;
           return true;
         } catch (e, st) {
-          dev.log(
-            'restoreSession: OAuth refresh failed, clearing tokens — $e\n$st',
-            name: 'Auth',
-          );
-          await _clearOAuthTokens();
+          // Same classification as [_tryRefreshOAuthToken]. Wiping on ANY
+          // error here is worse than on the reactive path, because this runs
+          // at LAUNCH: an app opened offline destroyed a perfectly good OAuth
+          // grant before the user had done anything.
+          //
+          // [isDefinitiveOAuthRejection], not the shared refresh predicate:
+          // `get_token` answers a dead grant with 400, so the shared
+          // `{401, 403, 417}` set left the user at a login screen with a dead
+          // grant still in secure storage and `sessionHealth` reading healthy.
+          if (isDefinitiveOAuthRejection(e)) {
+            dev.log(
+              'restoreSession: OAuth grant rejected '
+              '(${e is FrappeException ? e.statusCode : '?'}), clearing tokens — $e\n$st',
+              name: 'Auth',
+            );
+            _expiredSessionEmail ??= _cachedUserInfo?.email;
+            _sessionDead = true;
+            sessionHealth.value = SessionHealth.expired;
+            await _clearOAuthTokens();
+          } else {
+            final status = e is FrappeException ? e.statusCode : null;
+            dev.log(
+              'restoreSession: OAuth refresh failed transiently, tokens '
+              'KEPT — $e\n$st',
+              name: 'Auth',
+            );
+            // Arm the cooldown here too. This branch previously logged and fell
+            // through, so a launch-time transport failure armed nothing and the
+            // first reactive 401 re-attempted the refresh immediately — the
+            // storm `debugRefreshAllowed` exists to prevent, entered through the
+            // one path that runs before the user has done anything.
+            debugRecordTransientFailure(
+              rateLimited: status == 429,
+              transport: e is NetworkException || status == null,
+            );
+          }
         }
       }
     }
@@ -631,6 +704,13 @@ class AuthService {
       try {
         _client!.auth.setApiKey(apiKey, apiSecret);
         _isAuthenticated = true;
+        // An API key/secret pair does not expire and needs no refresh, so this
+        // session IS healthy — whatever the OAuth leg above concluded about a
+        // credential we are no longer using. Without this, a transient OAuth
+        // failure (or a definitively dead grant) left a fully restored session
+        // publishing `degraded`/`expired` and a cooldown armed for a refresh
+        // path this credential never takes.
+        markSessionRecovered();
         return true;
       } catch (e, st) {
         dev.log(
@@ -922,7 +1002,10 @@ class AuthService {
                 await _database!.authTokenDao.deleteAll();
               } else {
                 final status = e is FrappeException ? e.statusCode : null;
-                debugRecordTransientFailure(rateLimited: status == 429);
+                debugRecordTransientFailure(
+                  rateLimited: status == 429,
+                  transport: e is NetworkException || status == null,
+                );
                 dev.log(
                   '_doRefreshMobileAuthToken: refresh failed (status=$status), '
                   'token kept, next attempt after $_refreshCooldownUntil — $e\n$st',
@@ -991,11 +1074,40 @@ class AuthService {
       _client?.rest.setBearerToken(refreshed.accessToken);
       return true;
     } catch (e, st) {
-      dev.log(
-        '_tryRefreshOAuthToken failed, clearing tokens — $e\n$st',
-        name: 'Auth',
-      );
-      await _clearOAuthTokens();
+      // Classify on the OAUTH statuses, not the mobile leg's. Previously this
+      // wiped on ANY error, so an OFFLINE user lost their OAuth grant and was
+      // stranded behind a login screen they could not reach; classifying it on
+      // the shared `{401, 403, 417}` set then inverted that into never wiping,
+      // because `get_token` answers a dead grant with 400 — so the grant was
+      // kept forever, `degraded` was published instead of `expired`, and the
+      // ladder climbed to 15 minutes with nothing able to clear it. See
+      // [isDefinitiveOAuthRejection].
+      if (isDefinitiveOAuthRejection(e)) {
+        dev.log(
+          '_tryRefreshOAuthToken: grant rejected '
+          '(${e is FrappeException ? e.statusCode : '?'}), clearing tokens — $e\n$st',
+          name: 'Auth',
+        );
+        // Best-effort identity: unlike the mobile leg there is no token ROW to
+        // read `user` from, so this is whatever the last successful auth
+        // cached. It may legitimately be null — hosts must handle `expired`
+        // with no email on this path rather than assume one is present.
+        _expiredSessionEmail ??= _cachedUserInfo?.email;
+        _sessionDead = true;
+        sessionHealth.value = SessionHealth.expired;
+        await _clearOAuthTokens();
+      } else {
+        final status = e is FrappeException ? e.statusCode : null;
+        dev.log(
+          '_tryRefreshOAuthToken: refresh failed (status=$status), '
+          'tokens KEPT — $e\n$st',
+          name: 'Auth',
+        );
+        debugRecordTransientFailure(
+          rateLimited: status == 429,
+          transport: e is NetworkException || status == null,
+        );
+      }
       return false;
     }
   }
@@ -1081,3 +1193,56 @@ bool isDefinitiveRefreshRejection(Object error) =>
     (error.statusCode == 401 ||
         error.statusCode == 403 ||
         error.statusCode == 417);
+
+/// RFC 6749 §5.2 error codes that refuse the GRANT itself, so no number of
+/// retries helps and only a fresh login recovers.
+///
+/// `invalid_request` is deliberately absent: a malformed token request is a bug
+/// in this client, not a statement about the stored credential, and wiping on it
+/// would log the user out over an SDK defect. `temporarily_unavailable` and
+/// `server_error` are absent for the obvious reason.
+const Set<String> _definitiveOAuthErrorCodes = <String>{
+  'invalid_grant',
+  'invalid_client',
+  'unauthorized_client',
+  'invalid_scope',
+};
+
+/// True only for a DEFINITIVE rejection of an **OAuth 2.0 refresh grant**.
+///
+/// Separate from [isDefinitiveRefreshRejection] because the two legs answer a
+/// dead credential with DIFFERENT statuses, and neither set is safe for the
+/// other:
+///
+/// * `frappe.integrations.oauth2.get_token` returns the oauthlib error object in
+///   the response body and forces **400** on it (`frappe.local.response
+///   ["http_status_code"] = 400`); `InvalidGrantError` is 400 in oauthlib too.
+///   So an expired or revoked refresh token arrives as 400 and the OAuth leg
+///   never produces 401/403/417 for the case that matters. Classifying it on
+///   [isDefinitiveRefreshRejection]'s `{401, 403, 417}` therefore made a
+///   permanently dead grant look transient: tokens kept, `degraded` published
+///   instead of `expired`, `_sessionDead` never latched, and the backoff ladder
+///   climbing to the 15-minute rung forever with no route to re-login.
+/// * 400 must NOT be added to the shared predicate: on
+///   `mobile_auth.refresh_token` a 400 is a malformed request, not a dead token.
+/// * 417 is NOT adopted here: it is Frappe's generic `/api/method` validation
+///   status, which this endpoint does not emit.
+///
+/// Two arms, because the status alone is not always available or sufficient:
+/// the RFC 6749 error code (which [OAuth2Helper.refreshToken] lifts out of the
+/// body for the 200-with-error shape), and the status set `{400, 401, 403}` for
+/// the non-200 case, where the body is deliberately never read. Every 5xx and
+/// every transport failure stay non-definitive in both arms, so an offline or
+/// transiently-failing client keeps its grant.
+bool isDefinitiveOAuthRejection(Object error) {
+  if (error is ApiException) {
+    final code = error.details;
+    if (code is String && _definitiveOAuthErrorCodes.contains(code)) {
+      return true;
+    }
+  }
+  return error is FrappeException &&
+      (error.statusCode == 400 ||
+          error.statusCode == 401 ||
+          error.statusCode == 403);
+}

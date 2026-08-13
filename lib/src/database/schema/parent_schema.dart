@@ -100,9 +100,7 @@ List<String> buildParentSchemaDDL(
   // Only `owner` is indexed: `creation` / `modified_by` are not primary
   // predicates, and every extra index costs write amplification on the bulk
   // inserts the pull path performs.
-  ddl.add(
-    'CREATE INDEX IF NOT EXISTS ix_${suffix}_owner ON $tableName(owner)',
-  );
+  ddl.add('CREATE INDEX IF NOT EXISTS ix_${suffix}_owner ON $tableName(owner)');
 
   final additional = chooseIndexes(
     meta,

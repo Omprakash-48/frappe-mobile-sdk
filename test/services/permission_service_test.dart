@@ -306,28 +306,31 @@ void main() {
       await db.close();
     });
 
-    test('a cache write re-arms reporting for a still-missing doctype', () async {
-      final db = await AppDatabase.inMemoryDatabase();
-      final missed = <String>[];
-      final svc = PermissionService(
-        FrappeClient('http://localhost'),
-        db,
-        onCacheMiss: missed.add,
-      );
+    test(
+      'a cache write re-arms reporting for a still-missing doctype',
+      () async {
+        final db = await AppDatabase.inMemoryDatabase();
+        final missed = <String>[];
+        final svc = PermissionService(
+          FrappeClient('http://localhost'),
+          db,
+          onCacheMiss: missed.add,
+        );
 
-      expect(await svc.canWrite('Never Synced'), isTrue);
-      expect(missed, ['Never Synced']);
+        expect(await svc.canWrite('Never Synced'), isTrue);
+        expect(missed, ['Never Synced']);
 
-      // Rows arrived, but not for this doctype — so it is genuinely still
-      // missing and worth surfacing again rather than staying silent for the
-      // rest of the process.
-      await svc.saveFromLoginResponse([
-        {'doctype': 'Customer', 'read': true},
-      ]);
-      expect(await svc.canWrite('Never Synced'), isTrue);
-      expect(missed, ['Never Synced', 'Never Synced']);
-      await db.close();
-    });
+        // Rows arrived, but not for this doctype — so it is genuinely still
+        // missing and worth surfacing again rather than staying silent for the
+        // rest of the process.
+        await svc.saveFromLoginResponse([
+          {'doctype': 'Customer', 'read': true},
+        ]);
+        expect(await svc.canWrite('Never Synced'), isTrue);
+        expect(missed, ['Never Synced', 'Never Synced']);
+        await db.close();
+      },
+    );
 
     test('a synced row is NOT reported as a miss', () async {
       final db = await AppDatabase.inMemoryDatabase();
