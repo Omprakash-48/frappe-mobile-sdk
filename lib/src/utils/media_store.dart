@@ -187,28 +187,6 @@ class MediaStore {
     }
   }
 
-  /// Total bytes across both directories. Drives the host-facing
-  /// "clear cached media" affordance while eviction is still unbuilt.
-  static Future<int> storeSizeBytes() async {
-    var total = 0;
-    for (final sub in const [kOutboxSubDir, kCacheSubDir]) {
-      final dir = Directory(p.join(await _root(), sub));
-      if (!await dir.exists()) continue;
-      await for (final e in dir.list(recursive: true, followLinks: false)) {
-        if (e is File) {
-          try {
-            total += await e.length();
-          } catch (err, st) {
-            sdkLog(
-              'MediaStore.storeSizeBytes: stat(${e.path}) failed — $err\n$st',
-            );
-          }
-        }
-      }
-    }
-    return total;
-  }
-
   /// Deletes the staged file behind a field value that is being REPLACED.
   ///
   /// A no-op unless the value is a path inside `outbox/`, so a `pending:<id>`

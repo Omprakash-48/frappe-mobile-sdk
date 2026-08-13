@@ -5,6 +5,12 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **`ImagePickSource` and `MediaStoreUsage` were described as host-facing in 2.0.0-beta.2 but never exported, so the pick-source hook could not be wired at all.** `FormScreen.imagePickSource` takes a callback that must *produce* an `ImagePickSource`, and neither the enum nor its `allowsGallery` / `allowsCamera` extension was reachable from `package:frappe_mobile_sdk/frappe_mobile_sdk.dart` — so a host had no way to name the value it was being asked to supply, short of an `implementation_imports` violation. Every layer inside the package was wired correctly (`FormScreen` → `FrappeFormBuilder` → `FieldFactory` → `ImageField`, on both the parent and child-table paths); the feature was complete internally and unreachable externally, which is the same shape as an implementation with no callers. `MediaStoreUsage` — the return type of `FrappeSDK.mediaStoreUsage()` — was in the same position but less severely: type inference still let a host *read* `usage.orphanBytes`, it simply could not store the value in a field, return it from its own function, or write the type anywhere. Both are now exported; no signature moved and nothing else changes. **The test suite could not have caught this, because every existing test imports `src/` directly** — precisely what a host may not do. A new test that imports only the public entry point now fails to compile if either export is dropped.
+
 ## [2.0.0-beta.2] - 2026-08-12
 
 Second prerelease on the 2.0 line. Everything below was previously staged under

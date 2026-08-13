@@ -2,6 +2,12 @@ import 'dart:io';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:frappe_mobile_sdk/src/utils/media_store.dart';
 
+/// Total bytes across both store directories. `MediaStore.usage` is the single
+/// size API; the referenced-set argument only affects orphan accounting, which
+/// `totalBytes` does not include.
+Future<int> storeSize() async =>
+    (await MediaStore.usage(const <String>{})).totalBytes;
+
 void main() {
   late Directory root;
 
@@ -118,20 +124,20 @@ void main() {
     },
   );
 
-  test('storeSizeBytes counts both directories', () async {
+  test('storeSize counts both directories', () async {
     final src = srcFile('IMG_4.jpg', '12345');
     final staged = await MediaStore.stageToOutbox(src, nameGen: () => 'm3');
-    expect(await MediaStore.storeSizeBytes(), 5);
+    expect(await storeSize(), 5);
     await MediaStore.moveToCache(staged, '/files/v.jpg');
     expect(
-      await MediaStore.storeSizeBytes(),
+      await storeSize(),
       5,
       reason: 'moving between dirs must not change the total',
     );
   });
 
-  test('storeSizeBytes is 0 when nothing has been stored', () async {
-    expect(await MediaStore.storeSizeBytes(), 0);
+  test('storeSize is 0 when nothing has been stored', () async {
+    expect(await storeSize(), 0);
   });
 
   test('clearAll removes both directories', () async {
@@ -143,7 +149,7 @@ void main() {
 
     await MediaStore.clearAll();
 
-    expect(await MediaStore.storeSizeBytes(), 0);
+    expect(await storeSize(), 0);
     expect(
       File(await MediaStore.cachePathFor('/files/w.jpg')).existsSync(),
       isFalse,

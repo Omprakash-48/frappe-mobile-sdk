@@ -20,6 +20,14 @@ export 'src/models/link_filter_result.dart';
 // outbox UI without reaching into `src/` via implementation_imports.
 export 'src/models/outbox_row.dart'
     show OutboxRow, OutboxState, OutboxOperation, ErrorCode, ErrorCodeHelpers;
+// Attachment media. Both types are REQUIRED on the public surface, not
+// conveniences: `FormScreen.imagePickSource` takes a callback the host must
+// PRODUCE an `ImagePickSource` from, which no amount of inference can supply,
+// and `FrappeSDK.mediaStoreUsage()` returns a `MediaStoreUsage` a host cannot
+// otherwise store in a field or return from its own function.
+export 'src/models/image_pick_source.dart'
+    show ImagePickSource, ImagePickSourceHelpers;
+export 'src/models/media_store_usage.dart' show MediaStoreUsage;
 
 // Database
 export 'src/database/app_database.dart';

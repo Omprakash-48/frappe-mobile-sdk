@@ -2,6 +2,12 @@ import 'dart:io';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:frappe_mobile_sdk/src/utils/media_store.dart';
 
+/// Total bytes across both store directories. `MediaStore.usage` is the single
+/// size API; the referenced-set argument only affects orphan accounting, which
+/// `totalBytes` does not include.
+Future<int> storeSize() async =>
+    (await MediaStore.usage(const <String>{})).totalBytes;
+
 /// The media store lives OUTSIDE SQLite, so `AppDatabase.clearAllData()` —
 /// which drops `media_cache` and `pending_attachments` — does not touch the
 /// files. Without an explicit wipe, one user's private survey photos stay
@@ -38,7 +44,7 @@ void main() {
 
     await MediaStore.clearAll();
 
-    expect(await MediaStore.storeSizeBytes(), 0);
+    expect(await storeSize(), 0);
     expect(
       File(await MediaStore.cachePathFor('/files/cached.jpg')).existsSync(),
       isFalse,
@@ -53,25 +59,25 @@ void main() {
 
   test('clearAll is safe when nothing has been stored', () async {
     await MediaStore.clearAll();
-    expect(await MediaStore.storeSizeBytes(), 0);
+    expect(await storeSize(), 0);
   });
 
   test('clearAll is idempotent', () async {
     await seedBothDirectories();
     await MediaStore.clearAll();
     await MediaStore.clearAll();
-    expect(await MediaStore.storeSizeBytes(), 0);
+    expect(await storeSize(), 0);
   });
 
   test(
-    'storeSizeBytes counts staged files nested under their pick directory',
+    'storeSize counts staged files nested under their pick directory',
     () async {
       // Staged files sit at outbox/<uid>/<name>, so a non-recursive walk would
       // report 0 and make the host's usage display permanently wrong.
       final src = File('${root.path}/a.bin')
         ..writeAsBytesSync(List.filled(64, 0));
       await MediaStore.stageToOutbox(src, nameGen: () => 'uid1');
-      expect(await MediaStore.storeSizeBytes(), 64);
+      expect(await storeSize(), 64);
     },
   );
 
@@ -106,6 +112,6 @@ void main() {
 
   test('clearCache is safe when nothing is cached', () async {
     await MediaStore.clearCache();
-    expect(await MediaStore.storeSizeBytes(), 0);
+    expect(await storeSize(), 0);
   });
 }
