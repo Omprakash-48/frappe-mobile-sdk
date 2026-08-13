@@ -311,6 +311,48 @@ void main() {
           expect(c.isDirty.value, isFalse);
         },
       );
+
+      // An EXPLICIT null is not the same question as an absent key, and it used
+      // to be the worse one. `_seedDefaults` keyed on `containsKey`, so
+      // `{'docstatus': null}` — how an unsaved doc is routinely assembled —
+      // stored the null and made `putIfAbsent` decline. `null == 0` is false,
+      // so the field was hidden and then stripped from the save: the same
+      // silent data loss as the payload-scope bug above, reached a different
+      // way. Seeding is on a non-null value now.
+      test('an EXPLICIT null docstatus behaves like an absent one', () {
+        final c = FormController(
+          meta: _meta([
+            DocField(
+              fieldname: 'draft_only',
+              fieldtype: 'Data',
+              dependsOn: 'eval:doc.docstatus == 0',
+            ),
+          ]),
+          initialData: const {'docstatus': null, 'draft_only': 'user value'},
+        );
+        expect(c.uiStateOf('draft_only').value.visible, isTrue);
+        final payload = c.buildSubmitData();
+        expect(payload['draft_only'], 'user value');
+        expect(payload.containsKey('docstatus'), isFalse);
+      });
+
+      test(
+        'an EXPLICIT null __islocal still derives from the missing name',
+        () {
+          final c = FormController(
+            meta: _meta([
+              DocField(
+                fieldname: 'new_only',
+                fieldtype: 'Data',
+                dependsOn: 'eval:doc.__islocal',
+              ),
+            ]),
+            initialData: const {'__islocal': null, 'new_only': 'v'},
+          );
+          expect(c.uiStateOf('new_only').value.visible, isTrue);
+          expect(c.buildSubmitData()['new_only'], 'v');
+        },
+      );
     });
 
     // ── regression: __islocal is derived from the absence of a name ─────────

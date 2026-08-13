@@ -119,7 +119,15 @@ class FormController extends ChangeNotifier {
   void _seedDefaults(Map<String, dynamic>? initialData) {
     if (initialData != null) {
       for (final k in _stdEvalFields) {
-        if (initialData.containsKey(k)) _rawValues[k] = initialData[k];
+        // Seed on a NON-NULL value, not on key presence. `{'docstatus': null}`
+        // is how an unsaved doc is routinely assembled, and keying on
+        // `containsKey` stored the null, which then made `putIfAbsent` below
+        // decline to fire. `eval:doc.docstatus == 0` read null == 0 -> false,
+        // so the field was hidden AND stripped from the save payload — the
+        // exact data-loss bug the std-field seeding exists to prevent,
+        // reintroduced through an explicit null. Same for `__islocal` at the
+        // guard below, which reads `_rawValues` and so inherits this.
+        if (initialData[k] != null) _rawValues[k] = initialData[k];
       }
     }
     // Every Frappe document has a docstatus — 0 while it is a draft — and
@@ -669,8 +677,11 @@ class FormController extends ChangeNotifier {
     // field beneath it. Evaluate against the doc, remove from the payload.
     final evalScope = <String, dynamic>{
       ...complete,
+      // Non-null, matching _seedDefaults: carrying an explicit null here would
+      // shadow DependsOnEvaluator._evalScope's `docstatus` default and put the
+      // payload sweep back on the wrong answer.
       for (final k in _stdEvalFields)
-        if (_rawValues.containsKey(k)) k: _rawValues[k],
+        if (_rawValues[k] != null) k: _rawValues[k],
     };
 
     // drop hidden-by-own-depends_on and hidden-by-container
