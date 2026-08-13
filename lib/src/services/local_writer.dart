@@ -250,6 +250,24 @@ class LocalWriter {
       required String fieldname,
     }) async {
       if (!kAttachmentFieldTypes.contains(fieldType)) return value;
+
+      // A CLEARED attach field (discarded by the user) must drop its queued
+      // row and staged file. Without this the row survives with the column
+      // emptied, and the push gate then blocks the document forever on an
+      // attachment nothing references — or, if it uploads, the writeback
+      // resurrects the url the user just removed.
+      //
+      // Scoped to null/empty ONLY, not "anything that is not a local path": a
+      // synced field holds `/files/...` and its `done` row is the writeback
+      // backstop, so widening this would delete that row on every unrelated
+      // re-save for no benefit.
+      final isCleared =
+          value == null || (value is String && value.trim().isEmpty);
+      if (isCleared) {
+        await _dropQueuedAttachment(txn, rowUuid, fieldname);
+        return value;
+      }
+
       if (!isLocalAttachmentPath(value)) return value;
       final path = (value as String).trim();
       // Idempotency: the (parent_uuid, parent_fieldname) index is not UNIQUE,
@@ -261,25 +279,9 @@ class LocalWriter {
       // destroyed and a fresh `pending` one takes its place, so it never
       // inherits a stale retry count or error. A rejected row is never
       // resurrected in place.
-      final priorRows = await txn.query(
-        'pending_attachments',
-        columns: ['local_path'],
-        where: 'parent_uuid = ? AND parent_fieldname = ?',
-        whereArgs: [rowUuid, fieldname],
-      );
-      await txn.delete(
-        'pending_attachments',
-        where: 'parent_uuid = ? AND parent_fieldname = ?',
-        whereArgs: [rowUuid, fieldname],
-      );
-      for (final r in priorRows) {
-        final prior = r['local_path'] as String?;
-        // `prior != path` matters: a re-save that re-supplies the SAME staged
-        // path must not delete the file it is about to queue.
-        if (prior != null && prior.isNotEmpty && prior != path) {
-          await MediaStore.deleteOutboxCopy(prior);
-        }
-      }
+      // `keepPath` matters: a re-save that re-supplies the SAME staged path
+      // must not delete the file it is about to queue.
+      await _dropQueuedAttachment(txn, rowUuid, fieldname, keepPath: path);
       // Size and MIME are derived HERE rather than carried from the pick:
       // the staged file is on disk and its path is the field value, so there is
       // nothing to plumb through the form. `fileName` is the staged basename,
@@ -599,5 +601,38 @@ class LocalWriter {
     final s = v.toString().trim();
     if (s.isEmpty) return null;
     return int.tryParse(s);
+  }
+}
+
+/// Deletes any queued attachment row for `(rowUuid, fieldname)` and its staged
+/// file.
+///
+/// Shared by the re-pick path (which replaces the row) and the discard path
+/// (which removes it outright). [keepPath] spares one path so a re-save that
+/// re-supplies the same staged file does not delete the bytes it is about to
+/// queue.
+Future<void> _dropQueuedAttachment(
+  Transaction txn,
+  String rowUuid,
+  String fieldname, {
+  String? keepPath,
+}) async {
+  final priorRows = await txn.query(
+    'pending_attachments',
+    columns: ['local_path'],
+    where: 'parent_uuid = ? AND parent_fieldname = ?',
+    whereArgs: [rowUuid, fieldname],
+  );
+  if (priorRows.isEmpty) return;
+  await txn.delete(
+    'pending_attachments',
+    where: 'parent_uuid = ? AND parent_fieldname = ?',
+    whereArgs: [rowUuid, fieldname],
+  );
+  for (final r in priorRows) {
+    final prior = r['local_path'] as String?;
+    if (prior != null && prior.isNotEmpty && prior != keepPath) {
+      await MediaStore.deleteOutboxCopy(prior);
+    }
   }
 }

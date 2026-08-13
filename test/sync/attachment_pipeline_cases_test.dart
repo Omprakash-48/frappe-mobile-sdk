@@ -288,4 +288,52 @@ void main() {
       expect(out['count'], 3);
     });
   });
+
+  group('the writeback must not clobber a value the user changed', () {
+    test('a field discarded mid-upload is NOT resurrected', () async {
+      await enqueue();
+      // The window that matters: the gate has read the row and the upload is
+      // in flight when the user discards. The column is cleared while the row
+      // is still present, so the dispatch runs to completion and writes back.
+      await db.update(
+        'docs__order',
+        {'photo': null},
+        where: 'mobile_uuid = ?',
+        whereArgs: ['P1'],
+      );
+
+      await pipeline().resolveForTopParent('P1');
+
+      expect(
+        await photoColumn(),
+        isNull,
+        reason: 'a completed upload must not restore a discarded attachment',
+      );
+    });
+
+    test('a re-pick mid-upload is NOT overwritten by the old upload', () async {
+      final first = await enqueue();
+      // User re-picks: the column now points at a DIFFERENT pending row.
+      await db.update(
+        'docs__order',
+        {'photo': 'pending:${first + 99}'},
+        where: 'mobile_uuid = ?',
+        whereArgs: ['P1'],
+      );
+
+      await pipeline().resolveForTopParent('P1');
+
+      expect(
+        await photoColumn(),
+        'pending:${first + 99}',
+        reason: "the old upload must not claim the new pick's slot",
+      );
+    });
+
+    test('the normal path still writes back', () async {
+      await enqueue();
+      await pipeline().resolveForTopParent('P1');
+      expect(await photoColumn(), '/files/ok.jpg');
+    });
+  });
 }

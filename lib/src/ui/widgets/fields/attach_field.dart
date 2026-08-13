@@ -244,7 +244,19 @@ class AttachField extends BaseField {
         // Padding(Text(field.label)) that used to live here was a
         // second copy that skipped the asterisk — removed for visual
         // consistency with text/numeric/etc field widgets.
-        final current = (fieldState.value ?? filePath)?.trim();
+        // `hasInteractedByUser` is the ONLY thing that distinguishes "the
+        // user cleared this" from "never touched". Trusting fieldState.value
+        // alone made a discard work but broke a value arriving AFTER the first
+        // build (an async document load): initialValue applies once, the
+        // field's key is stable so its State survives the rebuild, and the new
+        // widget value was ignored. Falling back unconditionally to the widget
+        // value — the previous behaviour — made an explicit clear impossible
+        // to represent instead. Neither alone is correct.
+        final current =
+            (fieldState.hasInteractedByUser
+                    ? fieldState.value
+                    : (filePath ?? fieldState.value))
+                ?.trim();
         final hasValue = current != null && current.isNotEmpty;
         // Resolve a `pending:<id>` marker to its durable local file (display
         // only; stored value stays the marker). Server URLs / local paths pass
@@ -359,6 +371,27 @@ class AttachField extends BaseField {
                 // read-only/disabled so users can always view an attachment
                 // (QA #11). Hidden for an unresolved pending pick (nothing to
                 // open yet).
+                // Discard. Shown only when there IS something to remove and
+                // the field is editable. A mandatory field can still be
+                // cleared — requiredValidator catches it at save, which is the
+                // right place; blocking the clear would trap a user who wants
+                // to replace via discard-then-pick.
+                if (hasValue && enabled && !field.readOnly)
+                  IconButton(
+                    tooltip: 'Remove attachment',
+                    icon: const Icon(Icons.close),
+                    onPressed: () async {
+                      // Clear FIRST. The user's action must take effect even if
+                      // reclaiming the bytes fails — a leftover file is an
+                      // orphan the sweep collects, whereas a failed reclaim
+                      // aborting this callback would leave the attachment in
+                      // place while the user believes it is gone.
+                      final discarded = current;
+                      fieldState.didChange(null);
+                      onChanged?.call(null);
+                      await MediaStore.discardValue(discarded);
+                    },
+                  ),
                 if (hasViewable)
                   // The RESOLVED path only ever replaces the view TARGET.
                   // Labels stay derived from `displaySource` (the value or the

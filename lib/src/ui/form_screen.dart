@@ -13,6 +13,7 @@ import '../models/outbox_row.dart';
 import '../models/workflow_transition.dart';
 import '../services/link_option_service.dart';
 import '../services/meta_service.dart';
+import '../models/image_pick_source.dart';
 import '../services/media_resolver.dart';
 import '../services/offline_repository.dart';
 import '../services/sync_controller.dart';
@@ -153,6 +154,11 @@ class FormScreen extends StatefulWidget {
   /// correctness holds even if the host does not supply this.
   final bool Function()? isOnline;
 
+  /// Host hook choosing which sources image fields offer — gallery, camera, or
+  /// both. Global across doctypes and fields, and read live so a host can flip
+  /// it from a setting without rebuilding. Null means both.
+  final ImagePickSource Function()? imagePickSource;
+
   const FormScreen({
     super.key,
     required this.meta,
@@ -189,6 +195,7 @@ class FormScreen extends StatefulWidget {
     this.onControllerReady,
     this.customFieldFactory,
     this.isOnline,
+    this.imagePickSource,
   });
 
   @override
@@ -1208,6 +1215,7 @@ class _FormScreenState extends State<FormScreen> with WidgetsBindingObserver {
                   // Read live through the repository so a mid-session toggle
                   // flip takes effect on the next pick.
                   isOfflineMode: () => widget.repository.offlineMode.enabled,
+                  imagePickSource: widget.imagePickSource,
                   fetchLinkedDocument: _fetchLinkedDocument,
                   getMeta: widget.metaService != null
                       ? (doctype) => widget.metaService!.getMeta(doctype)

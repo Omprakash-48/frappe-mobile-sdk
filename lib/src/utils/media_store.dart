@@ -220,12 +220,33 @@ class MediaStore {
   /// swaps the path for the marker inside the save transaction, and a failed
   /// enqueue rolls that transaction back. So a column holding a raw staged path
   /// has by construction never been saved and has no `pending_attachments` row.
+  /// BEST-EFFORT and never throws. Reclaiming bytes must not be able to fail
+  /// the user's action: a failure here leaves an orphan, which the sweep
+  /// reclaims later, whereas a thrown exception would abort the caller
+  /// mid-way — leaving the field un-cleared while the user believes otherwise.
   static Future<void> discardReplacedValue(String? previousValue) async {
     final v = previousValue?.trim();
     if (v == null || v.isEmpty) return;
-    if (!await isStagedPath(v)) return;
-    await deleteOutboxCopy(v);
+    try {
+      if (!await isStagedPath(v)) return;
+      await deleteOutboxCopy(v);
+    } catch (e, st) {
+      sdkLog('MediaStore.discardReplacedValue($v) failed — $e\n$st');
+    }
   }
+
+  /// Reclaims the local bytes behind a value the user has DISCARDED.
+  ///
+  /// Identical to [discardReplacedValue] — a staged file is deleted, anything
+  /// else is left alone. Named separately because the two call sites mean
+  /// different things: one replaces, one removes, and a reader should not have
+  /// to infer which from the argument.
+  ///
+  /// Clearing the FIELD is the caller's job, and deleting the queued row is
+  /// the save path's (`LocalWriter` drops it when the field arrives empty).
+  /// A synced file is left on the server, matching delete and re-pick.
+  static Future<void> discardValue(String? value) =>
+      discardReplacedValue(value);
 
   /// Files under `outbox/`, paired with their size. Absent directory -> empty.
   static Future<List<MapEntry<String, int>>> _outboxFiles() async {

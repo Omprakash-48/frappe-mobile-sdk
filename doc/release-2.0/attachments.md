@@ -555,6 +555,51 @@ The wipe is **destructive by design** — it also clears `outbox/`, which holds 
 | `AttachmentTooLargeException` | thrown at pick, carries `sizeBytes` and `limitBytes` |
 | `attachmentTooLargeMessage(e)` | user-facing message naming the real limit |
 | `ResolveMediaFn` | what the field widgets accept; pass `resolver.resolve` |
+| `FormScreen.imagePickSource` | host hook choosing gallery / camera / both for image fields; global, read live, null means both |
+
+### Discarding an attachment
+
+Both fields show a remove control whenever there is a value and the field is
+editable. A mandatory field can still be cleared — `requiredValidator` catches it
+at save, which is the right place; blocking the clear would trap a user who wants
+to replace via discard-then-pick.
+
+What happens depends on the value's shape, and the three cases differ:
+
+| Value | On discard |
+|---|---|
+| staged path (never saved) | staged file deleted, field cleared |
+| `pending:<id>` (saved, queued) | field cleared; the **save** drops the row and its staged file |
+| `/files/…` (synced) | field cleared only; the server `File` is left alone, as with delete and re-pick |
+
+Two things make this safe that are not obvious from the UI:
+
+**The field clears before the bytes are reclaimed.** A failure reclaiming leaves
+an orphan the sweep collects; a failure *aborting the clear* would leave the
+attachment in place while the user believes it is gone. The user's intent must
+not depend on a filesystem call succeeding.
+
+**Clearing a field drops its queued row.** `LocalWriter` deletes the
+`pending_attachments` row when an attach field arrives empty. Without that the
+row would survive with the column emptied, and the push gate would block the
+document forever on an attachment nothing references.
+
+**And the writeback is conditional on the marker still being present**
+(`WHERE mobile_uuid = ? AND <field> = 'pending:<id>'`). An upload that was
+already in flight when the user discarded would otherwise complete and rewrite
+the url into the column they just emptied — the same class of defect as the
+original marker bug: a write that assumes nothing changed underneath it.
+
+### Choosing the pick source
+
+`ImagePickSource` — `gallery`, `camera`, or `both` — supplied by a host hook that
+is global across doctypes and fields and read live, so it can be flipped from a
+setting without rebuilding. Null means `both`, so existing hosts are unaffected.
+`camera` removes the gallery route entirely, which is the point when a fresh
+capture is required and a stock image must not be submittable.
+
+Applies to `Attach Image` / `Image` only: `Attach` uses the system file picker,
+which has no gallery/camera distinction.
 
 ### Reclaim, and what can lose data
 
@@ -632,6 +677,7 @@ Where to look when changing any of this, and what each file is protecting.
 | `test/utils/media_store_sweep_test.dart` | Orphan rule end to end: row-backed and live-set files spared, `cache/` untouched, byte accounting, empty-store and vanishing-file safety. |
 | `test/sdk/media_reclaim_api_test.dart` | A queued attachment is never swept; a **failed** referenced-set query deletes nothing. |
 | `test/sdk/clear_media_cache_boundary_test.dart` | `clearMediaCache()` spares `outbox/` files and `pending_attachments` rows. |
+| `test/ui/widgets/fields/image_pick_source_test.dart` | The source hook gates each button; discard clears value AND UI; a late-arriving host value still renders. |
 | `test/ui/widgets/fields/attach_field_replace_test.dart` | Re-pick reclaims the replaced file; host paths, `pending:` markers and cache paths are never deleted. |
 | `test/api/attachment_service_test.dart` | The `doctype` / `docname` / `file_name` keys, and that the multipart part carries the **original** filename. |
 

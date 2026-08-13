@@ -269,4 +269,94 @@ void main() {
       );
     },
   );
+
+  test(
+    'CLEARING an attach field deletes its queued row and staged file',
+    () async {
+      // Without this the row survives with the column emptied, and the push gate
+      // then blocks the document forever on an attachment nothing references.
+      final root = await Directory.systemTemp.createTemp('cleared');
+      MediaStore.overrideRootForTest(root.path);
+      addTearDown(() async {
+        MediaStore.overrideRootForTest(null);
+        if (await root.exists()) await root.delete(recursive: true);
+      });
+
+      final picked = File('${root.path}/p.jpg')..writeAsStringSync('P');
+      final staged = await MediaStore.stageToOutbox(
+        picked,
+        nameGen: () => 'u1',
+      );
+
+      final first = saveData();
+      first['photo'] = staged;
+      await writer.writeParent(parentDoctype: 'Order', data: first);
+      expect(
+        (await db.query(
+          'pending_attachments',
+          where: 'parent_fieldname = ?',
+          whereArgs: ['photo'],
+        )).length,
+        1,
+      );
+
+      // The user discards the attachment and saves again.
+      final second = saveData();
+      second['photo'] = null;
+      await writer.writeParent(parentDoctype: 'Order', data: second);
+
+      expect(
+        await db.query(
+          'pending_attachments',
+          where: 'parent_fieldname = ?',
+          whereArgs: ['photo'],
+        ),
+        isEmpty,
+        reason: 'a cleared field must not leave a queued attachment behind',
+      );
+      expect(File(staged).existsSync(), isFalse, reason: 'and not its bytes');
+      expect((await db.query('docs__order')).single['photo'], isNull);
+    },
+  );
+
+  test('an empty string clears just like null', () async {
+    final root = await Directory.systemTemp.createTemp('cleared2');
+    MediaStore.overrideRootForTest(root.path);
+    addTearDown(() async {
+      MediaStore.overrideRootForTest(null);
+      if (await root.exists()) await root.delete(recursive: true);
+    });
+    final picked = File('${root.path}/p.jpg')..writeAsStringSync('P');
+    final staged = await MediaStore.stageToOutbox(picked, nameGen: () => 'u2');
+
+    final first = saveData();
+    first['photo'] = staged;
+    await writer.writeParent(parentDoctype: 'Order', data: first);
+    final second = saveData();
+    second['photo'] = '';
+    await writer.writeParent(parentDoctype: 'Order', data: second);
+
+    expect(
+      await db.query(
+        'pending_attachments',
+        where: 'parent_fieldname = ?',
+        whereArgs: ['photo'],
+      ),
+      isEmpty,
+    );
+  });
+
+  test('a SYNCED field re-saved unchanged keeps its done row', () async {
+    // The rule is scoped to null/empty only. Widening it to "anything that is
+    // not a local path" would delete the done row on every unrelated re-save,
+    // losing the writeback backstop for no benefit.
+    final data = saveData();
+    data['photo'] = '/files/already.jpg';
+    await writer.writeParent(parentDoctype: 'Order', data: data);
+    await writer.writeParent(parentDoctype: 'Order', data: data);
+    expect(
+      (await db.query('docs__order')).single['photo'],
+      '/files/already.jpg',
+    );
+  });
 }

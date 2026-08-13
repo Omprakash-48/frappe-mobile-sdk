@@ -9,6 +9,7 @@ import '../../../models/link_filter_result.dart';
 import '../../../services/link_option_service.dart';
 import '../../../services/link_field_coordinator.dart';
 import 'attach_field.dart';
+import '../../../models/image_pick_source.dart';
 import '../../../services/media_resolver.dart';
 import 'base_field.dart';
 import 'button_field.dart';
@@ -117,6 +118,7 @@ class FieldFactory {
     Map<int, String>? pendingAttachmentPaths,
     ResolveMediaFn? mediaResolver,
     bool Function()? isOfflineMode,
+    ImagePickSource Function()? imagePickSource,
   }) {
     if (field.hidden) {
       return null;
@@ -332,6 +334,7 @@ class FieldFactory {
           pendingAttachmentPaths: pendingAttachmentPaths,
           mediaResolver: mediaResolver,
           isOfflineMode: isOfflineMode,
+          imagePickSource: imagePickSource,
         );
 
       case FieldTypes.html:

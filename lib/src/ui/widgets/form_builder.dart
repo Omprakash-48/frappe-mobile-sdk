@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_form_builder/flutter_form_builder.dart';
 import '../../models/doc_type_meta.dart';
+import '../../models/image_pick_source.dart';
 import '../../services/media_resolver.dart';
 import '../../models/doc_field.dart';
 import '../../models/link_filter_result.dart';
@@ -229,6 +230,9 @@ class FrappeFormBuilder extends StatefulWidget {
   /// inline. See [AttachField.isOfflineMode].
   final bool Function()? isOfflineMode;
 
+  /// Which pick sources image fields offer. Null means both.
+  final ImagePickSource Function()? imagePickSource;
+
   /// Fetches a linked document by doctype and name (for fetch_from).
   /// Try local repository first, then server. Return null if not found.
   final Future<Map<String, dynamic>?> Function(
@@ -325,6 +329,7 @@ class FrappeFormBuilder extends StatefulWidget {
     this.pendingAttachmentPaths,
     this.mediaResolver,
     this.isOfflineMode,
+    this.imagePickSource,
   });
 
   @override
@@ -1392,6 +1397,7 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
       pendingAttachmentPaths: widget.pendingAttachmentPaths,
       mediaResolver: widget.mediaResolver,
       isOfflineMode: widget.isOfflineMode,
+      imagePickSource: widget.imagePickSource,
       getMeta: widget.getMeta,
       parentFormData: effectiveParentFormData,
       getLinkFilterBuilder: widget.getLinkFilterBuilder,
@@ -1412,6 +1418,7 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
                   pendingAttachmentPaths: widget.pendingAttachmentPaths,
                   mediaResolver: widget.mediaResolver,
                   isOfflineMode: widget.isOfflineMode,
+                  imagePickSource: widget.imagePickSource,
                   // fetch linked document for child doctype.
                   fetchLinkedDocument: widget.fetchLinkedDocument,
                   translate: widget.translate,
@@ -2239,6 +2246,7 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
           pendingAttachmentPaths: widget.pendingAttachmentPaths,
           mediaResolver: widget.mediaResolver,
           isOfflineMode: widget.isOfflineMode,
+          imagePickSource: widget.imagePickSource,
           getMeta: widget.getMeta,
           getLinkFilterBuilder: widget.getLinkFilterBuilder,
           onButtonPressed: widget.onButtonPressed,
@@ -2264,6 +2272,7 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
                       pendingAttachmentPaths: widget.pendingAttachmentPaths,
                       mediaResolver: widget.mediaResolver,
                       isOfflineMode: widget.isOfflineMode,
+                      imagePickSource: widget.imagePickSource,
                       fetchLinkedDocument: widget.fetchLinkedDocument,
                       translate: widget.translate,
                       onButtonPressed: widget.onButtonPressed,

@@ -7,6 +7,7 @@ import '../database/daos/media_cache_dao.dart';
 import '../database/daos/pending_attachment_dao.dart';
 import '../models/media_cache_entry.dart';
 import '../models/pending_attachment.dart';
+import '../utils/attachment_paths.dart';
 import '../utils/media_store.dart';
 import '../utils/sdk_log.dart';
 import 'attachment_error_classifier.dart';
@@ -230,11 +231,24 @@ class AttachmentPipeline {
         serverFileUrl: resolvedUrl,
       );
       if (table != null) {
+        // CONDITIONAL on the column still holding THIS row's marker.
+        //
+        // An unconditional update assumes nothing changed underneath it, which
+        // is the same mistake that produced the original marker bug. If the
+        // user discarded the attachment or re-picked while this upload was in
+        // flight, the column no longer holds `pending:<id>` — writing anyway
+        // would resurrect a discarded file, or let an old upload claim the new
+        // pick's slot. Matching nothing is the correct outcome there.
+        //
+        // Every legitimate path still matches: the normal case and the
+        // crash-then-resume case both have the marker in the column. A re-run
+        // after the writeback already landed finds the url instead and
+        // correctly no-ops.
         await txn.update(
           table,
           <String, Object?>{p.parentFieldname: resolvedUrl},
-          where: 'mobile_uuid = ?',
-          whereArgs: [p.parentUuid],
+          where: 'mobile_uuid = ? AND "${p.parentFieldname}" = ?',
+          whereArgs: [p.parentUuid, '$kPendingMarkerPrefix${p.id}'],
         );
       }
       if (cachedPath.isNotEmpty) {

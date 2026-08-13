@@ -7,6 +7,7 @@ import 'package:flutter_form_builder/flutter_form_builder.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:path_provider/path_provider.dart';
 import '../../../models/doc_field.dart';
+import '../../../models/image_pick_source.dart';
 import '../../../services/media_resolver.dart';
 import '../../../sync/attachment_error_classifier.dart';
 import '../../../utils/attachment_paths.dart';
@@ -154,6 +155,9 @@ class ImageField extends BaseField {
   /// "not offline mode", preserving the previous behaviour.
   final bool Function()? isOfflineMode;
 
+  /// Which pick sources to offer. Null means [ImagePickSource.both].
+  final ImagePickSource Function()? imagePickSource;
+
   const ImageField({
     super.key,
     required super.field,
@@ -168,6 +172,7 @@ class ImageField extends BaseField {
     this.pendingAttachmentPaths,
     this.mediaResolver,
     this.isOfflineMode,
+    this.imagePickSource,
   });
 
   /// Only Frappe server file paths or full URLs are treated as server URLs.
@@ -410,7 +415,17 @@ class ImageField extends BaseField {
           ? (value) => requiredValidator(value, field.displayLabel)
           : null,
       builder: (FormFieldState<String> fieldState) {
-        final raw = fieldState.value ?? imagePath;
+        // `hasInteractedByUser` is the ONLY thing that distinguishes "the
+        // user cleared this" from "never touched". Trusting fieldState.value
+        // alone made a discard work but broke a value arriving AFTER the first
+        // build (an async document load): initialValue applies once, the
+        // field's key is stable so its State survives the rebuild, and the new
+        // widget value was ignored. Falling back unconditionally to the widget
+        // value — the previous behaviour — made an explicit clear impossible
+        // to represent instead. Neither alone is correct.
+        final raw = fieldState.hasInteractedByUser
+            ? fieldState.value
+            : (imagePath ?? fieldState.value);
         final currentValue = raw?.toString().trim();
         // Resolve a `pending:<id>` marker to its durable local file for the
         // preview ONLY; the stored value stays `currentValue`. Server URLs and
@@ -531,104 +546,138 @@ class ImageField extends BaseField {
               ),
             Row(
               children: [
-                OutlinedButton.icon(
-                  onPressed: enabled && !field.readOnly
-                      ? () async {
-                          // pickImage throws on a denied gallery permission —
-                          // a routine case, not an edge one. Unguarded it became
-                          // an unhandled async error from onPressed with nothing
-                          // shown to the user.
-                          final messenger = ScaffoldMessenger.of(context);
-                          try {
+                if ((imagePickSource?.call() ?? ImagePickSource.both)
+                    .allowsGallery)
+                  OutlinedButton.icon(
+                    onPressed: enabled && !field.readOnly
+                        ? () async {
+                            // pickImage throws on a denied gallery permission —
+                            // a routine case, not an edge one. Unguarded it became
+                            // an unhandled async error from onPressed with nothing
+                            // shown to the user.
+                            final messenger = ScaffoldMessenger.of(context);
+                            try {
+                              final picker = ImagePicker();
+                              final result = await picker.pickImage(
+                                source: ImageSource.gallery,
+                              );
+                              if (result != null) {
+                                await _onImagePicked(
+                                  fieldState,
+                                  File(result.path),
+                                  messenger: messenger,
+                                );
+                              }
+                            } catch (e, st) {
+                              sdkLog(
+                                'ImageField: gallery pick failed — $e\n$st',
+                              );
+                              _notify(
+                                messenger,
+                                'Could not open the gallery. Check photo '
+                                'permissions in Settings.',
+                              );
+                            }
+                          }
+                        : null,
+                    icon: const Icon(Icons.photo_library),
+                    label: const Text('Gallery'),
+                  ),
+                if ((imagePickSource?.call() ?? ImagePickSource.both) ==
+                    ImagePickSource.both)
+                  const SizedBox(width: 8),
+                if ((imagePickSource?.call() ?? ImagePickSource.both)
+                    .allowsCamera)
+                  OutlinedButton.icon(
+                    onPressed: enabled && !field.readOnly
+                        ? () async {
+                            final messenger = ScaffoldMessenger.of(context);
                             final picker = ImagePicker();
-                            final result = await picker.pickImage(
-                              source: ImageSource.gallery,
-                            );
-                            if (result != null) {
-                              await _onImagePicked(
-                                fieldState,
-                                File(result.path),
-                                messenger: messenger,
-                              );
+                            // Android can kill the host activity mid-capture
+                            // and stash the result; without recovering it the
+                            // FIRST capture is silently dropped and users must
+                            // shoot twice ("camera-twice" bug). The stash is
+                            // app-wide, so only the field named by the marker
+                            // written before that capture may claim it —
+                            // otherwise field B's tap could pick up field A's
+                            // photo.
+                            if (await _restoreInterruptedCapture(
+                              context,
+                              picker,
+                              fieldState,
+                            )) {
+                              return;
                             }
-                          } catch (e, st) {
-                            sdkLog('ImageField: gallery pick failed — $e\n$st');
-                            _notify(
-                              messenger,
-                              'Could not open the gallery. Check photo '
-                              'permissions in Settings.',
-                            );
-                          }
-                        }
-                      : null,
-                  icon: const Icon(Icons.photo_library),
-                  label: const Text('Gallery'),
-                ),
-                const SizedBox(width: 8),
-                OutlinedButton.icon(
-                  onPressed: enabled && !field.readOnly
-                      ? () async {
-                          final messenger = ScaffoldMessenger.of(context);
-                          final picker = ImagePicker();
-                          // Android can kill the host activity mid-capture
-                          // and stash the result; without recovering it the
-                          // FIRST capture is silently dropped and users must
-                          // shoot twice ("camera-twice" bug). The stash is
-                          // app-wide, so only the field named by the marker
-                          // written before that capture may claim it —
-                          // otherwise field B's tap could pick up field A's
-                          // photo.
-                          if (await _restoreInterruptedCapture(
-                            context,
-                            picker,
-                            fieldState,
-                          )) {
-                            return;
-                          }
-                          await _writeCaptureMarker();
-                          try {
-                            final result = await picker.pickImage(
-                              source: ImageSource.camera,
-                            );
-                            if (result != null) {
-                              // A photo came back inside this run, so nothing is
-                              // stashed — the marker has done its job.
+                            await _writeCaptureMarker();
+                            try {
+                              final result = await picker.pickImage(
+                                source: ImageSource.camera,
+                              );
+                              if (result != null) {
+                                // A photo came back inside this run, so nothing is
+                                // stashed — the marker has done its job.
+                                await _clearCaptureMarker();
+                                await _onImagePicked(
+                                  fieldState,
+                                  File(result.path),
+                                  messenger: messenger,
+                                );
+                              }
+                              // A null result is ambiguous: the user cancelled, OR
+                              // Android recreated the activity and stashed the
+                              // photo (pickImage then completes with null). The
+                              // marker is deliberately LEFT in place — clearing it
+                              // here would make that stashed photo unrecoverable,
+                              // which is the very bug this marker exists to fix.
+                              // A plain cancel costs one empty retrieveLostData()
+                              // on the next tap, and the age bound expires it.
+                            } catch (e, st) {
                               await _clearCaptureMarker();
-                              await _onImagePicked(
-                                fieldState,
-                                File(result.path),
-                                messenger: messenger,
+                              // Previously rethrown from inside onPressed — an
+                              // unhandled async error with no user-visible
+                              // message. A denied camera permission is the common
+                              // trigger, so report it instead of crashing the
+                              // zone.
+                              sdkLog(
+                                'ImageField: camera capture failed — $e\n$st',
+                              );
+                              _notify(
+                                messenger,
+                                'Could not open the camera. Check camera '
+                                'permissions in Settings.',
                               );
                             }
-                            // A null result is ambiguous: the user cancelled, OR
-                            // Android recreated the activity and stashed the
-                            // photo (pickImage then completes with null). The
-                            // marker is deliberately LEFT in place — clearing it
-                            // here would make that stashed photo unrecoverable,
-                            // which is the very bug this marker exists to fix.
-                            // A plain cancel costs one empty retrieveLostData()
-                            // on the next tap, and the age bound expires it.
-                          } catch (e, st) {
-                            await _clearCaptureMarker();
-                            // Previously rethrown from inside onPressed — an
-                            // unhandled async error with no user-visible
-                            // message. A denied camera permission is the common
-                            // trigger, so report it instead of crashing the
-                            // zone.
-                            sdkLog(
-                              'ImageField: camera capture failed — $e\n$st',
-                            );
-                            _notify(
-                              messenger,
-                              'Could not open the camera. Check camera '
-                              'permissions in Settings.',
-                            );
                           }
-                        }
-                      : null,
-                  icon: const Icon(Icons.camera_alt),
-                  label: const Text('Camera'),
-                ),
+                        : null,
+                    icon: const Icon(Icons.camera_alt),
+                    label: const Text('Camera'),
+                  ),
+                // Discard. Only when there IS something to remove and the
+                // field is editable. A mandatory field can still be cleared —
+                // requiredValidator catches it at save, which is the right
+                // place; blocking the clear would trap a user who wants to
+                // replace via discard-then-pick.
+                if (currentValue != null &&
+                    currentValue.isNotEmpty &&
+                    enabled &&
+                    !field.readOnly) ...[
+                  const SizedBox(width: 8),
+                  IconButton(
+                    tooltip: 'Remove photo',
+                    icon: const Icon(Icons.close),
+                    onPressed: () async {
+                      // Clear FIRST. The user's action must take effect even if
+                      // reclaiming the bytes fails — a leftover file is an
+                      // orphan the sweep collects, whereas a failed reclaim
+                      // aborting this callback would leave the attachment in
+                      // place while the user believes it is gone.
+                      final discarded = currentValue;
+                      fieldState.didChange(null);
+                      onChanged?.call(null);
+                      await MediaStore.discardValue(discarded);
+                    },
+                  ),
+                ],
               ],
             ),
             fieldErrorText(fieldState),
