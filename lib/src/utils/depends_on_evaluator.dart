@@ -72,8 +72,13 @@ class DependsOnEvaluator {
   /// `read_only_depends_on` must default false when absent.
   ///
   /// [defaultWhenEmpty] is ALSO the fallback when a non-empty expression fails
-  /// to evaluate. Defaulting an unparseable `mandatory_depends_on` to true
-  /// would make a field permanently mandatory with no way to satisfy it.
+  /// to evaluate: it is forwarded to [evaluate] as `defaultOnError`. The two
+  /// questions — an ABSENT expression and a PRESENT but unparseable one — get
+  /// the same answer here deliberately, because every caller wants them to.
+  /// Defaulting an unparseable `mandatory_depends_on` to true would make a
+  /// field permanently mandatory with no way to satisfy it, and an unparseable
+  /// `read_only_depends_on` would make it permanently uneditable; both callers
+  /// already pass `false` for the absent case. See [evaluate].
   static bool evaluate2(
     String? expr,
     Map<String, dynamic> data,
@@ -214,6 +219,20 @@ class DependsOnEvaluator {
   @visibleForTesting
   static void resetLogGateForTest() => _loggedFailures.clear();
 
+  /// An expression that is NOTHING but one `doc.<fieldname>` reference, with an
+  /// optional trailing statement terminator. The fieldname shape matches the
+  /// reference regex in [extractEvalDocField]'s fallback, so both paths agree on
+  /// what a fieldname may contain.
+  ///
+  /// The trailing `;` is tolerated because Frappe `link_filters` /
+  /// `depends_on` values are sometimes authored as `eval:doc.x;`, and a Frappe
+  /// fieldname can never contain `;`, so this cannot mis-fire. [evaluate] needs
+  /// no equivalent: `js_expression.dart` already parses a trailing `;` as
+  /// expression-statement punctuation.
+  static final RegExp _bareDocFieldRef = RegExp(
+    r'^doc\.([A-Za-z_][A-Za-z0-9_]*)\s*;?\s*$',
+  );
+
   /// Extract `doc.fieldname` from an eval expression like `eval:doc.x` or
   /// `eval: doc.x`. Returns the field name, or null if the value is not an
   /// `eval:doc` expression.
@@ -226,39 +245,25 @@ class DependsOnEvaluator {
     if (value.startsWith('eval:')) {
       expr = value.substring(5).trimLeft();
     }
-    final fieldName = _extractFieldName(expr);
-    // Only take the fast path when the expression — after stripping an optional
-    // trailing `;` — is NOTHING but a bare `doc.field` reference. Comparing
-    // `expr != fieldName` alone is not enough: [_extractFieldName] also strips a
-    // trailing `;`, so a complex expression that merely ends in `;` (e.g.
-    // wrapped in `.replace(...)`) would look "changed" too and be mistaken for a
-    // bare reference, returning the whole expression instead of falling through
-    // to the regex below.
-    if (_stripTrailingSemicolon(expr) == 'doc.$fieldName') return fieldName;
+    // Fast path ONLY when the whole expression is a bare `doc.<fieldname>`
+    // reference (optional trailing `;`). The gate anchors on the FIELDNAME
+    // SHAPE, and that is what makes it correct.
+    //
+    // The previous gate compared the expression against a helper that returned
+    // whatever remained after stripping a leading `doc.`, with no check that the
+    // remainder is a legal fieldname. For `doc.a && doc.b` it returned
+    // `a && doc.b`, which reassembles to exactly `doc.a && doc.b`, so the
+    // equality held and the fast path handed back `a && doc.b` AS A FIELDNAME.
+    // No such field exists, so the caller's dependency lookup found nothing and
+    // the link picker silently stopped filtering — the failure mode looks like
+    // "no filter", not like an error.
+    final bare = _bareDocFieldRef.firstMatch(expr);
+    if (bare != null) return bare.group(1);
     // The whole expression isn't a bare `doc.field` reference (e.g. it's wrapped
     // in a JS call like `(doc.x||'').replace(/.../, '')`). Fall back to the
     // first `doc.<field>` reference anywhere in the string so dependent-field
     // detection — the Link field's "select X first" hint — still works for these
     // more complex link_filters values.
     return RegExp(r'doc\.([A-Za-z_][A-Za-z0-9_]*)').firstMatch(expr)?.group(1);
-  }
-
-  /// Drops a trailing statement terminator. Frappe `link_filters` / `depends_on`
-  /// values are sometimes authored as `eval:doc.x;`, and a Frappe fieldname can
-  /// never contain `;`, so this cannot mis-fire. Without it [extractEvalDocField]
-  /// returned `x;` — a key no form data ever holds — and the Link field's
-  /// dependent-field detection silently failed.
-  ///
-  /// [evaluate] needs no equivalent: `js_expression.dart` already parses a
-  /// trailing `;` as expression-statement punctuation.
-  static String _stripTrailingSemicolon(String expr) =>
-      expr.replaceAll(RegExp(r';\s*$'), '').trim();
-
-  static String _extractFieldName(String expr) {
-    expr = _stripTrailingSemicolon(expr);
-    if (expr.startsWith('doc.')) {
-      expr = _stripTrailingSemicolon(expr.substring(4));
-    }
-    return expr;
   }
 }

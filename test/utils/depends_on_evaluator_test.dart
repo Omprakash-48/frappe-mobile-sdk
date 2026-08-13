@@ -687,4 +687,52 @@ void main() {
       );
     });
   });
+
+  group('extractEvalDocField only fast-paths a LEGAL fieldname', () {
+    // Root cause: the fast path compared the expression against a helper's
+    // output, and that helper just stripped a leading `doc.` without checking
+    // the remainder is a fieldname. For a multi-term expression the stripped
+    // remainder reassembles to the original string, so the equality held and
+    // the whole expression came back AS A FIELDNAME. The caller then looked up
+    // a field that cannot exist, found nothing, and the link picker silently
+    // stopped filtering — it looks like "no filter configured", not like an
+    // error, which is why it survived review.
+    test('a && b expression returns the FIRST field, not the whole string', () {
+      expect(
+        DependsOnEvaluator.extractEvalDocField('eval:doc.a && doc.b'),
+        'a',
+      );
+    });
+
+    test('the same without the eval: prefix', () {
+      expect(DependsOnEvaluator.extractEvalDocField('doc.a && doc.b'), 'a');
+    });
+
+    test('|| and comparison forms also fall through to the regex', () {
+      expect(
+        DependsOnEvaluator.extractEvalDocField('eval:doc.state || doc.city'),
+        'state',
+      );
+      expect(
+        DependsOnEvaluator.extractEvalDocField('eval:doc.status == "Open"'),
+        'status',
+      );
+    });
+
+    test('a trailing-; multi-term expression is not a bare reference', () {
+      expect(
+        DependsOnEvaluator.extractEvalDocField('eval:doc.a && doc.b;'),
+        'a',
+      );
+    });
+
+    test('a bare reference with surrounding whitespace still fast-paths', () {
+      expect(DependsOnEvaluator.extractEvalDocField('eval: doc.x '), 'x');
+      expect(DependsOnEvaluator.extractEvalDocField('eval:doc.x ; '), 'x');
+    });
+
+    test('a non-doc expression still returns null', () {
+      expect(DependsOnEvaluator.extractEvalDocField('eval:1 == 1'), isNull);
+    });
+  });
 }
