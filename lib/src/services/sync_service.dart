@@ -593,7 +593,7 @@ class SyncService {
               operation: 'pull',
               errorMessage: batchServerNames.length > 1
                   ? '$e (${batchServerNames.length} docs,'
-                    ' first: ${batchServerNames.first})'
+                        ' first: ${batchServerNames.first})'
                   : e.toString(),
             ),
           );

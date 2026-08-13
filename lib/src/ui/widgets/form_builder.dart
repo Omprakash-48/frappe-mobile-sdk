@@ -2029,9 +2029,17 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
           field.reqd ||
           (field.mandatoryDependsOn != null &&
               field.mandatoryDependsOn!.isNotEmpty &&
+              // `defaultOnError: false` is NOT optional here. `_isFieldRequired`
+              // (same file) passes it, so without it an unparseable
+              // `mandatory_depends_on` makes this sweep block Save on a field
+              // the widget never marked required and never drew an asterisk
+              // on — the dead-Save-button shape this PR fixes for empty child
+              // tables, reintroduced through the evaluator.
               DependsOnEvaluator.evaluate(
                 field.mandatoryDependsOn,
                 dataForDepends,
+                parentData: effectiveParentFormData,
+                defaultOnError: false,
               ));
       if (!required) continue;
       final v = completeFormData[name];

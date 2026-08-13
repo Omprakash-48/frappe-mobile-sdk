@@ -56,8 +56,9 @@ class RatingField extends BaseField {
   @override
   Widget buildField(BuildContext context) {
     final maxRating = maxRatingFor(field.options);
-    final initialFraction =
-        value == null ? null : storedFromStars(starsFromStored(value, maxRating), maxRating);
+    final initialFraction = value == null
+        ? null
+        : storedFromStars(starsFromStored(value, maxRating), maxRating);
 
     return FormBuilderField<double>(
       autovalidateMode: AutovalidateMode.onUserInteraction,

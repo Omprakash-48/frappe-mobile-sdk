@@ -85,7 +85,8 @@ void main() {
                 if (allowed.contains(n))
                   {
                     'name': n,
-                    'modified': '2026-01-${n.split('-').last.padLeft(2, '0')}'
+                    'modified':
+                        '2026-01-${n.split('-').last.padLeft(2, '0')}'
                         ' 00:00:00',
                     'customer_name': 'Name $n',
                   },
@@ -134,34 +135,31 @@ void main() {
     return rows.map((r) => r['server_name'] as String).toList();
   }
 
-  test(
-    'a FULLY permission-filtered window does not end the drain',
-    () async {
-      // Window at limit_start=2 resolves to zero docs. Before the fix the loop
-      // hit `page.isEmpty` and broke, stalling the drain at offset 2 on every
-      // subsequent sync — C-5 was never pulled.
-      final srv = mockServer(
-        namesByStart: {
-          0: ['C-1', 'C-2'],
-          2: ['C-3', 'C-4'],
-          4: ['C-5'],
-        },
-        allowed: {'C-1', 'C-2', 'C-5'},
-      );
-      final h = await harness(srv.client);
-      addTearDown(h.db.close);
+  test('a FULLY permission-filtered window does not end the drain', () async {
+    // Window at limit_start=2 resolves to zero docs. Before the fix the loop
+    // hit `page.isEmpty` and broke, stalling the drain at offset 2 on every
+    // subsequent sync — C-5 was never pulled.
+    final srv = mockServer(
+      namesByStart: {
+        0: ['C-1', 'C-2'],
+        2: ['C-3', 'C-4'],
+        4: ['C-5'],
+      },
+      allowed: {'C-1', 'C-2', 'C-5'},
+    );
+    final h = await harness(srv.client);
+    addTearDown(h.db.close);
 
-      final result = await h.sync.pullSync(doctype: 'Customer');
+    final result = await h.sync.pullSync(doctype: 'Customer');
 
-      expect(
-        srv.starts,
-        containsAllInOrder([0, 2, 4]),
-        reason: 'the filtered window must be skipped, not treated as the end',
-      );
-      expect(await pulledNames(h.db), ['C-1', 'C-2', 'C-5']);
-      expect(result.success, 3);
-    },
-  );
+    expect(
+      srv.starts,
+      containsAllInOrder([0, 2, 4]),
+      reason: 'the filtered window must be skipped, not treated as the end',
+    );
+    expect(await pulledNames(h.db), ['C-1', 'C-2', 'C-5']);
+    expect(result.success, 3);
+  });
 
   test(
     'a PARTIALLY filtered full window is not mistaken for a short final page',
@@ -185,36 +183,40 @@ void main() {
       expect(
         srv.starts,
         containsAllInOrder([0, 2]),
-        reason: 'scanned == pageSize means the window was full even though '
+        reason:
+            'scanned == pageSize means the window was full even though '
             'only one doc came back',
       );
       expect(await pulledNames(h.db), ['C-1', 'C-3']);
     },
   );
 
-  test('a genuinely drained doctype still completes on the short page', () async {
-    final srv = mockServer(
-      namesByStart: {
-        0: ['C-1', 'C-2'],
-        2: ['C-3'],
-      },
-      allowed: {'C-1', 'C-2', 'C-3'},
-    );
-    final h = await harness(srv.client);
-    addTearDown(h.db.close);
+  test(
+    'a genuinely drained doctype still completes on the short page',
+    () async {
+      final srv = mockServer(
+        namesByStart: {
+          0: ['C-1', 'C-2'],
+          2: ['C-3'],
+        },
+        allowed: {'C-1', 'C-2', 'C-3'},
+      );
+      final h = await harness(srv.client);
+      addTearDown(h.db.close);
 
-    await h.sync.pullSync(doctype: 'Customer');
+      await h.sync.pullSync(doctype: 'Customer');
 
-    expect(await pulledNames(h.db), ['C-1', 'C-2', 'C-3']);
-    final cursor = await h.db.doctypeMetaDao.getLastOkCursor('Customer');
-    expect(cursor, isNotNull);
-    final parsed = jsonDecode(cursor!) as Map<String, dynamic>;
-    expect(
-      parsed['complete'],
-      isTrue,
-      reason: 'the short final window still flips the doctype to incremental',
-    );
-  });
+      expect(await pulledNames(h.db), ['C-1', 'C-2', 'C-3']);
+      final cursor = await h.db.doctypeMetaDao.getLastOkCursor('Customer');
+      expect(cursor, isNotNull);
+      final parsed = jsonDecode(cursor!) as Map<String, dynamic>;
+      expect(
+        parsed['complete'],
+        isTrue,
+        reason: 'the short final window still flips the doctype to incremental',
+      );
+    },
+  );
 
   test('an all-filtered short final window still promotes the cursor rather '
       'than sticking in RESUME forever', () async {

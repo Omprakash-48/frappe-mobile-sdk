@@ -78,7 +78,12 @@ void main() {
       // TypeError there (`'a'.livelihood` is undefined), but reading an
       // arbitrary member off a string is outside the supported subset, so it
       // raises rather than guessing — the same fallback either way.
-      expect(eval(expr, {'livelihoods': ['a', 1, null]}), isTrue);
+      expect(
+        eval(expr, {
+          'livelihoods': ['a', 1, null],
+        }),
+        isTrue,
+      );
       // Fallback, not a computed answer: it follows the caller's default.
       expect(
         DependsOnEvaluator.evaluate(expr, {
@@ -316,14 +321,11 @@ void main() {
       // that it reaches the legacy fallback rather than being answered here;
       // whatever the fallback decides, it must not throw.
       expect(
-        () => eval(
-          'eval:(doc.t || []).some(r => r.f.startsWith("X") && r.g)',
-          {
-            't': [
-              {'f': 'X1', 'g': 1},
-            ],
-          },
-        ),
+        () => eval('eval:(doc.t || []).some(r => r.f.startsWith("X") && r.g)', {
+          't': [
+            {'f': 'X1', 'g': 1},
+          ],
+        }),
         returnsNormally,
       );
     });

@@ -496,4 +496,77 @@ void main() {
     expect(form.failed, hasLength(1));
     expect(find.text('Sectors is required'), findsOneWidget);
   });
+
+  // The sweep is a SECOND evaluation of `mandatory_depends_on`, seventy lines
+  // below `_isFieldRequired`. That one passes `onError: false`; the sweep called
+  // `evaluate` bare and so took the `true` default. The two therefore disagreed
+  // on an expression that cannot be evaluated: the widget marked the field
+  // neither required nor asterisked, and the sweep blocked Save on it — a dead
+  // Save button with no visible cause, which is the exact shape this PR fixes
+  // for empty child tables.
+  testWidgets('an unevaluatable mandatory_depends_on does NOT block submit', (
+    tester,
+  ) async {
+    final meta = DocTypeMeta(
+      name: 'Test',
+      label: 'Test',
+      isTable: false,
+      titleField: null,
+      searchFields: null,
+      fields: [
+        DocField(
+          fieldname: 'sectors',
+          fieldtype: 'Table',
+          idx: 1,
+          label: 'Sectors',
+          options: 'Sector Row',
+        ),
+        DocField(
+          fieldname: 'note',
+          fieldtype: 'Data',
+          idx: 2,
+          label: 'Note',
+          mandatoryDependsOn: "(doc.sectors || []).some(r => r.sector === 'X')",
+        ),
+      ],
+    );
+    final form = await pumpForm(
+      tester,
+      meta,
+      getMeta: (_) async => sectorRowMeta(),
+      // The row cell throws while being compared, so the `.some(...)` predicate
+      // fails mid-evaluation exactly where a genuinely unparseable expression
+      // would. `note` is left empty.
+      initialData: {
+        'sectors': [
+          {'sector': _ThrowOnEquals()},
+        ],
+      },
+    );
+
+    form.submit();
+    await tester.pumpAndSettle();
+    await tester.pump(const Duration(milliseconds: 200));
+
+    expect(
+      form.failed,
+      isEmpty,
+      reason: 'a field the widget never marked required must not block Save',
+    );
+    expect(form.submitted, hasLength(1));
+  });
+}
+
+/// Throws while being COMPARED, but stringifies normally — the narrowest hook
+/// into `DependsOnEvaluator`'s failure path (`_compareValues` compares before it
+/// stringifies), so the child-row widget can still render the cell.
+class _ThrowOnEquals {
+  @override
+  bool operator ==(Object other) => throw StateError('comparison exploded');
+
+  @override
+  int get hashCode => 0;
+
+  @override
+  String toString() => 'boom';
 }

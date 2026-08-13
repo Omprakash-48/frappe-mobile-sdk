@@ -1154,19 +1154,20 @@ void main() {
       );
     });
 
-    test('KNOWN LIMITATION: a compound expression that STARTS with doc. is not '
-        'reduced to a fieldname', () {
-      // Pre-existing on develop (verified against 58c6171, which carries
-      // PR #86): the fallback only runs when the whole string is unchanged by
-      // stripping the `doc.` prefix, so an expression that merely BEGINS with
-      // `doc.` returns the remainder verbatim instead of a fieldname or null.
-      // Not introduced or widened by the evaluator rewrite; recorded here so
-      // the next change to this method sees it rather than rediscovering it.
+    test('a compound expression that STARTS with doc. still reduces to the '
+        'FIRST fieldname', () {
+      // Was a recorded KNOWN LIMITATION here until develop's 1b44fb4 was merged
+      // in: the old fast-path gate only checked that stripping the `doc.`
+      // prefix left the string reassemblable, which it always does for an
+      // expression BEGINNING with `doc.`, so the remainder came back verbatim
+      // as a "fieldname". No such field exists, so LinkOptionService's lookup
+      // found nothing and the Link picker silently stopped filtering. The gate
+      // now anchors on the fieldname SHAPE, so this falls through to the regex.
       expect(
         DependsOnEvaluator.extractEvalDocField(
           "eval:doc.district == 'X' ? doc.block : ''",
         ),
-        "district == 'X' ? doc.block : ''",
+        'district',
       );
     });
 

@@ -71,8 +71,9 @@ void main() {
 
   // Frappe stores a Rating as a 0..1 fraction (stars / max_stars), so tapping
   // the 4th of 5 stars must emit 0.8 — not the star count.
-  testWidgets('tapping the 4th of 5 stars emits the 0.8 fraction',
-      (tester) async {
+  testWidgets('tapping the 4th of 5 stars emits the 0.8 fraction', (
+    tester,
+  ) async {
     dynamic emitted;
     await _pump(
       tester,
@@ -101,8 +102,9 @@ void main() {
     expect(emitted, 0.3);
   });
 
-  testWidgets('a web-authored 0.6 renders 3 of 5 stars (was zero before)',
-      (tester) async {
+  testWidgets('a web-authored 0.6 renders 3 of 5 stars (was zero before)', (
+    tester,
+  ) async {
     await _pump(
       tester,
       value: 0.6,
@@ -121,8 +123,9 @@ void main() {
     expect(find.byIcon(Icons.star), findsNWidgets(4));
   });
 
-  testWidgets('re-tapping the last filled star clears the rating to 0',
-      (tester) async {
+  testWidgets('re-tapping the last filled star clears the rating to 0', (
+    tester,
+  ) async {
     dynamic emitted;
     await _pump(
       tester,

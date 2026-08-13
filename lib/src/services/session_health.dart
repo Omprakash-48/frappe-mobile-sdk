@@ -9,7 +9,14 @@ enum SessionHealth {
   /// will be retried after a cooldown. Hosts should NOT prompt for re-login.
   degraded,
 
-  /// A refresh was DEFINITIVELY rejected (401/403/417). Only a fresh login
-  /// recovers. Hosts should prompt. Nothing is wiped by this state.
+  /// A refresh was DEFINITIVELY rejected. Only a fresh login recovers. Hosts
+  /// should prompt. Nothing is wiped by this state.
+  ///
+  /// The statuses that count differ by leg, so this deliberately does NOT name
+  /// one set: `mobile_auth.refresh_token` is `{401, 403, 417}`
+  /// (`isDefinitiveRefreshRejection`), while the OAuth `get_token` leg is
+  /// `{400, 401, 403}` plus the RFC 6749 error code
+  /// (`isDefinitiveOAuthRejection`). Naming only the first set is what let the
+  /// OAuth leg's 400 read as transient.
   expired,
 }
