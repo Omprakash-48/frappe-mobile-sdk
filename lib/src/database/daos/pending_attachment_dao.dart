@@ -83,6 +83,25 @@ class PendingAttachmentDao {
     return rows.map(PendingAttachment.fromMap).toList();
   }
 
+  /// Every `local_path` referenced by a queued attachment, in ANY state.
+  ///
+  /// State is deliberately not filtered: a `failed` or `rejected` row still
+  /// owns its file so the user can retry or replace it, and a `done` row's file
+  /// has already left `outbox/`. Anything in this set is off-limits to the
+  /// orphan sweep.
+  Future<Set<String>> referencedLocalPaths() async {
+    final rows = await _db.query(
+      'pending_attachments',
+      columns: ['local_path'],
+    );
+    final out = <String>{};
+    for (final r in rows) {
+      final path = r['local_path'] as String?;
+      if (path != null && path.isNotEmpty) out.add(path);
+    }
+    return out;
+  }
+
   Future<void> markUploading(int id) async {
     await _db.update(
       'pending_attachments',

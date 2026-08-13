@@ -10,6 +10,7 @@ import '../../../models/doc_field.dart';
 import '../../../services/media_resolver.dart';
 import '../../../sync/attachment_error_classifier.dart';
 import '../../../utils/attachment_paths.dart';
+import '../../../utils/media_store.dart';
 import '../../../utils/attachment_pick.dart';
 import '../../../utils/sdk_log.dart';
 import 'base_field.dart';
@@ -277,6 +278,8 @@ class ImageField extends BaseField {
       return false;
     }
     if (stored != null && stored.isNotEmpty) {
+      // Reclaim the file this pick replaces (guarded by isStagedPath).
+      await MediaStore.discardReplacedValue(fieldState.value);
       fieldState.didChange(stored);
       onChanged?.call(stored);
       return true;

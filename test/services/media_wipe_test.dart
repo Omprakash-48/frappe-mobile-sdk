@@ -74,4 +74,38 @@ void main() {
       expect(await MediaStore.storeSizeBytes(), 64);
     },
   );
+
+  test('clearCache removes cached media but SPARES staged files', () async {
+    // outbox/ is correctness storage — the only copy of an un-uploaded
+    // attachment. cache/ is a performance copy of server media. A method named
+    // "clear cache" must never cross that line.
+    final staged = File('${root.path}/keep.jpg')..writeAsStringSync('KEEP');
+    final stagedPath = await MediaStore.stageToOutbox(
+      staged,
+      nameGen: () => 'uid_keep',
+    );
+    final toCache = File('${root.path}/drop.jpg')..writeAsStringSync('DROP');
+    final cachePath = await MediaStore.stageToOutbox(
+      toCache,
+      nameGen: () => 'uid_drop',
+    );
+    await MediaStore.moveToCache(cachePath, '/files/drop.jpg');
+
+    await MediaStore.clearCache();
+
+    expect(
+      File(stagedPath).existsSync(),
+      isTrue,
+      reason: 'an un-uploaded attachment must survive a CACHE clear',
+    );
+    expect(
+      File(await MediaStore.cachePathFor('/files/drop.jpg')).existsSync(),
+      isFalse,
+    );
+  });
+
+  test('clearCache is safe when nothing is cached', () async {
+    await MediaStore.clearCache();
+    expect(await MediaStore.storeSizeBytes(), 0);
+  });
 }

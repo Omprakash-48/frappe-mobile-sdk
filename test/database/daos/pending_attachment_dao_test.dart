@@ -213,4 +213,37 @@ void main() {
       reason: 'silently skipping it is what shipped a raw marker to Frappe',
     );
   });
+
+  test('referencedLocalPaths returns paths from rows in EVERY state', () async {
+    // A failed or rejected row still owns its file — the user can retry or
+    // replace it. Only `done` rows have had their bytes moved to the cache, and
+    // even those must not be swept while the row exists.
+    final ids = <int>[];
+    for (var i = 0; i < 4; i++) {
+      ids.add(
+        await dao.enqueue(
+          parentDoctype: 'Order',
+          parentUuid: 'P1',
+          parentFieldname: 'f$i',
+          topParentUuid: 'P1',
+          topParentDoctype: 'Order',
+          localPath: '/outbox/u$i/file$i.jpg',
+        ),
+      );
+    }
+    await dao.markUploading(ids[1]);
+    await dao.markFailed(ids[2], errorMessage: 'net');
+    await dao.markRejected(ids[3], errorMessage: 'too big');
+
+    expect(await dao.referencedLocalPaths(), {
+      '/outbox/u0/file0.jpg',
+      '/outbox/u1/file1.jpg',
+      '/outbox/u2/file2.jpg',
+      '/outbox/u3/file3.jpg',
+    });
+  });
+
+  test('referencedLocalPaths is empty when nothing is queued', () async {
+    expect(await dao.referencedLocalPaths(), isEmpty);
+  });
 }

@@ -7,6 +7,7 @@ import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 import 'package:uuid/uuid.dart';
 
+import '../models/media_store_usage.dart';
 import 'sdk_log.dart';
 
 /// Root sub-directory under the app documents directory.
@@ -32,12 +33,28 @@ const Uuid _uuid = Uuid();
 class MediaStore {
   static String? _testRoot;
 
+  /// Paths staged in THIS process. Guards the sweep against deleting a pick
+  /// that is live in an open form: such a file has no `pending_attachments`
+  /// row yet, so a row check alone would classify it as an orphan.
+  ///
+  /// Entries are never removed. Once a file is saved its row protects it, so
+  /// double protection costs nothing and avoids coupling this store to
+  /// `LocalWriter`. After a restart the set is empty and those same files are
+  /// genuinely orphaned — so they become sweepable exactly when they should.
+  static final Set<String> _stagedThisSession = <String>{};
+
+  /// Read-only view of the live-set.
+  static Set<String> get stagedThisSession =>
+      Set<String>.unmodifiable(_stagedThisSession);
+
   /// Test seam. `getApplicationDocumentsDirectory()` needs a platform channel
   /// that plain `flutter test` does not provide, and mocking path_provider per
   /// test file is more machinery than one explicit override.
   @visibleForTesting
   static void overrideRootForTest(String? absoluteRoot) {
     _testRoot = absoluteRoot;
+    // Paths from a previous root would otherwise protect unrelated files.
+    _stagedThisSession.clear();
   }
 
   static Future<String> _root() async {
@@ -61,6 +78,11 @@ class MediaStore {
     final dir = Directory(p.join(await _root(), kOutboxSubDir, base));
     if (!await dir.exists()) await dir.create(recursive: true);
     final dest = p.join(dir.path, p.basename(source.path));
+    // Register BEFORE the file exists. The reverse order leaves a window in
+    // which a sweep could observe a freshly-created file that has neither a
+    // pending_attachments row nor a live-set entry, and delete a pick that is
+    // about to become live.
+    _stagedThisSession.add(dest);
     await source.copy(dest);
     return dest;
   }
@@ -83,6 +105,23 @@ class MediaStore {
     var ext = p.extension(fileUrl);
     if (ext.isEmpty && sourcePath != null) ext = p.extension(sourcePath);
     return p.join(dirPath, '$digest$ext');
+  }
+
+  /// True only when [path] is a file inside `outbox/`.
+  ///
+  /// CANONICAL containment, not a string prefix: `p.canonicalize` resolves
+  /// `..` segments, and `p.isWithin` rejects a similarly named sibling such as
+  /// `outbox_old/`. A prefix match would admit both, and callers use this to
+  /// decide whether to DELETE a file — a host may legitimately point a field at
+  /// `/sdcard/DCIM/holiday.jpg`, and destroying that would be unforgivable.
+  ///
+  /// Returns false for the outbox root itself: it is a directory, not a staged
+  /// file.
+  static Future<bool> isStagedPath(String path) async {
+    final trimmed = path.trim();
+    if (trimmed.isEmpty) return false;
+    final outbox = p.canonicalize(p.join(await _root(), kOutboxSubDir));
+    return p.isWithin(outbox, p.canonicalize(trimmed));
   }
 
   /// Creates the parent directory of [filePath] if needed.
@@ -170,12 +209,136 @@ class MediaStore {
     return total;
   }
 
+  /// Deletes the staged file behind a field value that is being REPLACED.
+  ///
+  /// A no-op unless the value is a path inside `outbox/`, so a `pending:<id>`
+  /// marker, a server url, a cache path and a host-supplied gallery path are
+  /// all left alone.
+  ///
+  /// No database check is needed, and that is not a shortcut: a saved
+  /// attachment's column holds `pending:<id>`, never a path — `LocalWriter`
+  /// swaps the path for the marker inside the save transaction, and a failed
+  /// enqueue rolls that transaction back. So a column holding a raw staged path
+  /// has by construction never been saved and has no `pending_attachments` row.
+  static Future<void> discardReplacedValue(String? previousValue) async {
+    final v = previousValue?.trim();
+    if (v == null || v.isEmpty) return;
+    if (!await isStagedPath(v)) return;
+    await deleteOutboxCopy(v);
+  }
+
+  /// Files under `outbox/`, paired with their size. Absent directory -> empty.
+  static Future<List<MapEntry<String, int>>> _outboxFiles() async {
+    final out = <MapEntry<String, int>>[];
+    final dir = Directory(p.join(await _root(), kOutboxSubDir));
+    if (!await dir.exists()) return out;
+    await for (final e in dir.list(recursive: true, followLinks: false)) {
+      if (e is! File) continue;
+      try {
+        out.add(MapEntry(e.path, await e.length()));
+      } catch (err, st) {
+        sdkLog('MediaStore._outboxFiles: stat(${e.path}) failed — $err\n$st');
+      }
+    }
+    return out;
+  }
+
+  /// True when a staged file is reclaimable: no queued row references it and it
+  /// was not staged in this session.
+  ///
+  /// Both guards are exact. There is no age heuristic, so a pick sitting in an
+  /// open form is never at risk.
+  static bool _isOrphan(String path, Set<String> referencedPaths) =>
+      !referencedPaths.contains(path) && !_stagedThisSession.contains(path);
+
+  /// Usage snapshot. Reads only — never deletes.
+  ///
+  /// [referencedPaths] comes from `PendingAttachmentDao.referencedLocalPaths()`;
+  /// passing it in keeps this class off the database.
+  static Future<MediaStoreUsage> usage(Set<String> referencedPaths) async {
+    var outboxBytes = 0;
+    var orphanBytes = 0;
+    var orphanCount = 0;
+    for (final f in await _outboxFiles()) {
+      outboxBytes += f.value;
+      if (_isOrphan(f.key, referencedPaths)) {
+        orphanBytes += f.value;
+        orphanCount++;
+      }
+    }
+
+    var cacheBytes = 0;
+    final cacheDir = Directory(p.join(await _root(), kCacheSubDir));
+    if (await cacheDir.exists()) {
+      await for (final e in cacheDir.list(
+        recursive: true,
+        followLinks: false,
+      )) {
+        if (e is! File) continue;
+        try {
+          cacheBytes += await e.length();
+        } catch (err, st) {
+          sdkLog('MediaStore.usage: stat(${e.path}) failed — $err\n$st');
+        }
+      }
+    }
+
+    return MediaStoreUsage(
+      outboxBytes: outboxBytes,
+      cacheBytes: cacheBytes,
+      orphanBytes: orphanBytes,
+      orphanCount: orphanCount,
+    );
+  }
+
+  /// Deletes every orphaned staged file and returns the bytes reclaimed.
+  ///
+  /// NEVER THROWS: a per-file failure is logged, not counted, and the sweep
+  /// continues. Only `outbox/` is walked — `cache/` is out of scope.
+  ///
+  /// The CALLER must not pass an empty [referencedPaths] when the query that
+  /// produced it failed: an empty set would make every staged file look
+  /// reclaimable. See `FrappeSDK.sweepOrphanedMedia`.
+  static Future<int> sweepOrphans(Set<String> referencedPaths) async {
+    var freed = 0;
+    for (final f in await _outboxFiles()) {
+      if (!_isOrphan(f.key, referencedPaths)) continue;
+      try {
+        final file = File(f.key);
+        // Vanished between listing and deleting (e.g. a concurrent push moved
+        // it into cache/). Not an error, and not bytes we freed.
+        if (!await file.exists()) continue;
+        await deleteOutboxCopy(f.key);
+        if (!await file.exists()) freed += f.value;
+      } catch (e, st) {
+        sdkLog('MediaStore.sweepOrphans: delete(${f.key}) failed — $e\n$st');
+      }
+    }
+    return freed;
+  }
+
+  /// Removes the `cache/` subtree ONLY.
+  ///
+  /// Never touches `outbox/`. Cached bytes are a performance copy of server
+  /// media and are always re-fetchable; staged files are the only copy of an
+  /// attachment that has not uploaded yet. A "clear cache" operation must not
+  /// cross that line — see [clearAll] for the wipe that deliberately does.
+  static Future<void> clearCache() async {
+    final dir = Directory(p.join(await _root(), kCacheSubDir));
+    try {
+      if (await dir.exists()) await dir.delete(recursive: true);
+    } catch (e, st) {
+      sdkLog('MediaStore.clearCache failed — $e\n$st');
+    }
+  }
+
   /// Removes BOTH directories. Used by logout and wipe: cached media must not
   /// outlive the data it belongs to on a shared device.
   ///
   /// This also clears `outbox/`, which holds the only copy of any un-uploaded
   /// attachment — callers must treat it as destructive.
   static Future<void> clearAll() async {
+    _stagedThisSession.clear();
     final dir = Directory(await _root());
     try {
       if (await dir.exists()) await dir.delete(recursive: true);

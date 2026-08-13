@@ -158,4 +158,103 @@ void main() {
     // Second call must not throw.
     await MediaStore.deleteOutboxCopy(staged);
   });
+
+  group('isStagedPath', () {
+    test('accepts a real staged file', () async {
+      final staged = await MediaStore.stageToOutbox(
+        srcFile('a.jpg', 'A'),
+        nameGen: () => 'uid1',
+      );
+      expect(await MediaStore.isStagedPath(staged), isTrue);
+    });
+
+    test('rejects a host path outside the store', () async {
+      // A host may legitimately set a field to a gallery path. Deleting that
+      // on replace would destroy the user's own photo.
+      expect(
+        await MediaStore.isStagedPath('/sdcard/DCIM/holiday.jpg'),
+        isFalse,
+      );
+    });
+
+    test('rejects a ../ escape', () async {
+      expect(
+        await MediaStore.isStagedPath(
+          '${root.path}/mform_attachments/outbox/../../etc/passwd',
+        ),
+        isFalse,
+        reason: 'a prefix match would have admitted this',
+      );
+    });
+
+    test('rejects a similarly named sibling directory', () async {
+      expect(
+        await MediaStore.isStagedPath(
+          '${root.path}/mform_attachments/outbox_old/a.jpg',
+        ),
+        isFalse,
+        reason: 'a prefix match would have admitted this too',
+      );
+    });
+
+    test('rejects a cache path', () async {
+      final c = await MediaStore.cachePathFor('/files/a.jpg');
+      expect(await MediaStore.isStagedPath(c), isFalse);
+    });
+
+    test('rejects the outbox root itself and empty input', () async {
+      expect(
+        await MediaStore.isStagedPath('${root.path}/mform_attachments/outbox'),
+        isFalse,
+      );
+      expect(await MediaStore.isStagedPath(''), isFalse);
+    });
+  });
+
+  group('session live-set', () {
+    test('staging registers the path', () async {
+      final staged = await MediaStore.stageToOutbox(
+        srcFile('a.jpg', 'A'),
+        nameGen: () => 'uid1',
+      );
+      expect(MediaStore.stagedThisSession, contains(staged));
+    });
+
+    test('entries are NOT removed when the file moves to cache', () async {
+      // Once saved, the pending_attachments row protects the file anyway, so
+      // double protection is free and avoids coupling MediaStore to LocalWriter.
+      final staged = await MediaStore.stageToOutbox(
+        srcFile('b.jpg', 'B'),
+        nameGen: () => 'uid2',
+      );
+      await MediaStore.moveToCache(staged, '/files/b.jpg');
+      expect(MediaStore.stagedThisSession, contains(staged));
+    });
+
+    test('clearAll empties the live-set', () async {
+      await MediaStore.stageToOutbox(
+        srcFile('c.jpg', 'C'),
+        nameGen: () => 'u3',
+      );
+      await MediaStore.clearAll();
+      expect(MediaStore.stagedThisSession, isEmpty);
+    });
+
+    test('overrideRootForTest resets it, so tests do not leak', () async {
+      await MediaStore.stageToOutbox(
+        srcFile('d.jpg', 'D'),
+        nameGen: () => 'u4',
+      );
+      expect(MediaStore.stagedThisSession, isNotEmpty);
+      MediaStore.overrideRootForTest(root.path);
+      expect(MediaStore.stagedThisSession, isEmpty);
+    });
+
+    test('the view is unmodifiable', () async {
+      expect(
+        () => MediaStore.stagedThisSession.add('/x'),
+        throwsUnsupportedError,
+      );
+    });
+  });
 }

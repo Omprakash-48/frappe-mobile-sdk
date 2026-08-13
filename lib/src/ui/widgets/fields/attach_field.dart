@@ -14,6 +14,7 @@ import 'package:open_filex/open_filex.dart';
 import '../../../services/media_resolver.dart';
 import '../../../sync/attachment_error_classifier.dart';
 import '../../../utils/attachment_paths.dart';
+import '../../../utils/media_store.dart';
 import '../../../utils/attachment_pick.dart';
 import '../../../utils/sdk_log.dart';
 import 'base_field.dart';
@@ -309,6 +310,12 @@ class AttachField extends BaseField {
                                 uploadFile: uploadFile,
                               );
                               if (stored != null && stored.isNotEmpty) {
+                                // Reclaim the file this pick replaces.
+                                // Guarded by isStagedPath, so a host path or a
+                                // pending: marker is untouched.
+                                await MediaStore.discardReplacedValue(
+                                  fieldState.value,
+                                );
                                 fieldState.didChange(stored);
                                 onChanged?.call(stored);
                                 return;

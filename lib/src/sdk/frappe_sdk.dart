@@ -8,6 +8,9 @@ import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 
 import '../api/client.dart';
+import '../database/daos/media_cache_dao.dart';
+import '../database/daos/pending_attachment_dao.dart';
+import '../models/media_store_usage.dart';
 import '../utils/media_store.dart';
 import '../utils/sdk_log.dart';
 import '../api/exceptions.dart';
@@ -946,14 +949,76 @@ class FrappeSDK {
   ///
   /// Exists so a host can show usage and offer a manual "Clear cached media"
   /// control while automatic eviction is still unbuilt (Phase 2).
-  Future<int> mediaStoreSize() => MediaStore.storeSizeBytes();
-
-  /// Clears the on-device media store.
+  /// On-device attachment media usage: staged bytes, cached bytes, and how much
+  /// [sweepOrphanedMedia] would reclaim right now.
   ///
-  /// DESTRUCTIVE: staged files are the ONLY copy of an attachment that has not
-  /// uploaded yet, so this can lose un-pushed attachments. Expose it behind an
-  /// explicit user confirmation. Cached downloads are always re-fetchable.
-  Future<void> clearMediaCache() => MediaStore.clearAll();
+  /// Read-only. `orphanBytes` is a subset of `outboxBytes` and is excluded from
+  /// `totalBytes`, so a UI can show "1.4 GB — 240 MB reclaimable" without
+  /// double-counting. Returns zeros when the SDK is not initialized.
+  Future<MediaStoreUsage> mediaStoreUsage() async {
+    final refs = await _referencedStagedPaths();
+    if (refs == null) {
+      return const MediaStoreUsage(
+        outboxBytes: 0,
+        cacheBytes: 0,
+        orphanBytes: 0,
+        orphanCount: 0,
+      );
+    }
+    return MediaStore.usage(refs);
+  }
+
+  /// Deletes staged attachment files that nothing references, returning the
+  /// bytes reclaimed.
+  ///
+  /// SAFE: a file goes only when no queued attachment references it AND it was
+  /// not staged in this session, so a pick sitting in an open form is never
+  /// touched. Never throws.
+  ///
+  /// Deletes nothing if the referenced-set query fails — an empty result must
+  /// never be mistaken for "everything is an orphan".
+  Future<int> sweepOrphanedMedia() async {
+    final refs = await _referencedStagedPaths();
+    if (refs == null) return 0;
+    return MediaStore.sweepOrphans(refs);
+  }
+
+  /// Paths referenced by queued attachments, or NULL when the query failed.
+  ///
+  /// The null is load-bearing: callers must not treat it as an empty set, which
+  /// would classify every staged file as reclaimable.
+  Future<Set<String>?> _referencedStagedPaths() async {
+    final db = _database;
+    if (db == null) return null;
+    try {
+      return await PendingAttachmentDao(db.rawDatabase).referencedLocalPaths();
+    } catch (e, st) {
+      sdkLog(
+        'FrappeSDK: referenced-path query failed, skipping reclaim — $e\n$st',
+      );
+      return null;
+    }
+  }
+
+  /// Clears the on-device media CACHE: the `cache/` directory and its index.
+  ///
+  /// SAFE. It never touches `outbox/` or `pending_attachments`, so an
+  /// attachment that has not uploaded yet cannot be lost — cached bytes are a
+  /// performance copy of server media and are always re-fetchable. This is the
+  /// method to wire to a host-facing "Clear cached media" control.
+  ///
+  /// Only `logout(clearDatabase: true)` clears `outbox/`, where losing staged
+  /// files is the intended security behaviour.
+  Future<void> clearMediaCache() async {
+    await MediaStore.clearCache();
+    final db = _database;
+    if (db == null) return;
+    try {
+      await MediaCacheDao(db.rawDatabase).deleteAll();
+    } catch (e, st) {
+      sdkLog('FrappeSDK.clearMediaCache: index clear failed — $e\n$st');
+    }
+  }
 
   /// Throws if [initialize] hasn't run. Called as the first line of every
   /// public service getter so the (12+) "if (!_initialized) throw ..."

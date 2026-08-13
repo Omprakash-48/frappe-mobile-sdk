@@ -548,12 +548,25 @@ The wipe is **destructive by design** — it also clears `outbox/`, which holds 
 
 | Member | Purpose |
 |---|---|
-| `FrappeSDK.mediaStoreSize()` | total bytes on disk (staged + cached) |
-| `FrappeSDK.clearMediaCache()` | clear the store — **destructive**, put it behind a confirmation |
+| `FrappeSDK.mediaStoreUsage()` | staged / cached / reclaimable bytes; `orphanBytes` is a subset of `outboxBytes` and excluded from `totalBytes` |
+| `FrappeSDK.sweepOrphanedMedia()` | deletes staged files nothing references; returns bytes reclaimed; never throws |
+| `FrappeSDK.clearMediaCache()` | clears `cache/` + `media_cache` ONLY — safe, cannot lose an un-uploaded attachment |
 | `kDefaultMaxAttachmentBytes` | 10 MB, matching Frappe's stock `max_file_size`. **Not host-overridable yet** — see §13 |
 | `AttachmentTooLargeException` | thrown at pick, carries `sizeBytes` and `limitBytes` |
 | `attachmentTooLargeMessage(e)` | user-facing message naming the real limit |
 | `ResolveMediaFn` | what the field widgets accept; pass `resolver.resolve` |
+
+### Reclaim, and what can lose data
+
+| | Deletes | Can lose data? |
+|---|---|---|
+| `sweepOrphanedMedia()` | only unreferenced `outbox/` files | **No** — by construction |
+| `clearMediaCache()` | `cache/` + `media_cache` rows | **No** — always re-fetchable |
+| `logout(clearDatabase: true)` | the whole store, `outbox/` included | **Yes** — intended: private media must not outlive the session |
+
+A staged file is reclaimable only when **no `pending_attachments` row references
+it** and **it was not staged in this session**. Both guards are exact; there is
+no age heuristic, so a pick sitting in an open form is never at risk.
 
 The size guard runs **before** the durable copy is made, so an oversized pick never occupies disk. A file that cannot be stat'd skips the guard rather than being refused — failing to measure is not evidence of being too large.
 
@@ -561,7 +574,8 @@ The size guard runs **before** the durable copy is made, so an oversized pick ne
 
 ## 13. Limitations
 
-- **Media storage is unbounded until logout.** There is no automatic eviction in this release. `size_bytes` and `last_accessed_at` are populated from day one so Phase 2's policy has real data, and `mediaStoreSize()` / `clearMediaCache()` exist so a host can expose usage and a manual clear meanwhile.
+- **Media growth is bounded only by explicit action.** There is still no automatic eviction of `cache/` (Phase 2). Orphaned *staged* files are reclaimable via `sweepOrphanedMedia()`, and `mediaStoreUsage()` reports how much that would free — but both are host-triggered. Nothing runs on a timer or at startup.
+- **Cache orphans are still not reclaimed.** A file in `cache/` with no `media_cache` row — from a crash between writing the bytes and indexing them — is invisible to both the sweep (which walks `outbox/` only) and to eviction (which is driven by the index). Folded into Phase 2, whose eviction pass already walks that directory.
 - **No compression.** `pickImage` is called with no `imageQuality` / `maxWidth` / `maxHeight`, so a capture is full-resolution — 3–12 MB on a current phone. Frappe strips EXIF server-side and accepts `optimize` / `max_width` / `max_height` on `upload_file`, none of which the SDK sends yet.
 - **No background prefetch.** Media for a pulled document is cached on first view, not ahead of time.
 - **An inline (offline-mode-OFF) pick does not populate the cache.** `resolvePickedAttachment` deletes the staged copy after a successful inline upload rather than moving it into `cache/`, so previewing that file later costs a download. Only the **push** path promotes bytes into the cache via `moveToCache`. Note this no longer affects offline mode, where every pick goes through the push path and therefore does get cached. Closing it for the inline path is a small change: the bytes, the url and the store are all already in hand there.
@@ -615,6 +629,10 @@ Where to look when changing any of this, and what each file is protecting.
 | `test/database/media_cache_migration_test.dart` | v6 → v7, idempotently, with `file_url` as the primary key. |
 | `test/database/daos/media_cache_dao_test.dart` | Upsert-not-duplicate, `touch`, `totalBytes` tolerating NULL sizes. |
 | `test/database/daos/pending_attachment_dao_test.dart` | `findUnresolved` returns every non-done state — including `rejected`, which must still block. |
+| `test/utils/media_store_sweep_test.dart` | Orphan rule end to end: row-backed and live-set files spared, `cache/` untouched, byte accounting, empty-store and vanishing-file safety. |
+| `test/sdk/media_reclaim_api_test.dart` | A queued attachment is never swept; a **failed** referenced-set query deletes nothing. |
+| `test/sdk/clear_media_cache_boundary_test.dart` | `clearMediaCache()` spares `outbox/` files and `pending_attachments` rows. |
+| `test/ui/widgets/fields/attach_field_replace_test.dart` | Re-pick reclaims the replaced file; host paths, `pending:` markers and cache paths are never deleted. |
 | `test/api/attachment_service_test.dart` | The `doctype` / `docname` / `file_name` keys, and that the multipart part carries the **original** filename. |
 
 **What no test in this repo covers**, and therefore has to be checked on a device: the platform file and image pickers, camera lost-capture recovery, `OpenFilex` handoff of a cached file, real `path_provider` paths, and whether `mform_attachments/` is actually gone after a logout. The Frappe-side contract in §3a is verified against three Frappe checkouts' **source**, not against a running site.
