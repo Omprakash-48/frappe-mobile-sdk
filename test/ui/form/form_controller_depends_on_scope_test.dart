@@ -353,6 +353,30 @@ void main() {
           expect(c.buildSubmitData()['new_only'], 'v');
         },
       );
+
+      // A null arriving AFTER construction bypasses `_seedDefaults` entirely —
+      // `_computeUiState` reads `_rawValues` and hands it to the evaluator as
+      // the scope. Disclosed as an open gap when the seeding fix went in; the
+      // choke-point default closes it, because every scope now funnels through
+      // `_evalScope`. Previously this hid the field AND cleared its value.
+      test(
+        'a null std field arriving after construction does not mis-gate',
+        () {
+          final c = FormController(
+            meta: _meta([
+              DocField(
+                fieldname: 'draft_only',
+                fieldtype: 'Data',
+                dependsOn: 'eval:doc.docstatus == 0',
+              ),
+            ]),
+            initialData: const {'draft_only': 'v'},
+          );
+          c.setValue('docstatus', null);
+          expect(c.uiStateOf('draft_only').value.visible, isTrue);
+          expect(c.buildSubmitData()['draft_only'], 'v');
+        },
+      );
     });
 
     // ── regression: __islocal is derived from the absence of a name ─────────

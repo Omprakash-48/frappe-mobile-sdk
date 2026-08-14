@@ -554,18 +554,44 @@ void main() {
       expect(data['rows'], same(rows));
     });
 
-    test('doc and parent share ONE copy when parent is not supplied', () {
-      // Desk aliases parent to doc when there is no parent form, so the
-      // mutation must be visible through both names within one evaluation.
+    test('doc and parent are the SAME object when parent is not supplied', () {
+      // Desk aliases parent to doc when there is no parent form
+      // (`this.frm ? this.frm.doc : this.doc`), so the two names must resolve
+      // to one object rather than to two equal ones.
+      //
+      // This used to be asserted through pop's side effect
+      // (`doc.rows.pop() == 3 && parent.rows.length == 2`). pop no longer
+      // mutates, so the assertion is made directly instead: `==` on two lists
+      // is reference equality, so this can only be true if they are identical.
       expect(
-        DependsOnEvaluator.evaluate(
-          'eval:doc.rows.pop() == 3 && parent.rows.length == 2',
-          {
-            'rows': [1, 2, 3],
-          },
-        ),
+        DependsOnEvaluator.evaluate('eval:doc.rows == parent.rows', {
+          'rows': [1, 2, 3],
+        }),
         isTrue,
       );
+      // And the negative: two DISTINCT lists with equal contents are not equal,
+      // so the assertion above is not just "== on lists is always true".
+      expect(
+        DependsOnEvaluator.evaluate('eval:doc.a == doc.b', {
+          'a': [1, 2, 3],
+          'b': [1, 2, 3],
+        }),
+        isFalse,
+      );
+    });
+
+    test('pop does not mutate a NESTED list either', () {
+      // The one-level copy this replaces could not reach here: the receiver is
+      // a list inside a row map, which the copy shared, so every evaluation
+      // deleted an element from live child-table state.
+      final tags = <dynamic>['a', 'b', 'c'];
+      final data = <String, dynamic>{
+        'rows': [
+          {'tags': tags},
+        ],
+      };
+      DependsOnEvaluator.evaluate("eval:doc.rows[0].tags.pop() == 'c'", data);
+      expect(tags, ['a', 'b', 'c'], reason: 'nested live list must be intact');
     });
   });
 

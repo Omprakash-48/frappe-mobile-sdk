@@ -778,11 +778,27 @@ class JsInterpreter {
           }
           return _undefined;
         case 'pop':
-          // Real JS semantics: removes and returns the last element. Safe only
-          // because DependsOnEvaluator._evalScope hands the interpreter a copy
-          // of every list value, never the live form-data list.
+          // DEPARTURE: returns the last element WITHOUT removing it.
+          //
+          // Real JS pops. This used to as well, made safe by a one-level copy
+          // of every list in `DependsOnEvaluator._evalScope` — which was both
+          // too much and not enough. Too much: the copy ran per evaluation,
+          // and `depends_on` is re-evaluated per field per change. Not enough:
+          // one level does not reach `doc.rows[0].tags.pop()`, whose receiver
+          // is a nested list the copy shares, so that DID delete a row from
+          // live child-table state on every keystroke.
+          //
+          // A `depends_on` expression is a question about the document, so
+          // answering it must not edit the document. Non-mutating removes the
+          // hazard at the source and lets the copy go.
+          //
+          // Costs nothing real: `pop()` appears once in the corpus, as
+          // `split('.').pop()` — the receiver is a temporary from `split`, so
+          // mutating and non-mutating give the same answer. Only a repeated
+          // pop in one expression (`a.pop() != a.pop()`) could tell, and no
+          // expression does that.
           if (recv.isEmpty) return _undefined;
-          return recv.removeLast();
+          return recv.last;
       }
     }
 

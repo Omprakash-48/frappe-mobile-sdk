@@ -177,25 +177,32 @@ class DependsOnEvaluator {
   /// ALWAYS returns a new map — unlike the `_withDefaultDocstatus` this
   /// replaces, which returned [src] itself whenever `docstatus` was present.
   ///
-  /// * `docstatus` defaults to 0 when absent. In Frappe a document always has a
-  ///   `docstatus` — 0 while it is a draft — so desk expressions like
-  ///   `eval:doc.docstatus === 0` are true on a new doc. Form data assembled
-  ///   client-side does not always carry the key, and reading it as undefined
-  ///   mis-gated every draft-only visibility / mandatory / read-only rule.
-  /// * every `List` value is copied one level, because `pop()` mutates its
-  ///   receiver and these lists are live child-table state. `_computeUiState`
-  ///   runs per field per change, so a mutating expression on the real list
-  ///   would delete a row on every keystroke. One level is enough: the only
-  ///   mutating method removes an element rather than editing one, so the row
-  ///   maps stay shared and are never written to.
+  /// * `docstatus` defaults to 0 when absent OR NULL. In Frappe a document
+  ///   always has a `docstatus` — 0 while it is a draft — so desk expressions
+  ///   like `eval:doc.docstatus === 0` are true on a new doc. Form data
+  ///   assembled client-side does not always carry the key, and reading it as
+  ///   undefined mis-gated every draft-only visibility / mandatory / read-only
+  ///   rule.
   ///
-  /// The `...src` spread MUST come first, so the copied lists overwrite the
-  /// shared references it inserts. Reordering silently disables the copy.
+  ///   The null half matters as much as the absent half, and it is tested on
+  ///   VALUE rather than key presence for that reason. `{'docstatus': null}` is
+  ///   an ordinary way to assemble an unsaved doc, and `null == 0` is false, so
+  ///   a key-presence test left every such doc mis-gated — field hidden, then
+  ///   dropped from the save by the same sweep. Fixing that in one engine's
+  ///   seeding would not have held: `FormBuilderMode.legacy` is the constructor
+  ///   default and never seeds through `FormController`, and `_computeUiState`
+  ///   passes its raw values here directly. This is the choke point every
+  ///   caller and every scope funnels through, so the default belongs here.
+  /// List values are NOT copied. They used to be, one level deep, because
+  /// `pop()` mutated its receiver and these are live child-table lists. That
+  /// copy ran on every evaluation — per field per change — and still did not
+  /// reach a nested receiver like `doc.rows[0].tags.pop()`, which went on
+  /// mutating live state. `pop()` is non-mutating now (see `js_expression.dart`),
+  /// so no method in the grammar writes to its receiver and the copy has
+  /// nothing left to protect.
   static Map<String, dynamic> _evalScope(Map<String, dynamic> src) => {
     ...src,
-    if (!src.containsKey('docstatus')) 'docstatus': 0,
-    for (final e in src.entries)
-      if (e.value is List) e.key: List<dynamic>.of(e.value as List),
+    if (src['docstatus'] == null) 'docstatus': 0,
   };
 
   /// Expressions already reported by [_logOnce].

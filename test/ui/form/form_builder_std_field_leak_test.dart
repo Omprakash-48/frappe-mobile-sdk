@@ -29,6 +29,7 @@ void main() {
     WidgetTester tester, {
     required Map<String, dynamic>? initialData,
     FormController? controller,
+    FormBuilderMode mode = FormBuilderMode.reactive,
   }) async {
     Map<String, dynamic>? submitted;
     void Function()? submit;
@@ -37,7 +38,7 @@ void main() {
         home: Scaffold(
           body: FrappeFormBuilder(
             meta: meta(),
-            mode: FormBuilderMode.reactive,
+            mode: mode,
             controller: controller,
             initialData: initialData,
             onSubmit: (d) => submitted = d,
@@ -167,5 +168,57 @@ void main() {
       isFalse,
       reason: 'the reactive-only default must not appear in legacy mode',
     );
+  });
+
+  // ── an explicit null docstatus, in BOTH engines ──────────────────────────
+  //
+  // `FormBuilderMode.legacy` is the CONSTRUCTOR DEFAULT, and it never goes
+  // through `FormController._seedDefaults`: `initState` does a bare
+  // `_formData.addAll(widget.initialData ?? {})`, so `{'docstatus': null}`
+  // lands in the scope verbatim. Defaulting only on key ABSENCE therefore left
+  // the default engine on the original failure mode — field hidden, and
+  // dropped from the payload by the same `depends_on` sweep.
+  //
+  // The default is applied at the evaluator's choke point now, so it holds for
+  // every caller and every scope rather than for one engine's seeding.
+  group('an explicit null docstatus behaves like an absent one', () {
+    for (final mode in FormBuilderMode.values) {
+      testWidgets('$mode: the draft-only field is visible and saved', (
+        tester,
+      ) async {
+        final submitted = await pumpAndSubmit(
+          tester,
+          mode: mode,
+          initialData: const {'a': 'A', 'docstatus': null},
+        );
+        expect(submitted, isNotNull);
+        expect(
+          submitted!.containsKey('draft_only'),
+          isTrue,
+          reason:
+              'null docstatus must read as draft (0), so the field survives',
+        );
+        for (final k in stdKeys) {
+          expect(
+            submitted.containsKey(k),
+            isFalse,
+            reason: '$k leaked into the save payload',
+          );
+        }
+      });
+
+      testWidgets('$mode: a submitted doc still hides the draft-only field', (
+        tester,
+      ) async {
+        // The correct-negative: the fix must not blanket-show the field.
+        final submitted = await pumpAndSubmit(
+          tester,
+          mode: mode,
+          initialData: const {'a': 'A', 'docstatus': 1},
+        );
+        expect(submitted, isNotNull);
+        expect(submitted!.containsKey('draft_only'), isFalse);
+      });
+    }
   });
 }
