@@ -221,4 +221,97 @@ void main() {
       });
     }
   });
+
+  // ── `__islocal` is derived in BOTH engines ───────────────────────────────
+  //
+  // Same defect as the docstatus one above, one field over: the derivation
+  // lived only in `FormController._seedDefaults`, and `FormBuilderMode.legacy`
+  // — the constructor default — never constructs a FormController. There,
+  // `doc.__islocal` read undefined, so `!doc.__islocal` was TRUE on a brand-new
+  // document and the SDK behaved as though every document were already saved:
+  // it showed the saved-only fields Desk hides on create, and for
+  // `read_only_depends_on` it LOCKED a field the user is there to fill in.
+  //
+  // Derived at the evaluator choke point now, from the absence of a `name` —
+  // Frappe's own new-doc test (`document.py:539`: `__islocal or not name`).
+  group('__islocal is derived from the absence of a name in both engines', () {
+    DocTypeMeta savedOnlyMeta() => DocTypeMeta(
+      name: 'T',
+      fields: [
+        DocField(fieldname: 'a', fieldtype: 'Data', label: 'A'),
+        DocField(
+          fieldname: 'saved_only',
+          fieldtype: 'Data',
+          label: 'S',
+          dependsOn: 'eval:!doc.__islocal',
+        ),
+      ],
+    );
+
+    Future<Map<String, dynamic>?> submitWith(
+      WidgetTester tester,
+      FormBuilderMode mode,
+      Map<String, dynamic> initialData,
+    ) async {
+      Map<String, dynamic>? submitted;
+      void Function()? submit;
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: FrappeFormBuilder(
+              meta: savedOnlyMeta(),
+              mode: mode,
+              initialData: initialData,
+              onSubmit: (d) => submitted = d,
+              registerSubmit: (s) => submit = s,
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      submit!();
+      await tester.pumpAndSettle();
+      return submitted;
+    }
+
+    for (final mode in FormBuilderMode.values) {
+      testWidgets('$mode: a NEW doc (no name) hides the saved-only field', (
+        tester,
+      ) async {
+        final submitted = await submitWith(tester, mode, const {'a': 'A'});
+        expect(submitted, isNotNull);
+        expect(
+          submitted!.containsKey('saved_only'),
+          isFalse,
+          reason: 'no name means __islocal, so Desk hides this on create',
+        );
+        expect(submitted.containsKey('__islocal'), isFalse);
+      });
+
+      testWidgets('$mode: a SAVED doc (has name) shows the saved-only field', (
+        tester,
+      ) async {
+        // The correct-negative: the derivation must not hide the field forever.
+        final submitted = await submitWith(tester, mode, const {
+          'a': 'A',
+          'name': 'T-0001',
+        });
+        expect(submitted, isNotNull);
+        expect(submitted!.containsKey('saved_only'), isTrue);
+        expect(submitted.containsKey('__islocal'), isFalse);
+      });
+
+      testWidgets('$mode: an explicit __islocal from the host still wins', (
+        tester,
+      ) async {
+        // A host that says "saved" while supplying no name is believed.
+        final submitted = await submitWith(tester, mode, const {
+          'a': 'A',
+          '__islocal': 0,
+        });
+        expect(submitted, isNotNull);
+        expect(submitted!.containsKey('saved_only'), isTrue);
+      });
+    }
+  });
 }

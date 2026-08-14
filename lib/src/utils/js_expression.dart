@@ -545,6 +545,19 @@ class _Closure {
   const _Closure(this.params, this.body, this.scope);
 }
 
+/// INVARIANT: every method here must be READ-ONLY on its receiver.
+///
+/// `DependsOnEvaluator._evalScope` hands the interpreter the LIVE form-data
+/// lists — the real child-table state — and relies on this set to keep them
+/// safe. It used to defend itself with a one-level copy of every list; that was
+/// removed once `pop()` stopped mutating, so this set is now the only thing
+/// holding the property.
+///
+/// `sort`, `reverse`, `push`, `shift`, `unshift` and `splice` all mutate in JS.
+/// Adding one here without an explicitly non-mutating implementation deletes or
+/// reorders rows in live child-table state, on every evaluation — and
+/// `depends_on` is re-evaluated per field per change, so that is once per
+/// keystroke. Implement it over a copy, or not at all.
 const _listMethods = <String>{
   'includes',
   'indexOf',

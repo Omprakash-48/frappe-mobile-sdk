@@ -193,16 +193,49 @@ class DependsOnEvaluator {
   ///   default and never seeds through `FormController`, and `_computeUiState`
   ///   passes its raw values here directly. This is the choke point every
   ///   caller and every scope funnels through, so the default belongs here.
+  /// * `__islocal` is derived from the absence of a `name`, for the same reason
+  ///   and in the same place. Desk stamps `__islocal = 1` next to `docstatus`
+  ///   on a new doc (`create_new.js:309-310`) and drops it once the doc has a
+  ///   name; Frappe's own new-doc test is exactly "either flag or no name"
+  ///   (`document.py:539`). Without it `!doc.__islocal` reads `!undefined` ==
+  ///   true and the SDK behaves as though every document were already saved: it
+  ///   SHOWS the saved-only fields Desk hides on create, and for
+  ///   `read_only_depends_on` it LOCKS a field the user is there to fill in.
+  ///
+  ///   This deliberately duplicates `FormController._seedDefaults`, which
+  ///   derives the same flag. That derivation is reactive-mode only, and
+  ///   `FormBuilderMode.legacy` — the constructor default — never constructs a
+  ///   `FormController`, so it was the only engine getting this right. Deriving
+  ///   here makes the seeding belt-and-braces rather than load-bearing, exactly
+  ///   as happened with `docstatus`.
+  ///
+  ///   The assumption it carries, stated so it is not rediscovered: a SAVED
+  ///   document must have `name` in the eval scope, or it reads as local. That
+  ///   is not new — `_seedDefaults` already derives from the absence of a name
+  ///   — so both engines make it and agree, which is the point. An explicit
+  ///   `__islocal` from the host always wins, since the derivation only fires
+  ///   on a null.
+  ///
+  /// The `...src` spread MUST stay FIRST. These entries are conditional
+  /// defaults, which reads like something that would naturally go at the top —
+  /// but putting `'docstatus': 0` before the spread lets a `{'docstatus': null}`
+  /// overwrite it again, silently restoring the exact bug this guards. Same for
+  /// `__islocal`.
+  ///
   /// List values are NOT copied. They used to be, one level deep, because
   /// `pop()` mutated its receiver and these are live child-table lists. That
   /// copy ran on every evaluation — per field per change — and still did not
   /// reach a nested receiver like `doc.rows[0].tags.pop()`, which went on
   /// mutating live state. `pop()` is non-mutating now (see `js_expression.dart`),
   /// so no method in the grammar writes to its receiver and the copy has
-  /// nothing left to protect.
+  /// nothing left to protect. That read-only property is what makes sharing the
+  /// live lists safe; `_listMethods` carries the note for anyone adding one.
   static Map<String, dynamic> _evalScope(Map<String, dynamic> src) => {
     ...src,
     if (src['docstatus'] == null) 'docstatus': 0,
+    if (src['__islocal'] == null &&
+        (src['name'] == null || src['name'].toString().isEmpty))
+      '__islocal': 1,
   };
 
   /// Expressions already reported by [_logOnce].
