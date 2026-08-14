@@ -343,8 +343,14 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
   /// echo would NOT self-guard and would double-run the pipeline alongside the
   /// explicit cascade (PR#83 finding #1). This flag makes the echo a pure
   /// state-sync no-op so the explicit [_scheduleProgrammaticCascade] is the
-  /// single cascade path. Only raised when the cascade flag is on, so legacy
-  /// behaviour is unchanged.
+  /// single cascade path.
+  ///
+  /// Raised for the synchronous cross-field (`rest`) echo only when the cascade
+  /// flag is on (legacy behaviour otherwise), but ALWAYS for the deferred
+  /// self-key echo — an unguarded self-key echo on a typed field re-fires the
+  /// pipeline every frame with no depth cap (the cap is cascade-gated), so a
+  /// self-referential handler would hang. See the self-key echo in
+  /// [_onFieldValueChanged].
   int _programmaticEchoGuard = 0;
 
   /// Cached `fieldname → DocField` index for O(1) lookups (see [_fieldByName]),
@@ -522,8 +528,19 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
     if (widget.mode == FormBuilderMode.reactive) {
       _controller =
           widget.controller ??
-          FormController(meta: widget.meta, initialData: widget.initialData);
+          FormController(
+            meta: widget.meta,
+            initialData: widget.initialData,
+            parentData: widget.parentFormData,
+          );
       _ownsController = widget.controller == null;
+      // A host-supplied controller never saw the constructor argument above, so
+      // thread `parent` in here too — otherwise parentFormData is silently
+      // ignored and every `parent.<field>` condition falls back to aliasing
+      // `doc`. no-clobber: a controller that already carries parentData wins.
+      if (widget.parentFormData != null && _controller!.parentData == null) {
+        _controller!.parentData = widget.parentFormData;
+      }
       _controller!.fetchLinkedDocument = widget.fetchLinkedDocument;
       // no-clobber: only wire the bridge hook if the controller has none.
       if (widget.onFieldChange != null &&
@@ -815,7 +832,15 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
     required bool onError,
   }) {
     if (expr == null || expr.isEmpty) return defaultValue;
-    return DependsOnEvaluator.evaluate(expr, _evalData, onError: onError);
+    // [onError] is the fallback for an expression that is present but cannot be
+    // evaluated: an unparseable mandatory_depends_on must not make the field
+    // permanently mandatory.
+    return DependsOnEvaluator.evaluate(
+      expr,
+      _evalData,
+      parentData: effectiveParentFormData,
+      defaultOnError: onError,
+    );
   }
 
   bool _shouldShowField(DocField field) =>
@@ -1012,8 +1037,14 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
   /// [FrappeFormBuilder.onFieldChange], depends_on rebuild). Extracted from the
   /// field `onChanged` callback so a value set programmatically can re-enter the
   /// SAME pipeline when [FrappeFormBuilder.cascadeProgrammaticChanges] is on —
-  /// see [_scheduleProgrammaticCascade]. When the flag is off this is
-  /// byte-identical to the previous inline `onChanged`.
+  /// see [_scheduleProgrammaticCascade].
+  ///
+  /// With the flag off this is the previous inline `onChanged` **except on the
+  /// self-key path**, where two ungated fixes apply: the widget patch is
+  /// deferred one frame, and its echo is swallowed to a state-sync. So a
+  /// depth-0 change that arrives while that deferred `patchValue` is in flight
+  /// no longer re-runs the pipeline. Only reachable when a handler patches the
+  /// field currently changing; see `doc/COMPUTED_FIELD_CASCADE.md`.
   ///
   /// [cascadeDepth] > 0 marks a programmatic cascade re-fire: the field's value
   /// is already in [_formData] (the parent patch set it), so `oldValue == value`
@@ -1032,7 +1063,12 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
     // cascade the explicit re-fire (cascadeDepth > 0, dispatched post-frame after
     // the guard is released) is the sole re-fire path, so this synchronous echo
     // only syncs form state and returns without re-running the pipeline.
-    if (cascade && _programmaticEchoGuard > 0 && cascadeDepth == 0) {
+    //
+    // NOT gated on [cascade]: the deferred self-key echo below raises this guard
+    // unconditionally (see the comment there), so this check must honour it with
+    // the flag off too — otherwise a self-referential handler on a typed field
+    // re-fires every frame with no depth cap (the cap is cascade-gated).
+    if (_programmaticEchoGuard > 0 && cascadeDepth == 0) {
       if (field.fieldname != null) {
         if (value == null) {
           _formData.remove(field.fieldname);
@@ -1162,13 +1198,23 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
             final selfValue = patches[selfKey];
             WidgetsBinding.instance.addPostFrameCallback((_) {
               if (!mounted) return;
-              if (cascade) _programmaticEchoGuard++;
+              // Guard raised UNCONDITIONALLY, not just when cascading. The
+              // deferred patchValue re-fires this field's onChanged; for a typed
+              // field (Check/Date/Rating) FieldNormalizer changes the value's
+              // representation, so the echoed value never equals the doc-space
+              // value in _formData, `changed` stays true, and a self-referential
+              // handler re-fires forever across postFrameCallbacks — an uncapped
+              // infinite hang, because the depth cap lives only in the
+              // cascade-gated [_scheduleProgrammaticCascade]. Making the echo a
+              // pure state-sync no-op bounds it regardless of the flag; no finite
+              // cascade-off case relies on this echo re-running the pipeline.
+              _programmaticEchoGuard++;
               try {
                 _formKey.currentState?.patchValue(
                   _normalizePatchValues({selfKey: selfValue}),
                 );
               } finally {
-                if (cascade) _programmaticEchoGuard--;
+                _programmaticEchoGuard--;
               }
             });
           }
@@ -1224,12 +1270,12 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
       final newValue = entry.value;
       // Child-table payloads are patched wholesale, not treated as field edits.
       if (newValue is List || newValue is Map) continue;
-      // Value-equality: skip fields whose value did not actually change.
-      if (_normForCascade(prior[entry.key]) == _normForCascade(newValue)) {
-        continue;
-      }
       final field = _fieldByName[entry.key];
       if (field == null) continue;
+      // Value-equality: skip fields whose value did not actually change.
+      if (_cascadeValuesEqual(field, prior[entry.key], newValue)) {
+        continue;
+      }
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (mounted) {
           _onFieldValueChanged(field, newValue, cascadeDepth: depth + 1);
@@ -1238,9 +1284,40 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
     }
   }
 
-  /// Normalise for cascade value-equality: trimmed string form, so `5`/`"5"`
-  /// compare equal and a null/absent value never spuriously "changes".
-  static String? _normForCascade(dynamic v) => v?.toString().trim();
+  /// Cascade value-equality for [field]. Baseline is trimmed-string equality, so
+  /// `5`/`"5"` compare equal and a null/absent value never spuriously "changes".
+  ///
+  /// For NUMERIC fieldtypes only, both operands are additionally compared as
+  /// numbers, so `10`/`"10.0"`/`10.00` are equal and a representation-only
+  /// change (e.g. a Float field re-emitting `"10.0"` for `10`) does not trigger a
+  /// spurious self-terminating re-fire. Restricted to numeric fieldtypes on
+  /// purpose: a Link/Select/Data id like `"007"` must NOT compare equal to `"7"`,
+  /// which is what an unconditional numeric compare would do.
+  static bool _cascadeValuesEqual(DocField field, dynamic a, dynamic b) {
+    if (_isNumericFieldType(field.fieldtype)) {
+      final na = _asNum(a);
+      final nb = _asNum(b);
+      if (na != null && nb != null) return na == nb;
+    }
+    return a?.toString().trim() == b?.toString().trim();
+  }
+
+  /// Fieldtypes whose values are numbers, so a representation change carries no
+  /// meaning for cascade purposes.
+  static bool _isNumericFieldType(String? fieldtype) =>
+      fieldtype == FieldTypes.int ||
+      fieldtype == FieldTypes.float ||
+      fieldtype == FieldTypes.currency ||
+      fieldtype == FieldTypes.percent ||
+      fieldtype == FieldTypes.rating;
+
+  /// Parse [v] to a [num] (int or double), or null if it is not numeric.
+  static num? _asNum(dynamic v) {
+    if (v is num) return v;
+    final s = v?.toString().trim();
+    if (s == null || s.isEmpty) return null;
+    return num.tryParse(s);
+  }
 
   Widget _buildFieldWidget(DocField field) {
     if (widget.mode == FormBuilderMode.reactive && _controller != null) {
@@ -1802,7 +1879,11 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
         if (field.dependsOn != null && field.dependsOn!.isNotEmpty) {
           // Evaluate against the merged formValues so the latest user
           // changes drive the visibility decision.
-          if (!DependsOnEvaluator.evaluate(field.dependsOn, formValues)) {
+          if (!DependsOnEvaluator.evaluate(
+            field.dependsOn,
+            formValues,
+            parentData: effectiveParentFormData,
+          )) {
             continue;
           }
         }
@@ -1859,10 +1940,18 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
       if (f.fieldname == null) continue;
       final tabHidden =
           currentTabDeps != null &&
-          !DependsOnEvaluator.evaluate(currentTabDeps, dataForDepends);
+          !DependsOnEvaluator.evaluate(
+            currentTabDeps,
+            dataForDepends,
+            parentData: effectiveParentFormData,
+          );
       final secHidden =
           currentSectionDeps != null &&
-          !DependsOnEvaluator.evaluate(currentSectionDeps, dataForDepends);
+          !DependsOnEvaluator.evaluate(
+            currentSectionDeps,
+            dataForDepends,
+            parentData: effectiveParentFormData,
+          );
       if (tabHidden || secHidden) {
         hiddenByContainer.add(f.fieldname!);
       }
@@ -1875,7 +1964,11 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
       );
       if (field.fieldtype == '_missing_') return false;
       if (field.dependsOn == null || field.dependsOn!.isEmpty) return false;
-      return !DependsOnEvaluator.evaluate(field.dependsOn, dataForDepends);
+      return !DependsOnEvaluator.evaluate(
+        field.dependsOn,
+        dataForDepends,
+        parentData: effectiveParentFormData,
+      );
     });
 
     // Frappe-parity mandatory sweep over the COMPLETE payload.
@@ -1896,7 +1989,7 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
           field.reqd ||
           (field.mandatoryDependsOn != null &&
               field.mandatoryDependsOn!.isNotEmpty &&
-              // `onError: false` is NOT optional here. `_isFieldRequired`
+              // `defaultOnError: false` is NOT optional here. `_isFieldRequired`
               // (same file) passes it, so without it an unparseable
               // `mandatory_depends_on` makes this sweep block Save on a field
               // the widget never marked required and never drew an asterisk
@@ -1905,7 +1998,8 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
               DependsOnEvaluator.evaluate(
                 field.mandatoryDependsOn,
                 dataForDepends,
-                onError: false,
+                parentData: effectiveParentFormData,
+                defaultOnError: false,
               ));
       if (!required) continue;
       final v = completeFormData[name];

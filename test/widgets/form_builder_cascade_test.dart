@@ -219,12 +219,15 @@ void main() {
 
     // The key assertion is that pumpAndSettle RETURNS (no infinite loop).
     // Calls are bounded: 1 for `a` + at most (depth cap) re-fires for `b`.
+    // Pin the exact count: 1 dispatch for `a` + _maxProgrammaticCascadeDepth
+    // (12) non-converging re-fires for `b`. `lessThanOrEqualTo(20)` also passed
+    // if the cap silently changed to 5 or 19, which is the one thing this test
+    // exists to police.
     expect(
       calls,
-      lessThanOrEqualTo(20),
-      reason: 'cascade must be bounded by the depth cap, not loop forever',
+      equals(13),
+      reason: 'cascade must stop at the depth cap (1 + 12), not loop forever',
     );
-    expect(calls, greaterThan(1), reason: 'the cascade did fire at least once');
   });
 
   testWidgets('cascade OFF: a SELF-referential rewrite must not recurse '
@@ -324,6 +327,172 @@ void main() {
         reason:
             'exactly the user edit + ONE self re-fire ("hi"→"HI" rewrite); '
             'the idempotent second pass ("HI"→"HI") must not re-fire again',
+      );
+    },
+  );
+
+  testWidgets(
+    'cascade OFF: a self-referential handler on a TYPED field must not loop '
+    '(deferred self-key echo hang regression)',
+    (tester) async {
+      // Regression: the deferred self-key echo used to raise
+      // [_programmaticEchoGuard] only when the cascade flag was ON. With it
+      // OFF and a TYPED field, the handler patch lands in _formData in one
+      // representation (bool `true`) while the Check widget's onChanged echoes
+      // another (int `1`), so `oldValue != value` stays true, the handler
+      // re-fires every post-frame, and the ONLY loop breaker — the depth cap
+      // in _scheduleProgrammaticCascade — never runs because it is
+      // cascade-gated. That is an uncapped infinite hang (pre-fix a
+      // synchronous StackOverflow). The self-key echo guard is now
+      // unconditional, so the echo is a pure state-sync no-op and the handler
+      // fires exactly once. The throw-after-N counter turns a would-be hang
+      // into a fast, deterministic failure instead of a pumpAndSettle timeout.
+      var flagHandlerCalls = 0;
+      Map<String, dynamic>? emitted;
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: FrappeFormBuilder(
+              meta: DocTypeMeta(
+                name: 'TestDoctype',
+                fields: <DocField>[
+                  DocField(fieldname: 'flag', fieldtype: 'Check', label: 'F'),
+                ],
+              ),
+              // cascadeProgrammaticChanges defaults to false
+              onFieldChange: (name, value, data, {source = ChangeSource.user}) {
+                if (name == 'flag') {
+                  flagHandlerCalls++;
+                  if (flagHandlerCalls > 5) {
+                    throw StateError(
+                      'self-key echo looped ($flagHandlerCalls calls) — the '
+                      'deferred echo must be guarded regardless of the cascade '
+                      'flag',
+                    );
+                  }
+                  // Return bool while the widget echoes int: idempotent in
+                  // intent, but a representation the widget never converges to.
+                  return {'flag': true};
+                }
+                return null;
+              },
+              onFormDataChanged: (d) => emitted = d,
+            ),
+          ),
+        ),
+      );
+
+      await tester.tap(find.byKey(const ValueKey('check_flag')));
+      await tester.pumpAndSettle();
+
+      // Exactly once. `lessThanOrEqualTo(5)` could never fail here — the guard
+      // inside the handler throws at > 5, so any reachable value satisfied it,
+      // and a partial regression leaking two or three extra frames stayed
+      // green. The documented contract is "the handler fires exactly once".
+      expect(
+        flagHandlerCalls,
+        equals(1),
+        reason: 'the deferred self-key echo must not re-fire the handler',
+      );
+      // Pin the representation. The handler returns bool `true`; what lands in
+      // doc space is int 1, because the Check widget's echo goes through
+      // FieldNormalizer. `anyOf(true, 1)` accepted either and so asserted
+      // nothing about which one the payload carries.
+      expect(
+        emitted?['flag'],
+        equals(1),
+        reason: 'the self-patch value must land in the doc as Frappe 0/1',
+      );
+    },
+  );
+
+  testWidgets(
+    'cascade ON: numeric value-equality skips a representation-only re-fire '
+    '(10 vs "10.0")',
+    (tester) async {
+      // b starts at int 10. The handler for `a` patches b to the string
+      // "10.0" — numerically identical. The cascade value-equality must treat
+      // 10 == "10.0" and NOT re-fire b's handler. Pre-fix the trimmed-string
+      // compare ("10" != "10.0") let a representation-only change through as a
+      // harmless-but-avoidable extra self-terminating re-fire.
+      var bHandlerCalls = 0;
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: FrappeFormBuilder(
+              meta: DocTypeMeta(
+                name: 'TestDoctype',
+                fields: <DocField>[
+                  DocField(fieldname: 'a', fieldtype: 'Data', label: 'A'),
+                  DocField(fieldname: 'b', fieldtype: 'Float', label: 'B'),
+                ],
+              ),
+              initialData: const {'b': 10},
+              cascadeProgrammaticChanges: true,
+              onFieldChange: (name, value, data, {source = ChangeSource.user}) {
+                if (name == 'a') return {'b': '10.0'};
+                if (name == 'b') bHandlerCalls++;
+                return null;
+              },
+            ),
+          ),
+        ),
+      );
+
+      await tester.enterText(find.byKey(const ValueKey('data_a')), 'go');
+      await tester.pumpAndSettle();
+
+      expect(
+        bHandlerCalls,
+        0,
+        reason:
+            'a numerically-equal patch (10 vs "10.0") must not re-fire b\'s '
+            'handler',
+      );
+    },
+  );
+
+  testWidgets(
+    'cascade ON: numeric equality does NOT apply to non-numeric fieldtypes '
+    '("007" vs "7" on a Link/Data field is a real change)',
+    (tester) async {
+      // Counterpart to the test above: numeric comparison is gated on the
+      // field's fieldtype. A Data/Link id is an opaque string, so "007" and
+      // "7" must compare UNEQUAL and the cascade must re-fire — an
+      // unconditional numeric compare would swallow this legitimate change.
+      var bHandlerCalls = 0;
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: FrappeFormBuilder(
+              meta: DocTypeMeta(
+                name: 'TestDoctype',
+                fields: <DocField>[
+                  DocField(fieldname: 'a', fieldtype: 'Data', label: 'A'),
+                  DocField(fieldname: 'b', fieldtype: 'Data', label: 'B'),
+                ],
+              ),
+              initialData: const {'b': '007'},
+              cascadeProgrammaticChanges: true,
+              onFieldChange: (name, value, data, {source = ChangeSource.user}) {
+                if (name == 'a') return {'b': '7'};
+                if (name == 'b') bHandlerCalls++;
+                return null;
+              },
+            ),
+          ),
+        ),
+      );
+
+      await tester.enterText(find.byKey(const ValueKey('data_a')), 'go');
+      await tester.pumpAndSettle();
+
+      expect(
+        bHandlerCalls,
+        1,
+        reason:
+            'on a non-numeric field "007" → "7" is a real change and must '
+            'cascade exactly once',
       );
     },
   );

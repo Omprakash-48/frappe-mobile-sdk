@@ -45,17 +45,50 @@ void main() {
       );
     });
 
-    test('false for an empty table, a missing key, and a non-list', () {
+    test('false for an empty table and a missing key', () {
       expect(eval(expr, {'livelihoods': <dynamic>[]}), isFalse);
       expect(eval(expr, {}), isFalse);
-      expect(eval(expr, {'livelihoods': 'nonsense'}), isFalse);
     });
 
-    test('ignores rows that are not maps', () {
+    // The two cases below were asserted as `false` while `.some(...)` was
+    // matched by the `_evaluateChildTableSome` string helper, whose
+    // `if (rows is! List) return false` guard invented an answer JS never
+    // gives. That helper is gone — `js_expression.dart` evaluates the real
+    // grammar — so these now pin Desk's behaviour instead: both throw a
+    // TypeError in real JS, and the evaluator's contract turns a throw into the
+    // caller's fallback, which for `depends_on` is "show the field".
+    //
+    // Failing open is also the direction this file exists to protect: a hidden
+    // field is stripped from the save payload, so a malformed child table must
+    // not silently make its dependent field unreachable.
+    test('a non-list table throws in real JS -> fails open, field shown', () {
+      // `('nonsense' || []).some` is not a function.
+      expect(eval(expr, {'livelihoods': 'nonsense'}), isTrue);
+      // Fallback, not a computed answer: it follows the caller's default.
+      expect(
+        DependsOnEvaluator.evaluate(expr, {
+          'livelihoods': 'nonsense',
+        }, defaultOnError: false),
+        isFalse,
+      );
+    });
+
+    test('a non-map row is outside the grammar -> fails open, field shown', () {
+      // `null.livelihood` is a TypeError in real JS. A scalar row is not a
+      // TypeError there (`'a'.livelihood` is undefined), but reading an
+      // arbitrary member off a string is outside the supported subset, so it
+      // raises rather than guessing — the same fallback either way.
       expect(
         eval(expr, {
           'livelihoods': ['a', 1, null],
         }),
+        isTrue,
+      );
+      // Fallback, not a computed answer: it follows the caller's default.
+      expect(
+        DependsOnEvaluator.evaluate(expr, {
+          'livelihoods': ['a', 1, null],
+        }, defaultOnError: false),
         isFalse,
       );
     });

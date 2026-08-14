@@ -253,22 +253,50 @@ void main() {
   });
 
   group('JS arrow functions are not > comparisons', () {
-    test('=> is not spaced apart, so the > branch is not taken', () {
-      // `r => r.ok` was rewritten to `r = > r.ok`, which made the expression
-      // match the ' > ' comparison branch instead of falling through to the
-      // truthy fallback as it did before operator spacing was introduced.
-      // The fallback looks the expression up with `doc.` stripped, so the key
-      // it consults is proof that `=>` survived normalization intact.
+    test('=> is parsed as an arrow, not as a > comparison', () {
+      // Originally a white-box probe: operator-spacing normalization rewrote
+      // `r => r.ok` to `r = > r.ok`, making the expression match the ' > '
+      // comparison branch instead of falling through to the truthy fallback,
+      // and the literal formData key the fallback consulted was the proof that
+      // `=>` had survived intact.
+      //
+      // That fallback is gone — `eval:` expressions now go through a real JS
+      // parser, which never consults a literal key. So the contract is asserted
+      // directly instead: the arrow body actually runs, per row.
       const expr = 'eval:doc.items.some(r => r.ok)';
       expect(
-        DependsOnEvaluator.evaluate(expr, {'items.some(r => r.ok)': 1}),
+        DependsOnEvaluator.evaluate(expr, {
+          'items': [
+            {'ok': false},
+            {'ok': true},
+          ],
+        }),
         isTrue,
       );
-      // The mangled key the buggy spacing produced is never consulted.
       expect(
-        DependsOnEvaluator.evaluate(expr, {'items.some(r = > r.ok)': 1}),
+        DependsOnEvaluator.evaluate(expr, {
+          'items': [
+            {'ok': false},
+          ],
+        }),
         isFalse,
       );
+      expect(DependsOnEvaluator.evaluate(expr, {'items': []}), isFalse);
+      // Direct guard on the arrow itself: a self-contained array literal, so
+      // the result depends only on whether `=>` parsed. Mangling it into
+      // `= >` fails the parse, and BOTH cases would then fall back to
+      // defaultOnError (true) — so the isFalse case cannot pass by accident.
+      expect(
+        DependsOnEvaluator.evaluate('eval:[1,2].some(r => r > 1)', {}),
+        isTrue,
+      );
+      expect(
+        DependsOnEvaluator.evaluate('eval:[1,2].some(r => r > 5)', {}),
+        isFalse,
+      );
+      // The arrow parameter is not a document field, so it stays out of the
+      // reverse-dependency graph.
+      expect(DependsOnEvaluator.referencedFields(expr), {'items'});
     });
 
     test('real > / >= comparisons are unaffected by the arrow guard', () {
@@ -408,107 +436,193 @@ void main() {
     });
   });
 
-  group('operator-spacing normalization leaves non-expression text alone', () {
-    test('an escaped quote does not end the literal early', () {
-      // Before: the loop closed on the backslash-escaped quote, so the rest of
-      // the string was treated as expression text and operator-spaced.
+  // Shapes the old string-matching evaluator needed an operator-spacing pass to
+  // survive, asserted against real JS semantics instead of that
+  // implementation's limits. Unspaced operators, two-space literals and arrow
+  // predicates are already covered above and in depends_on_evaluator_test.dart;
+  // what was missing is a backslash-escaped quote, real arithmetic, and the
+  // regex-literal contract.
+  group('shapes that defeated the string-matching evaluator', () {
+    test('an escaped quote does not end the string literal early', () {
+      // `"it\"s ok"` is ONE JS literal holding `it"s ok`.
       expect(
         DependsOnEvaluator.evaluate(r'eval:doc.note == "it\"s ok"', {
-          'note': r'it\"s ok',
+          'note': 'it"s ok',
         }),
         isTrue,
       );
-      // A value containing an operator inside an escaped-quote literal must not
-      // be re-spaced into a comparison.
+      // A comparison operator inside the literal is data, not an operator.
       expect(
         DependsOnEvaluator.evaluate(r'eval:doc.note == "a\"b>c"', {
-          'note': r'a\"b>c',
-        }),
-        isTrue,
-      );
-    });
-
-    test('regex contents cannot change how the expression parses', () {
-      // The invariant, asserted without depending on the fallback's exact
-      // value: two expressions differing ONLY inside the regex must evaluate
-      // identically. Before the fix the operators inside the pattern were
-      // spaced into real ' < ' / ' > ' tokens, so editing the pattern changed
-      // which branch ran — a bogus comparison instead of the normal fallback.
-      const data = {'html': 'anything'};
-      final plain = DependsOnEvaluator.evaluate(
-        r"eval:doc.html.replace(/x/g, '')",
-        data,
-      );
-      for (final pattern in <String>['<br>', '[a-z>=<]+', '>>', '<=']) {
-        expect(
-          DependsOnEvaluator.evaluate(
-            "eval:doc.html.replace(/$pattern/g, '')",
-            data,
-          ),
-          plain,
-          reason: 'pattern "$pattern" must not steer the parse',
-        );
-      }
-    });
-
-    test(
-      'a division-position slash does not swallow the rest of the expression',
-      () {
-        // Only a value position opens a regex; after an identifier `/` is
-        // division. If it were treated as a regex opener it would consume through
-        // the ' == ', losing the comparison entirely and falling back to a
-        // truthiness check on `a` — which would be TRUE here. Asserting false
-        // proves the ' == ' survived. (The evaluator does no arithmetic, so
-        // `a/2` is simply not a resolvable field.)
-        expect(
-          DependsOnEvaluator.evaluate('eval:doc.a/2 == 5', {'a': 10}),
-          isFalse,
-        );
-      },
-    );
-
-    test('unspaced operators are still normalized', () {
-      // The behaviour this normalizer exists for must survive both guards.
-      expect(
-        DependsOnEvaluator.evaluate('eval:doc.x==1&&doc.y!=2', {
-          'x': 1,
-          'y': 3,
+          'note': 'a"b>c',
         }),
         isTrue,
       );
       expect(
-        DependsOnEvaluator.evaluate('eval:doc.x==1&&doc.y!=2', {
-          'x': 1,
-          'y': 2,
+        DependsOnEvaluator.evaluate(r'eval:doc.note == "a\"b>c"', {
+          'note': 'other',
         }),
         isFalse,
       );
     });
 
-    test('a JS arrow is still not spaced into a comparison', () {
-      // Regression guard for the pre-existing `=>` handling, re-asserted here
-      // because the regex branch now runs before the operator scan. `r => r.x`
-      // must not become `r = > r.x`; the observable contract is that the
-      // expression stays unparseable and both data shapes agree.
-      const expr = 'eval:doc.rows.filter(r => r.qty > 0).length > 0';
+    test('a slash after a value is division, and it is really computed', () {
+      // The matcher documented `doc.a/2 == 5` as false because it did no
+      // arithmetic. Desk computes it, so a real answer is required here.
       expect(
-        DependsOnEvaluator.evaluate(expr, {'rows': <dynamic>[]}),
-        DependsOnEvaluator.evaluate(expr, {
-          'rows': [
-            {'qty': 5},
-          ],
-        }),
-        reason: 'neither shape should be read as a real comparison',
+        DependsOnEvaluator.evaluate('eval:doc.a/2 == 5', {'a': 10}),
+        isTrue,
+      );
+      expect(
+        DependsOnEvaluator.evaluate('eval:doc.a/2 == 5', {'a': 8}),
+        isFalse,
       );
     });
 
-    test('two consecutive spaces inside a literal still survive', () {
+    test('KNOWN LIMITATION: a regex literal falls back, it does not guess', () {
+      // js_expression.dart deliberately does not lex regex literals, so such an
+      // expression throws and the caller's per-property default is used — never
+      // a computed boolean. Pinned via the differential: the two defaults
+      // disagreeing proves the expression fell back rather than answering. This
+      // fails loudly if regex support is ever half-implemented.
+      const expr = r"eval:doc.html.replace(/<br>/g, '') == 'ab'";
+      const data = <String, dynamic>{'html': 'a<br>b'};
       expect(
-        DependsOnEvaluator.evaluate('eval:doc.status == "In  Progress"', {
-          'status': 'In  Progress',
+        DependsOnEvaluator.evaluate(expr, data, defaultOnError: true),
+        isTrue,
+      );
+      expect(
+        DependsOnEvaluator.evaluate(expr, data, defaultOnError: false),
+        isFalse,
+      );
+    });
+  });
+
+  group('.pop() (real erpnext Data Import metadata)', () {
+    // Verbatim from the erpnext Data Import doctype JSON.
+    const realExpr =
+        "eval:doc.google_sheets_url || (doc.import_file && doc.import_file.split('.').pop().toLowerCase() === 'csv')";
+
+    test('the real expression discriminates csv from xlsx', () {
+      expect(
+        DependsOnEvaluator.evaluate(realExpr, {
+          'google_sheets_url': null,
+          'import_file': 'data.CSV',
         }),
         isTrue,
       );
+      // isFalse also proves it evaluated: defaultOnError is true, so a fallback
+      // here would read isTrue.
+      expect(
+        DependsOnEvaluator.evaluate(realExpr, {
+          'google_sheets_url': null,
+          'import_file': 'data.xlsx',
+        }),
+        isFalse,
+      );
+    });
+
+    test('pop returns the last element', () {
+      expect(
+        DependsOnEvaluator.evaluate('eval:doc.rows.pop() == 3', {
+          'rows': [1, 2, 3],
+        }),
+        isTrue,
+      );
+    });
+
+    test('pop on an empty list is undefined, not an error', () {
+      // undefined == 3 is false, and matching under both defaults proves no
+      // throw.
+      for (final d in [true, false]) {
+        expect(
+          DependsOnEvaluator.evaluate('eval:doc.rows.pop() == 3', {
+            'rows': <dynamic>[],
+          }, defaultOnError: d),
+          isFalse,
+        );
+      }
+    });
+
+    test("pop NEVER mutates the caller's list", () {
+      // The live child table. depends_on is re-evaluated per field per change,
+      // so a mutating pop would delete a row per keystroke.
+      final rows = <dynamic>[1, 2, 3];
+      final data = <String, dynamic>{'rows': rows};
+      DependsOnEvaluator.evaluate('eval:doc.rows.pop() == 3', data);
+      expect(rows, [1, 2, 3], reason: 'live form list must be untouched');
+      expect(data['rows'], same(rows));
+    });
+
+    test('doc and parent are the SAME object when parent is not supplied', () {
+      // Desk aliases parent to doc when there is no parent form
+      // (`this.frm ? this.frm.doc : this.doc`), so the two names must resolve
+      // to one object rather than to two equal ones.
+      //
+      // This used to be asserted through pop's side effect
+      // (`doc.rows.pop() == 3 && parent.rows.length == 2`). pop no longer
+      // mutates, so the assertion is made directly instead: `==` on two lists
+      // is reference equality, so this can only be true if they are identical.
+      expect(
+        DependsOnEvaluator.evaluate('eval:doc.rows == parent.rows', {
+          'rows': [1, 2, 3],
+        }),
+        isTrue,
+      );
+      // And the negative: two DISTINCT lists with equal contents are not equal,
+      // so the assertion above is not just "== on lists is always true".
+      expect(
+        DependsOnEvaluator.evaluate('eval:doc.a == doc.b', {
+          'a': [1, 2, 3],
+          'b': [1, 2, 3],
+        }),
+        isFalse,
+      );
+    });
+
+    test('pop does not mutate a NESTED list either', () {
+      // The one-level copy this replaces could not reach here: the receiver is
+      // a list inside a row map, which the copy shared, so every evaluation
+      // deleted an element from live child-table state.
+      final tags = <dynamic>['a', 'b', 'c'];
+      final data = <String, dynamic>{
+        'rows': [
+          {'tags': tags},
+        ],
+      };
+      DependsOnEvaluator.evaluate("eval:doc.rows[0].tags.pop() == 'c'", data);
+      expect(tags, ['a', 'b', 'c'], reason: 'nested live list must be intact');
+    });
+  });
+
+  group('erpnext.* globals (real erpnext metadata)', () {
+    test('cint(erpnext.is_perpetual_inventory_enabled(...)) is false, not a '
+        'fallback', () {
+      // Verbatim from erpnext. Cannot be answered offline, so it must resolve
+      // to the undefined sentinel: cint(undefined) -> 0 -> falsy -> field
+      // hidden, which is what a Desk with perpetual inventory OFF shows.
+      // Agreeing under both defaults proves it evaluated instead of throwing.
+      const expr =
+          'eval:cint(erpnext.is_perpetual_inventory_enabled(parent.company))';
+      for (final d in [true, false]) {
+        expect(
+          DependsOnEvaluator.evaluate(expr, {
+            'company': 'Test Co',
+          }, defaultOnError: d),
+          isFalse,
+        );
+      }
+    });
+
+    test('a namespaced erpnext call also resolves rather than throwing', () {
+      const expr =
+          'eval: erpnext.stock.is_subcontracting_or_return_transfer(doc)';
+      for (final d in [true, false]) {
+        expect(
+          DependsOnEvaluator.evaluate(expr, {'a': 1}, defaultOnError: d),
+          isFalse,
+        );
+      }
     });
   });
 
@@ -601,14 +715,14 @@ void main() {
   });
 
   group('extractEvalDocField only fast-paths a LEGAL fieldname', () {
-    // Root cause: the fast path compared the expression against
-    // `_extractFieldName`'s output, and that helper just strips a leading
-    // `doc.` without checking the remainder is a fieldname. For a multi-term
-    // expression the stripped remainder reassembles to the original string, so
-    // the equality held and the whole expression came back AS A FIELDNAME.
-    // The caller then looked up a field that cannot exist, found nothing, and
-    // the link picker silently stopped filtering — it looks like "no filter
-    // configured", not like an error, which is why it survived review.
+    // Root cause: the fast path compared the expression against a helper's
+    // output, and that helper just stripped a leading `doc.` without checking
+    // the remainder is a fieldname. For a multi-term expression the stripped
+    // remainder reassembles to the original string, so the equality held and
+    // the whole expression came back AS A FIELDNAME. The caller then looked up
+    // a field that cannot exist, found nothing, and the link picker silently
+    // stopped filtering — it looks like "no filter configured", not like an
+    // error, which is why it survived review.
     test('a && b expression returns the FIRST field, not the whole string', () {
       expect(
         DependsOnEvaluator.extractEvalDocField('eval:doc.a && doc.b'),
@@ -647,91 +761,4 @@ void main() {
       expect(DependsOnEvaluator.extractEvalDocField('eval:1 == 1'), isNull);
     });
   });
-
-  group('onError — the verdict for an expression that THROWS', () {
-    // `onError` only fires on a genuine evaluation failure, not on a false
-    // condition and not on an expression that merely falls through to the
-    // truthy fallback. Reaching it needs a value that throws while being
-    // compared, which is what [_ThrowOnEquals] is for. Without such a value
-    // this parameter has no test at all — which is how the reactive-mode and
-    // mandatory-sweep call sites below shipped taking the wrong default.
-    const expr = "eval:doc.a == 'x'";
-    final data = <String, dynamic>{'a': _ThrowOnEquals()};
-
-    test('evaluate defaults to TRUE — correct only for depends_on', () {
-      expect(DependsOnEvaluator.evaluate(expr, data), isTrue);
-    });
-
-    test('evaluate honours onError: false', () {
-      expect(DependsOnEvaluator.evaluate(expr, data, onError: false), isFalse);
-    });
-
-    test('evaluate2 FORWARDS onError to evaluate', () {
-      // The bug: evaluate2 dropped the argument, so `mandatory_depends_on` and
-      // `read_only_depends_on` in reactive mode took the `true` default — an
-      // unparseable expression made the field required (blocking Save with
-      // nothing the user could do) or read-only (permanently uneditable).
-      expect(
-        DependsOnEvaluator.evaluate2(expr, data, false, onError: false),
-        isFalse,
-      );
-      // Default preserved, so the signature stays source-compatible.
-      expect(DependsOnEvaluator.evaluate2(expr, data, false), isTrue);
-    });
-
-    test('defaultWhenEmpty still answers an ABSENT expression', () {
-      // The two questions are independent: onError must not leak into the
-      // null/empty case.
-      expect(
-        DependsOnEvaluator.evaluate2(null, data, false, onError: false),
-        isFalse,
-      );
-      expect(
-        DependsOnEvaluator.evaluate2('', data, true, onError: false),
-        isTrue,
-      );
-    });
-
-    test('a negated failing sub-expression still surfaces as onError', () {
-      // `!` inverts the error default on the way down so the `!` on the way
-      // back up cancels it — the caller's declared safe answer survives.
-      expect(
-        DependsOnEvaluator.evaluate(
-          "eval:!(doc.a == 'x')",
-          data,
-          onError: false,
-        ),
-        isFalse,
-      );
-      expect(DependsOnEvaluator.evaluate("eval:!(doc.a == 'x')", data), isTrue);
-    });
-
-    test('a && / || branch propagates onError to each part', () {
-      expect(
-        DependsOnEvaluator.evaluate("eval:doc.a == 'x' && doc.b == 1", {
-          ...data,
-          'b': 1,
-        }, onError: false),
-        isFalse,
-      );
-    });
-  });
-}
-
-/// Throws while being COMPARED, but stringifies normally.
-///
-/// `==` is the narrowest hook into [DependsOnEvaluator]'s failure path:
-/// `_compareValues` compares before it stringifies. Throwing from `toString`
-/// instead would also break the callers' own blank-value probes
-/// (`v.toString().isEmpty`), which would test the harness rather than the
-/// evaluator.
-class _ThrowOnEquals {
-  @override
-  bool operator ==(Object other) => throw StateError('comparison exploded');
-
-  @override
-  int get hashCode => 0;
-
-  @override
-  String toString() => 'boom';
 }

@@ -38,8 +38,10 @@ class FormController extends ChangeNotifier {
   FormController({
     required DocTypeMeta meta,
     Map<String, dynamic>? initialData,
+    Map<String, dynamic>? parentData,
     DateTime Function()? now,
   }) : _meta = meta,
+       _parentData = parentData,
        _now = now ?? DateTime.now {
     _graph = DependencyGraph.build(meta);
     assert(() {
@@ -54,13 +56,106 @@ class FormController extends ChangeNotifier {
   final DateTime Function() _now;
   late DependencyGraph _graph;
 
+  /// Parent document values, supplying `parent` to depends_on expressions on a
+  /// child-row form. Null on a top-level form, where Frappe aliases `parent`
+  /// to `doc`.
+  Map<String, dynamic>? _parentData;
+
+  /// Parent document values used to resolve `parent.<field>` in depends_on.
+  Map<String, dynamic>? get parentData => _parentData;
+
+  /// Wire `parent` after construction, for a host that builds its OWN
+  /// [FormController] and hands it to [FrappeFormBuilder] together with
+  /// `parentFormData` — the constructor argument is unreachable in that case,
+  /// and leaving it null silently aliases `parent` to `doc`, so every
+  /// `parent.<field>` condition would read this row's own values instead.
+  /// Mirrors how [fetchLinkedDocument] is injected by the widget layer.
+  ///
+  /// Recomputes the UI state of every field already being observed, because
+  /// visibility / mandatory / read-only may all depend on `parent`.
+  ///
+  /// Does NOT re-run validation. Intended for init-time wiring (which is where
+  /// [FrappeFormBuilder] uses it), before anything has validated. Assigning it
+  /// after [validate] has run leaves the *displayed* errors as they were until
+  /// the next validation, so a field that `mandatory_depends_on` has just made
+  /// required shows no error yet — call [validate] yourself if you need the
+  /// display refreshed immediately. Saving is unaffected either way:
+  /// [validate] clears `_errors` and re-derives every field from the live UI
+  /// state this setter has already refreshed, so a submit can never pass on a
+  /// stale required-set.
+  set parentData(Map<String, dynamic>? value) {
+    if (identical(_parentData, value)) return;
+    _parentData = value;
+    for (final e in _uiNotifiers.entries) {
+      e.value.value = _computeUiState(e.key);
+    }
+    _submitData.value = buildSubmitData();
+    notifyListeners();
+  }
+
   final Map<String, dynamic> _rawValues = {};
   final Map<String, ValueNotifier<dynamic>> _valueNotifiers = {};
   final Map<String, ValueNotifier<FieldUiState>> _uiNotifiers = {};
   late Map<String, dynamic> _baseline;
 
+  /// Frappe standard fields that are not in `DocType.fields` but are routinely
+  /// referenced from `depends_on` (`eval:doc.docstatus == 0`,
+  /// `eval:doc.__islocal`). They are seeded into [_rawValues] so expressions
+  /// resolve them, and excluded from [buildSubmitData]'s companion-key sweep so
+  /// the save payload is unchanged. The legacy `FrappeFormBuilder._formData`
+  /// path already carries them via `addAll(initialData)`; this keeps reactive
+  /// mode consistent with it and with Desk.
+  static const _stdEvalFields = <String>{
+    'docstatus',
+    'name',
+    'owner',
+    'doctype',
+    'idx',
+    '__islocal',
+    '__unsaved',
+  };
+
   // ── construction helpers ────────────────────────────────────────────────
   void _seedDefaults(Map<String, dynamic>? initialData) {
+    if (initialData != null) {
+      for (final k in _stdEvalFields) {
+        // Seed on a NON-NULL value, not on key presence. `{'docstatus': null}`
+        // is how an unsaved doc is routinely assembled, and keying on
+        // `containsKey` stored the null, which then made `putIfAbsent` below
+        // decline to fire. `eval:doc.docstatus == 0` read null == 0 -> false,
+        // so the field was hidden AND stripped from the save payload — the
+        // exact data-loss bug the std-field seeding exists to prevent,
+        // reintroduced through an explicit null. Same for `__islocal` at the
+        // guard below, which reads `_rawValues` and so inherits this.
+        if (initialData[k] != null) _rawValues[k] = initialData[k];
+      }
+    }
+    // Every Frappe document has a docstatus — 0 while it is a draft — and
+    // `frappe.model.get_new_doc` stamps it on a brand-new doc, so Desk reads
+    // `eval:doc.docstatus == 0` as true there. Nothing in the SDK sets the key,
+    // so without this a draft-only field is hidden on every new document.
+    _rawValues.putIfAbsent('docstatus', () => 0);
+
+    // `__islocal` marks a document that has never been saved. Desk stamps it
+    // alongside docstatus (`create_new.js:309-310`: `__islocal = 1`,
+    // `docstatus = 0`) and drops it once the doc has a name, and Frappe's own
+    // new-doc test is exactly "either flag or no name"
+    // (`document.py:539`: `if self.get("__islocal") or not self.get("name")`).
+    // So a doc with no name IS local — derived, not invented.
+    //
+    // Without this, `!doc.__islocal` reads `!undefined` == true, i.e. the SDK
+    // behaves as though every document were already saved: it SHOWS the
+    // saved-only fields Desk hides on create (the dominant corpus form —
+    // `depends_on: "eval:!doc.__islocal"`), and for `read_only_depends_on` it
+    // LOCKS a field the user is supposed to be able to fill in.
+    //
+    // An explicit `__islocal` from the host wins — it was seeded above.
+    if (!_rawValues.containsKey('__islocal')) {
+      final docName = _rawValues['name'];
+      if (docName == null || docName.toString().isEmpty) {
+        _rawValues['__islocal'] = 1;
+      }
+    }
     for (final f in _meta.fields) {
       final name = f.fieldname;
       if (name == null || name.isEmpty) continue;
@@ -376,21 +471,28 @@ class FormController extends ChangeNotifier {
       orElse: () => DocField(fieldtype: '_missing_'),
     );
     if (!_isDynamic(f) && !f.reqd && !f.readOnly) return FieldUiState.editable;
-    // `depends_on` keeps the `onError: true` default — an unparseable
+    // `depends_on` keeps the `defaultOnError: true` default — an unparseable
     // expression SHOWS the field rather than silently hiding data.
-    final visible = DependsOnEvaluator.evaluate(f.dependsOn, _rawValues);
+    final visible = DependsOnEvaluator.evaluate(
+      f.dependsOn,
+      _rawValues,
+      parentData: _parentData,
+    );
     // The other two must invert it: erring towards required blocks the save
     // with nothing the user can do about it, and erring towards locked makes
-    // the field permanently uneditable. FormBuilder's `_isFieldRequired` /
-    // `_isFieldReadOnly` already pass `false`; reactive mode must agree with
-    // them or the same field disagrees between the two engines.
+    // the field permanently uneditable. [DependsOnEvaluator.evaluate2] forwards
+    // its `defaultWhenEmpty` as the on-error fallback too, so the `false` below
+    // covers both the absent and the unparseable expression. FormBuilder's
+    // `_isFieldRequired` / `_isFieldReadOnly` already pass `false`; reactive
+    // mode must agree with them or the same field disagrees between the two
+    // engines.
     final required =
         f.reqd ||
         DependsOnEvaluator.evaluate2(
           f.mandatoryDependsOn,
           _rawValues,
           false,
-          onError: false,
+          parentData: _parentData,
         );
     final readOnly =
         f.readOnly ||
@@ -398,7 +500,7 @@ class FormController extends ChangeNotifier {
           f.readOnlyDependsOn,
           _rawValues,
           false,
-          onError: false,
+          parentData: _parentData,
         );
     return FieldUiState(
       visible: visible,
@@ -560,10 +662,27 @@ class FormController extends ChangeNotifier {
               ? <dynamic>[]
               : (f.defaultValue ?? ''));
     }
-    // also carry non-null companion/extra keys present in raw values
+    // also carry non-null companion/extra keys present in raw values, minus the
+    // std fields seeded purely so depends_on can read them (see _stdEvalFields)
     _rawValues.forEach((k, v) {
-      if (v != null) complete[k] = v;
+      if (v != null && !_stdEvalFields.contains(k)) complete[k] = v;
     });
+
+    // The payload must not carry the std fields, but the visibility sweep below
+    // MUST still see them. Evaluating `eval:doc.docstatus == 0` against a scope
+    // with no `docstatus` yields undefined == 0 -> false -> "hidden" -> the
+    // field is removed from the save, even though _computeUiState (which reads
+    // _rawValues, where docstatus IS present) rendered it and the user filled
+    // it in. Same for a Section/Tab Break gated that way, which drops every
+    // field beneath it. Evaluate against the doc, remove from the payload.
+    final evalScope = <String, dynamic>{
+      ...complete,
+      // Non-null, matching _seedDefaults: carrying an explicit null here would
+      // shadow DependsOnEvaluator._evalScope's `docstatus` default and put the
+      // payload sweep back on the wrong answer.
+      for (final k in _stdEvalFields)
+        if (_rawValues[k] != null) k: _rawValues[k],
+    };
 
     // drop hidden-by-own-depends_on and hidden-by-container
     final hiddenByContainer = <String>{};
@@ -580,9 +699,19 @@ class FormController extends ChangeNotifier {
       }
       if (f.fieldtype == 'Column Break' || f.fieldname == null) continue;
       final tabHidden =
-          tabDeps != null && !DependsOnEvaluator.evaluate(tabDeps, complete);
+          tabDeps != null &&
+          !DependsOnEvaluator.evaluate(
+            tabDeps,
+            evalScope,
+            parentData: _parentData,
+          );
       final secHidden =
-          secDeps != null && !DependsOnEvaluator.evaluate(secDeps, complete);
+          secDeps != null &&
+          !DependsOnEvaluator.evaluate(
+            secDeps,
+            evalScope,
+            parentData: _parentData,
+          );
       if (tabHidden || secHidden) hiddenByContainer.add(f.fieldname!);
     }
     complete.removeWhere((name, _) {
@@ -593,7 +722,11 @@ class FormController extends ChangeNotifier {
       );
       if (f.fieldtype == '_missing_') return false;
       if (f.dependsOn == null || f.dependsOn!.isEmpty) return false;
-      return !DependsOnEvaluator.evaluate(f.dependsOn, complete);
+      return !DependsOnEvaluator.evaluate(
+        f.dependsOn,
+        evalScope,
+        parentData: _parentData,
+      );
     });
     return complete;
   }
