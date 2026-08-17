@@ -189,70 +189,78 @@ void main() {
       expect((p.first['mobile_uuid'] as String?) ?? '', isNotEmpty);
     });
 
-    test('two Desk-origin rows with empty uuids get distinct local ids',
-        () async {
-      await pull([
-        {
-          'name': 'SO-5',
-          'modified': '2026-01-01 00:00:00',
-          'customer': 'CUST-5',
-          'mobile_uuid': null,
-          'items': const <Map<String, dynamic>>[],
-        },
-        {
-          'name': 'SO-6',
-          'modified': '2026-01-01 00:00:00',
-          'customer': 'CUST-6',
-          'mobile_uuid': '',
-          'items': const <Map<String, dynamic>>[],
-        },
-      ], isInitialSync: true);
+    test(
+      'two Desk-origin rows with empty uuids get distinct local ids',
+      () async {
+        await pull([
+          {
+            'name': 'SO-5',
+            'modified': '2026-01-01 00:00:00',
+            'customer': 'CUST-5',
+            'mobile_uuid': null,
+            'items': const <Map<String, dynamic>>[],
+          },
+          {
+            'name': 'SO-6',
+            'modified': '2026-01-01 00:00:00',
+            'customer': 'CUST-6',
+            'mobile_uuid': '',
+            'items': const <Map<String, dynamic>>[],
+          },
+        ], isInitialSync: true);
 
-      final p = await db.query('docs__sales_order', orderBy: 'server_name');
-      expect(p.length, 2, reason: 'neither row may collide on an empty PK');
-      expect(p[0]['mobile_uuid'], isNot(p[1]['mobile_uuid']));
-    });
+        final p = await db.query('docs__sales_order', orderBy: 'server_name');
+        expect(p.length, 2, reason: 'neither row may collide on an empty PK');
+        expect(p[0]['mobile_uuid'], isNot(p[1]['mobile_uuid']));
+      },
+    );
   });
 
   group('an existing local row keeps its own uuid', () {
     // Adoption must never renumber a row that already exists locally — the
     // local uuid is referenced by outbox rows and pending_attachments.
-    test('a re-pull does not overwrite the local uuid with the server one',
-        () async {
-      await pull([
-        {
-          'name': 'SO-7',
-          'modified': '2026-01-01 00:00:00',
-          'customer': 'CUST-7',
-          'mobile_uuid': null,
-          'items': const <Map<String, dynamic>>[],
-        },
-      ], isInitialSync: true);
-      final first = await db.query('docs__sales_order');
-      final localUuid = first.first['mobile_uuid'] as String;
+    test(
+      'a re-pull does not overwrite the local uuid with the server one',
+      () async {
+        await pull([
+          {
+            'name': 'SO-7',
+            'modified': '2026-01-01 00:00:00',
+            'customer': 'CUST-7',
+            'mobile_uuid': null,
+            'items': const <Map<String, dynamic>>[],
+          },
+        ], isInitialSync: true);
+        final first = await db.query('docs__sales_order');
+        final localUuid = first.first['mobile_uuid'] as String;
 
-      // Server now reports a uuid for the same record.
-      await pull([
-        {
-          'name': 'SO-7',
-          'modified': '2026-01-02 00:00:00',
-          'customer': 'CUST-7b',
-          'mobile_uuid': serverUuid,
-          'items': const <Map<String, dynamic>>[],
-        },
-      ]);
+        // Server now reports a uuid for the same record.
+        await pull([
+          {
+            'name': 'SO-7',
+            'modified': '2026-01-02 00:00:00',
+            'customer': 'CUST-7b',
+            'mobile_uuid': serverUuid,
+            'items': const <Map<String, dynamic>>[],
+          },
+        ]);
 
-      final after = await db.query('docs__sales_order');
-      expect(after.length, 1);
-      expect(
-        after.first['mobile_uuid'],
-        localUuid,
-        reason:
-            'the local uuid is already referenced by outbox and '
-            'pending_attachments rows; a pull must not renumber it',
-      );
-      expect(after.first['customer'], 'CUST-7b', reason: 'payload still applies');
-    });
+        final after = await db.query('docs__sales_order');
+        expect(after.length, 1);
+        expect(
+          after.first['mobile_uuid'],
+          localUuid,
+          reason:
+              'the local uuid is already referenced by outbox and '
+              'pending_attachments rows; a pull must not renumber it',
+        );
+        expect(
+          after.first['customer'],
+          'CUST-7b',
+          reason: 'payload still applies',
+        );
+      },
+    );
   });
 
   group('adoption does not disturb the bulk-vs-sequential gate', () {
