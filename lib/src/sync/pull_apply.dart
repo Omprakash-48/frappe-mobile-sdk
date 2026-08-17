@@ -39,6 +39,39 @@ String _asUtc(String raw) {
   return '${raw}Z';
 }
 
+/// The local `mobile_uuid` for a pulled row, given the local uuid already on
+/// file (null when the row is new) and whatever the server sent.
+///
+/// Precedence — local, then incoming, then a fresh mint:
+///
+/// 1. **An existing local uuid always wins.** Outbox rows and
+///    `pending_attachments` reference it, so a pull must never renumber a row
+///    that already exists here.
+/// 2. **A non-empty incoming uuid is ADOPTED.** `mobile_control` provisions
+///    `mobile_uuid` as a UNIQUE field on parent and child doctypes alike, so a
+///    non-empty value is a real global identity — the one this device assigned
+///    when it created the document, round-tripped back. Minting a new v4 here
+///    would break that identity across any wipe (logout, reinstall, fresh
+///    device) and defeat the `mobile_uuid` fallback match, which exists to
+///    reconcile a row whose `server_name` writeback was interrupted.
+/// 3. **Otherwise mint.** An empty or absent value is NOT adopted, and that is
+///    load-bearing rather than defensive: `mobile_uuid` is the local primary
+///    key, Desk-origin rows return it as null or `''`, and adopting `''` would
+///    write an empty PK that the next such row collides with.
+///
+/// Shared by both write paths (bulk and sequential) so the precedence cannot
+/// drift between them.
+String resolvePulledMobileUuid({
+  required String? localUuid,
+  required Object? incoming,
+  required Uuid uuidGen,
+}) {
+  if (localUuid != null && localUuid.isNotEmpty) return localUuid;
+  final adopted = incoming?.toString();
+  if (adopted != null && adopted.isNotEmpty) return adopted;
+  return uuidGen.v4();
+}
+
 /// System columns that the per-doctype mirror manages itself. A meta field
 /// that shares one of these names (e.g. `mobile_uuid` exposed for L2
 /// idempotency, or Frappe's stock `modified` / `docstatus`) must not be
@@ -384,9 +417,13 @@ class PullApply {
         continue;
       }
 
-      final uuid = existing.isEmpty
-          ? uuidGen.v4()
-          : existing.first['mobile_uuid'] as String;
+      final uuid = resolvePulledMobileUuid(
+        localUuid: existing.isEmpty
+            ? null
+            : existing.first['mobile_uuid'] as String?,
+        incoming: r['mobile_uuid'],
+        uuidGen: uuidGen,
+      );
 
       final nowMs = DateTime.now().toUtc().millisecondsSinceEpoch;
       final parentRow = <String, Object?>{
@@ -490,8 +527,11 @@ class PullApply {
             preserved = rawChildUuid;
           }
           preserved ??= byPosition[idx];
-          final childUuid =
-              preserved ?? (hasRawUuid ? rawChildUuid : uuidGen.v4());
+          final childUuid = resolvePulledMobileUuid(
+            localUuid: preserved,
+            incoming: rawChildUuid,
+            uuidGen: uuidGen,
+          );
           final childRow = <String, Object?>{
             'mobile_uuid': childUuid,
             'server_name': serverChildName,
@@ -567,7 +607,11 @@ class PullApply {
       final serverName = r['name'] as String?;
       if (serverName == null || serverName.isEmpty) continue;
 
-      final uuid = existingUuids[serverName] ?? uuidGen.v4();
+      final uuid = resolvePulledMobileUuid(
+        localUuid: existingUuids[serverName],
+        incoming: r['mobile_uuid'],
+        uuidGen: uuidGen,
+      );
 
       final parentRow = <String, Object?>{
         'mobile_uuid': uuid,
@@ -619,9 +663,11 @@ class PullApply {
         for (var idx = 0; idx < list.length; idx++) {
           final cr = Map<String, dynamic>.from(list[idx] as Map);
           final serverChildName = cr['name'] as String?;
-          final rawChildUuid = cr['mobile_uuid']?.toString();
-          final hasRawUuid = rawChildUuid != null && rawChildUuid.isNotEmpty;
-          final childUuid = hasRawUuid ? rawChildUuid : uuidGen.v4();
+          final childUuid = resolvePulledMobileUuid(
+            localUuid: null,
+            incoming: cr['mobile_uuid'],
+            uuidGen: uuidGen,
+          );
 
           final childRow = <String, Object?>{
             'mobile_uuid': childUuid,

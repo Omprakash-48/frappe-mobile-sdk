@@ -528,7 +528,7 @@ Consequences:
 
 **Labels never come from the resolved path.** The cache names files `sha256(file_url)`, so a label routed through it would read as 64 hex characters instead of `report.pdf`. Labels derive from the stored value; only the *view target* is resolved.
 
-**The widgets depend on a `ResolveMediaFn` function**, not on `MediaResolver` itself — hosts pass `resolver.resolve`. That keeps the UI layer off the DAO/filesystem stack, which also makes the widgets testable: widget tests run in a fake-async zone where real sqflite and `dart:io` futures never complete.
+**The widgets depend on a `ResolveMediaFn` function**, not on `MediaResolver` itself — hosts pass `resolver.resolve`. That keeps the UI layer off the DAO/filesystem stack, which also makes the widgets testable: widget tests run in a fake-async zone where real sqflite and `dart:io` futures never complete. (Passing `resolver.resolve` works because the argument type is inferred; a host that has to *write the type out* — overriding `FieldFactory.createField`, for instance — currently cannot. See §13.)
 
 **The resolve future is memoised per value** (`media_resolve_builder::MediaResolveBuilder`). Starting it inside `build` creates a new future on every rebuild, and each completion triggers another — an infinite loop that re-reads the cache and can re-download indefinitely.
 
@@ -554,7 +554,7 @@ The wipe is **destructive by design** — it also clears `outbox/`, which holds 
 | `kDefaultMaxAttachmentBytes` | 10 MB, matching Frappe's stock `max_file_size`. **Not host-overridable yet** — see §13 |
 | `AttachmentTooLargeException` | thrown at pick, carries `sizeBytes` and `limitBytes` |
 | `attachmentTooLargeMessage(e)` | user-facing message naming the real limit |
-| `ResolveMediaFn` | what the field widgets accept; pass `resolver.resolve` |
+| `ResolveMediaFn` | what the field widgets accept; pass `resolver.resolve`. **Not exported — see §13.** Passing works by inference; *naming* the type does not compile from the public entry point |
 | `FormScreen.imagePickSource` | host hook choosing gallery / camera / both for image fields; global, read live, null means both |
 
 ### Discarding an attachment
@@ -621,13 +621,28 @@ The size guard runs **before** the durable copy is made, so an oversized pick ne
 
 - **Media growth is bounded only by explicit action.** There is still no automatic eviction of `cache/` (Phase 2). Orphaned *staged* files are reclaimable via `sweepOrphanedMedia()`, and `mediaStoreUsage()` reports how much that would free — but both are host-triggered. Nothing runs on a timer or at startup.
 - **Cache orphans are still not reclaimed.** A file in `cache/` with no `media_cache` row — from a crash between writing the bytes and indexing them — is invisible to both the sweep (which walks `outbox/` only) and to eviction (which is driven by the index). Folded into Phase 2, whose eviction pass already walks that directory.
-- **No compression.** `pickImage` is called with no `imageQuality` / `maxWidth` / `maxHeight`, so a capture is full-resolution — 3–12 MB on a current phone. Frappe strips EXIF server-side and accepts `optimize` / `max_width` / `max_height` on `upload_file`, none of which the SDK sends yet.
+- **No client-side compression, and the server may rewrite the bytes anyway.** `pickImage` is called with no `imageQuality` / `maxWidth` / `maxHeight`, so a capture is full-resolution — measured at 3.3 MB and 4.1 MB on a mid-range Android device (§16). The SDK uploads that file **verbatim**: `rest_helper::RestHelper.uploadFile` streams `file.openRead()` with no transformation. What happens next is the *server's* choice, and two distinct mechanisms are easy to conflate:
+
+  - **`optimize_image` does not run.** Frappe's `upload_file` gates it on a client-supplied `optimize` form field (`frappe/handler.py:144,168`) that the SDK does not send. It would also resize to ≤1024×768; measured server copies kept the full 3120×4160, which is independent confirmation it never fired.
+  - **`strip_exif_data` does run when the site enables it.** `frappe/core/doctype/file/file.py:696-701` calls it when System Settings' `strip_exif_metadata_from_uploaded_images` is on — it is on the verified bench. The name undersells it: `strip_exif_data` rebuilds the image through PIL (`Image.open` → `Image.new` → `putdata` → `save`), so it **re-encodes at PIL's default JPEG quality** rather than merely deleting a metadata block.
+
+  Three consequences, all measured (§16):
+
+  | | Effect |
+  |---|---|
+  | **JPEG only** | The guard is `content_type == "image/jpeg"`, so PNG uploads pass through byte-identical. Both gallery-picked PNGs matched to the byte; both camera JPEGs did not. |
+  | **GPS EXIF is destroyed** | Camera originals carried 10 EXIF tags including `GPSInfo`; server copies carry 0 and no GPS. If photo-embedded location is meant to corroborate a submission, **it does not survive the upload.** A form's separate geolocation field is unaffected. |
+  | **Generation loss** | 3,304,466 → 1,077,127 B and 4,149,928 → 1,561,416 B, at unchanged pixel dimensions. Pixel RMS difference was 2.41/255 and 3.17/255 *on those two files* — visually negligible, but lossy and cumulative if a file were ever re-uploaded. |
+
+  None of this is SDK behaviour and none of it is a Frappe default you can assume everywhere — it is one site setting. Turn `strip_exif_metadata_from_uploaded_images` off if originals must be preserved.
+
+- **`ResolveMediaFn` is not exported, so a host cannot override `FieldFactory.createField`.** The typedef appears in the signature of `FieldFactory.createField` — which is public, exported bare from the barrel, and explicitly documented as overridable ("Override this method to customize field creation") — but the typedef itself is declared in `src/services/media_resolver.dart`, which the barrel does not export. Dart does not re-export a library's *imports*, only its own declarations and anything it `export`s, and `field_factory.dart` merely imports the typedef. Verified by probing the public entry point: `ImagePickSource` and `MediaStoreUsage` resolve, while `ResolveMediaFn` fails with `Undefined class 'ResolveMediaFn'`. Passing `resolver.resolve` as an argument is unaffected (the type is inferred); a host that must **name** the type in an override signature has no route but an `implementation_imports` violation. **This is the same defect class as the `ImagePickSource` / `MediaStoreUsage` gap fixed under `[Unreleased]`** — a type on the public surface that no host can name — and the fix is the same one line, exporting it alongside them. Unshipped as of 2.0.0-beta.2.
 - **No background prefetch.** Media for a pulled document is cached on first view, not ahead of time.
 - **An inline (offline-mode-OFF) pick does not populate the cache.** `resolvePickedAttachment` deletes the staged copy after a successful inline upload rather than moving it into `cache/`, so previewing that file later costs a download. Only the **push** path promotes bytes into the cache via `moveToCache`. Note this no longer affects offline mode, where every pick goes through the push path and therefore does get cached. Closing it for the inline path is a small change: the bytes, the url and the store are all already in hand there.
 - **The size limit is not host-configurable.** `kDefaultMaxAttachmentBytes` (10 MB) is the default for `resolvePickedAttachment`'s `maxBytes`, but the only callers are this SDK's own `AttachField` / `ImageField` and neither exposes an override. A deployment whose System Settings `max_file_size` differs will either refuse files the server would have accepted, or accept files it will reject at upload (which the pipeline then handles correctly as a terminal rejection — the document blocks with a named reason rather than corrupting). Making it configurable means threading a parameter through `FormScreen` -> `FormBuilder` -> `FieldFactory`, the same path `mediaResolver` takes.
 - **Child-row relinking depends on `mobile_control`.** See §3.
 - **Orphaned server `File` rows** after a delete or re-pick are not collected. See §8.
-- **Not verified on a device.** The platform pickers, camera lost-capture recovery, `OpenFilex` handoff and the real logout wipe are covered by no automated test in this repo.
+- **Partially verified on a device — two gaps remain.** The pick → save → push → relink path, the download-preview branch, and the logout wipe are now verified end to end on hardware (§16). What is still covered by no test *and* unexercised on a device: **camera lost-capture recovery** (the OS reclaiming the picker's cache path, or the host process being killed mid-capture — the case the durable copy exists for) and the **`OpenFilex` handoff** of a cached file. Offline *preview* from `outbox/` via `pendingAttachmentPaths` is also unexercised — §16's read-path evidence covers the downloaded-cache branch only.
 
 ---
 
@@ -681,4 +696,108 @@ Where to look when changing any of this, and what each file is protecting.
 | `test/ui/widgets/fields/attach_field_replace_test.dart` | Re-pick reclaims the replaced file; host paths, `pending:` markers and cache paths are never deleted. |
 | `test/api/attachment_service_test.dart` | The `doctype` / `docname` / `file_name` keys, and that the multipart part carries the **original** filename. |
 
-**What no test in this repo covers**, and therefore has to be checked on a device: the platform file and image pickers, camera lost-capture recovery, `OpenFilex` handoff of a cached file, real `path_provider` paths, and whether `mform_attachments/` is actually gone after a logout. The Frappe-side contract in §3a is verified against three Frappe checkouts' **source**, not against a running site.
+**What no test in this repo covers.** Still unautomated, and now split by whether a device run has since covered it:
+
+| | Status |
+|---|---|
+| Platform file / image pickers | **Verified on device** (§16) — gallery and camera, both producing correct staged files |
+| Real `path_provider` paths | **Verified on device** (§16) |
+| The Frappe-side relink contract in §3a | **Verified on a running site** (§16) — was previously source-only, against three Frappe checkouts |
+| `mform_attachments/` actually gone after logout | **Verified on device** (§16) — the directory itself is removed, not merely emptied |
+| `OpenFilex` handoff of a cached file | Unverified |
+| Camera lost-capture recovery | Unverified |
+| Offline preview from `outbox/` via `pendingAttachmentPaths` | Unverified |
+
+None of the verified rows have an automated test — they are pinned by the device run recorded in §16, which is evidence, not a regression guard.
+
+---
+
+## 16. Device verification
+
+Everything above §16 is grounded in source. This section is grounded in a **measured run on hardware** — the first one, and the reason several claims elsewhere in this document changed.
+
+**Rig.** A mid-range Android 8.0.0 device (API 26), debug build, against a Frappe v16 bench on the local network, with `offlineMode.enabled = true`. Two documents were created back to back, each carrying two `Attach Image` fields — one filled from the **camera**, one from the **gallery** — for four attachments across two documents.
+
+**Identifiers below are anonymized.** Doctype, field and record names are placeholders (`Activity Form`, `photo_cam`, `photo_gal`); byte counts, EXIF tag counts, pixel dimensions and state transitions are the measured values, unchanged.
+
+### 16.1 What the run confirmed
+
+| Claim | Section | Evidence |
+| --- | --- | --- |
+| Pick stages before anything else, and the pick-time upload is skipped under offline mode | §1a | `outbox/` went from *absent* to 4 files; **zero** `upload_file` calls anywhere in the log before sync was triggered |
+| Staging keeps the user's filename, uniqueness in the parent directory | §6 | staged path was `outbox/<uuid>/<the name the user picked>` — name intact, uuid in the directory |
+| Save writes the marker and records size / MIME / original name | §7 | 4 rows `state=pending`, each `size_bytes` matching its file byte-for-byte |
+| Markers are per-field and per-document, never crossed | §3b | doc A → `pending:1` / `pending:2`; doc B → `pending:3` / `pending:4` |
+| The push gate resolves the whole set, then writes back | §4 | all 4 → `state=done` with `server_file_url`; columns rewritten to `/private/files/…` |
+| Staged bytes **move** into the cache; they are not copied | §6 | `outbox/` empty afterwards; 4 new `cache/` files |
+| Cache paths are `sha256(file_url)` | §6 | all 4 filenames recomputed from their urls and matched |
+| `media_cache.source` distinguishes provenance | §7 | 4 new rows `uploaded`, alongside a pre-existing `downloaded` row from a preview |
+| No marker ever reaches Frappe | §4 | server-side `LIKE 'pending%'` query on both attach fields → empty; both docs hold real urls |
+| Relink assigns the right field on the right document | §3a | all 4 `File` rows carried correct `attached_to_doctype` / `_name` / `_field` |
+| Filenames survive to the server | §3a | a gallery pick was stored under its original name, not a uuid |
+| Read path caches a downloaded preview | §10 | viewing a *pulled* document's image produced the `downloaded` row and its `cache/` file |
+| **Logout removes the media store** | §11 | after `logout(clearDatabase: true)`: `mform_attachments/` **does not exist** — the directory is removed, not emptied |
+| **The DB wipe is total** | §11 | `pending_attachments`, `media_cache`, `outbox`, `auth_tokens` all 0 rows; every `docs__*` table **dropped** (0 remaining); 12 system tables left |
+| **No credential survives logout** | §11 | secure storage retains only `frappe_base_url` and `frappe_mobile_uuid` plus the androidx keyset infrastructure — `frappe_api_key`, `frappe_api_secret` and all five `frappe_oauth_*` keys are gone |
+| Offline mode resets on logout | §1a | `_modeNotifier` → `(enabled: false, isPersisted: false)`, reflected in the login screen's "offline mode available after first sign-in" |
+
+Retry counts were `0` throughout and no `sdkLog` line was emitted. That silence is itself a signal: `sdkLog` fires only from catch blocks, so its absence means no backoff, no cache-move fallback, no terminal rejection, and no stat failure.
+
+### 16.2 The bytes at each hop
+
+The non-obvious finding. The SDK moves bytes faithfully; the **server** may rewrite them, so after a successful push the device cache and the server no longer hold the same file for a JPEG.
+
+```mermaid
+flowchart TD
+    A["camera capture<br/>3,304,466 B<br/>Exif standard<br/>10 tags, GPS present"] --> B["stageToOutbox — copy<br/>outbox/&lt;uuid&gt;/&lt;name&gt;<br/>3,304,466 B — IDENTICAL"]
+    B --> C["RestHelper.uploadFile<br/>file.openRead() streamed<br/>no transformation"]
+    C --> D{"System Settings<br/>strip_exif_metadata_<br/>from_uploaded_images ?"}
+    D -->|"off"| E["stored verbatim<br/>3,304,466 B"]
+    D -->|"on (verified bench)"| F["strip_exif_data — PIL re-encode<br/>1,077,127 B<br/>JFIF, 0 tags, NO GPS<br/>3120x4160 unchanged"]
+    B --> G["moveToCache — MOVE<br/>cache/&lt;sha256(url)&gt;.jpg<br/>3,304,466 B — the ORIGINAL"]
+
+    F -.->|"device cache and server<br/>now DIFFER for JPEG"| G
+
+    style A fill:#1d3557,color:#fff
+    style F fill:#9d0208,color:#fff
+    style G fill:#2d6a4f,color:#fff
+    style E fill:#2d6a4f,color:#fff
+```
+
+PNG takes the `off` branch regardless of the setting — the strip is gated on `image/jpeg` — which is why both gallery-picked PNGs were byte-identical end to end while both camera JPEGs were not.
+
+**This divergence is benign but worth knowing.** `cache/` is keyed by `file_url` and is declared non-authoritative (§6), so holding the pre-strip original is not a correctness problem: the entry is a preview copy, and a cache miss simply re-fetches the server's version. But it does mean **a cache hit and a cache miss can render subtly different bytes for the same url**, and that a device which uploaded a photo shows a marginally higher-quality copy than one that downloaded it. Nothing depends on them matching.
+
+### 16.3 Measured end-to-end trace
+
+```
+BEFORE SAVE   outbox/  absent            pending_attachments  0 rows
+                                         push outbox          0 rows
+
+AFTER SAVE    outbox/  4 files           pending_attachments  4 x pending, retry=0
+              cache/   1 (pre-existing)  push outbox          2 x INSERT pending
+              columns  pending:1..4      upload_file calls    0
+
+AFTER SYNC    outbox/  EMPTY             pending_attachments  4 x done + server_file_url
+              cache/   1 + 4 new         push outbox          0 rows (drained)
+              columns  /private/files/…  sync_status           dirty -> synced
+```
+
+| # | doc | field | source | local B | server B | relinked to |
+| --- | --- | --- | --- | --- | --- | --- |
+| 1 | A | `photo_cam` | camera | 3,304,466 | 1,077,127 | `Activity Form` / A / `photo_cam` |
+| 2 | A | `photo_gal` | gallery | 330,647 | 330,647 | `Activity Form` / A / `photo_gal` |
+| 3 | B | `photo_cam` | camera | 4,149,928 | 1,561,416 | `Activity Form` / B / `photo_cam` |
+| 4 | B | `photo_gal` | gallery | 77,977 | 77,977 | `Activity Form` / B / `photo_gal` |
+
+The last column is the one worth dwelling on. Files upload **fully unattached** by design (§3a step 1), so every one of those coordinates was reconstructed server-side from the `file_url` alone — four files, two documents, two distinct fields each, with no cross-assignment. That is the §3a contract holding against a running site rather than against source.
+
+Note also that rows 2 and 4 match byte-for-byte while 1 and 3 do not: the difference tracks the **file type**, not the pick source or the code path, which is what identifies the server-side EXIF strip (§16.2) as the cause rather than anything in the pipeline.
+
+### 16.4 What this run did not cover
+
+Stated plainly so §13's limitations are not read as narrower than they are. Not exercised: **offline capture** (the device was connected throughout — though under `offlineMode.enabled` the pick path is byte-identical either way, which is precisely §1a's point), **offline preview from `outbox/`**, **`BlockedByUpstream`** on a gated document, the **`failed`** and **`rejected`** states, **re-pick and discard** reclaim, **camera lost-capture recovery**, and the **`OpenFilex`** handoff. Every one of those is covered by unit tests (§15); none has been seen on hardware.
+
+One asymmetry in the logout result is worth recording, because it is not what §11 leads a reader to expect. `_storage.deleteAll()` removes **every** secure-storage key, `frappe_mobile_uuid` included — but `getOrCreateMobileUuid()` mints a fresh v4 the next time it is asked for one, and the post-logout re-initialization asks. So the device's `mobile_uuid` **does not survive a logout**: the next session stamps documents with a different one. That is harmless here, because the wipe drops every `docs__*` table in the same operation and there is nothing left to correlate — but a deployment treating `mobile_uuid` as a stable device identifier server-side should not.
+
+Do not confuse this with the **per-document** `mobile_uuid` column on `docs__<doctype>`, which is a different value with a different lifecycle: it is the local primary key a document is created under, it is what `pending_attachments.parent_uuid` / `top_parent_uuid` reference, and on a pull it is now **adopted** from the server when the server sends a non-empty one (see the `[Unreleased]` changelog entry). The device-level key above is `frappe_mobile_uuid` in secure storage and is never adopted from anywhere.
