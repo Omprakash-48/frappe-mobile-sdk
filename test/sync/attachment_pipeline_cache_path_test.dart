@@ -132,12 +132,14 @@ void main() {
     expect(dest.endsWith('.png'), isTrue, reason: 'extension from the source');
   });
 
-  test('moveToCache reports null when neither source nor destination exists',
-      () async {
-    final dest = await MediaStore.moveToCache(
-      '${storeRoot.path}/outbox/nope/missing.jpg',
-      '/files/missing.jpg',
-    );
-    expect(dest, isNull);
-  });
+  test(
+    'moveToCache reports null when neither source nor destination exists',
+    () async {
+      final dest = await MediaStore.moveToCache(
+        '${storeRoot.path}/outbox/nope/missing.jpg',
+        '/files/missing.jpg',
+      );
+      expect(dest, isNull);
+    },
+  );
 }

@@ -190,8 +190,10 @@ void main() {
         resolvePickedAttachment(
           picked: picked,
           online: true,
-          uploadFile: (f) async =>
-              throw ValidationException('File size exceeded', {'exc_type': 'MaxFileSizeReachedError'}),
+          uploadFile: (f) async => throw ValidationException(
+            'File size exceeded',
+            {'exc_type': 'MaxFileSizeReachedError'},
+          ),
           copyToStore: fakeCopy,
           deleteCopy: fakeDelete,
         ),

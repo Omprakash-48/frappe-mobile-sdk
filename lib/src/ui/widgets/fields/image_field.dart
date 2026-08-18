@@ -206,8 +206,7 @@ class ImageField extends BaseField {
   /// logic, one of three. `/private/files/` has to route through
   /// `download_file` to carry auth, so a drift between the copies was a
   /// private-file 404. Pinned by `attachment_paths_test.dart`.
-  String? _fullImageUrl(String? path) =>
-      frappeFileFetchUrl(path, fileUrlBase);
+  String? _fullImageUrl(String? path) => frappeFileFetchUrl(path, fileUrlBase);
 
   /// Surfaces [message] to the user. `sdkLog` is `kDebugMode`-only, so without
   /// this a release-build failure was completely invisible: the user took a

@@ -85,13 +85,13 @@ void main() {
       expect(
         frappeFileFetchUrl('/private/files/a b.png', base),
         '$base/api/method/frappe.handler.download_file'
-            '?file_url=%2Fprivate%2Ffiles%2Fa%20b.png',
+        '?file_url=%2Fprivate%2Ffiles%2Fa%20b.png',
         reason: 'the value must be percent-encoded into the query',
       );
       expect(
         frappeFileFetchUrl('/files/a.png', base),
         '$base/api/method/frappe.handler.download_file'
-            '?file_url=%2Ffiles%2Fa.png',
+        '?file_url=%2Ffiles%2Fa.png',
       );
     });
 
@@ -130,7 +130,7 @@ void main() {
       expect(
         frappeFileFetchUrl('  /files/a.png  ', base),
         '$base/api/method/frappe.handler.download_file'
-            '?file_url=%2Ffiles%2Fa.png',
+        '?file_url=%2Ffiles%2Fa.png',
       );
     });
   });

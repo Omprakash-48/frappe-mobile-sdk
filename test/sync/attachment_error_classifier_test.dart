@@ -54,10 +54,7 @@ void main() {
       // The non-JSON body means this arrives as an ApiException, and the 4xx
       // rule below is what makes it terminal — so removing the blanket-417 rule
       // does not weaken the oversized case.
-      expect(
-        isTerminalAttachmentError(ApiException('too large', 413)),
-        isTrue,
-      );
+      expect(isTerminalAttachmentError(ApiException('too large', 413)), isTrue);
     });
 
     test('AuthException 403 (permission denied) is terminal', () {

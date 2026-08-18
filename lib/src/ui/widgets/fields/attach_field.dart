@@ -199,8 +199,7 @@ class AttachField extends BaseField {
   /// logic, one of three. `/private/files/` has to route through
   /// `download_file` to carry auth, so a drift between the copies was a
   /// private-file 404. Pinned by `attachment_paths_test.dart`.
-  String? _fullFileUrl(String? path) =>
-      frappeFileFetchUrl(path, fileUrlBase);
+  String? _fullFileUrl(String? path) => frappeFileFetchUrl(path, fileUrlBase);
 
   /// True when the stored value points at an image (by extension). Query strings
   /// are stripped first so URLs like `.../file.png?token=...` still match.
