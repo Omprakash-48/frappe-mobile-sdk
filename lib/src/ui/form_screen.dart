@@ -233,19 +233,56 @@ class _FormScreenState extends State<FormScreen> with WidgetsBindingObserver {
 
   /// Fetches the bytes behind a stored attach value, with auth. Returns null on
   /// any failure: a media fetch must never break form rendering.
+  ///
+  /// STREAMED rather than buffered, and bounded twice, because this is the only
+  /// place that sees the response before it occupies memory:
+  ///
+  /// 1. `Content-Length`, when the server sends one, refuses an oversized body
+  ///    without reading a single chunk.
+  /// 2. The accumulate loop re-checks as it goes, because a chunked response has
+  ///    no declared length and a server may under-report.
+  ///
+  /// [MediaResolver.maxFetchBytes] repeats the ceiling, but by the time it runs
+  /// the allocation has already happened — its job is to keep an oversized body
+  /// out of the cache, not out of RAM. The device floor here is API 26, where a
+  /// single unbounded attachment can take the process down.
   Future<List<int>?> _fetchMediaBytes(String value) async {
     final api = widget.api;
     if (api == null) return null;
     final url = frappeFileFetchUrl(value, api.baseUrl);
     if (url == null || !url.startsWith('http')) return null;
+    const cap = kDefaultMaxMediaFetchBytes;
     http.Client? client;
     try {
       client = http.Client();
+      final request = http.Request('GET', Uri.parse(url))
+        ..headers.addAll(api.requestHeaders);
       final res = await client
-          .get(Uri.parse(url), headers: api.requestHeaders)
+          .send(request)
           .timeout(const Duration(seconds: 30));
       if (res.statusCode < 200 || res.statusCode >= 300) return null;
-      return res.bodyBytes;
+
+      final declared = res.contentLength;
+      if (declared != null && declared > cap) {
+        sdkLog(
+          'FormScreen._fetchMediaBytes($value): Content-Length $declared '
+          'exceeds the $cap byte cap — not fetched',
+        );
+        return null;
+      }
+
+      final bytes = <int>[];
+      await for (final chunk in res.stream) {
+        bytes.addAll(chunk);
+        if (bytes.length > cap) {
+          sdkLog(
+            'FormScreen._fetchMediaBytes($value): body exceeded the $cap byte '
+            'cap mid-stream — aborted',
+          );
+          return null;
+        }
+      }
+      return bytes;
     } catch (e, st) {
       sdkLog('FormScreen._fetchMediaBytes($value) failed — $e\n$st');
       return null;

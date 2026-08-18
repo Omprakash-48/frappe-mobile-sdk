@@ -36,4 +36,19 @@ void main() {
       expect(usage.totalBytes, 15, reason: 'orphanBytes is a subset of outbox');
     },
   );
+
+  test('a host can name ResolveMediaFn to override FieldFactory.createField', () {
+    // `FieldFactory` is exported bare and documented as overridable, and its
+    // `createField` takes a `ResolveMediaFn? mediaResolver`. Overriding it means
+    // WRITING the type out, which inference cannot stand in for — the same shape
+    // of problem as `ImagePickSource` above. The annotation is the assertion:
+    // this does not compile unless the typedef is exported.
+    ResolveMediaFn? resolver;
+    expect(resolver, isNull);
+
+    // And it must be usable AS the annotated type, not merely nameable.
+    resolver = (String value, {Map<int, String>? pendingPaths}) async =>
+        pendingPaths?[1] ?? value;
+    expect(resolver, isNotNull);
+  });
 }

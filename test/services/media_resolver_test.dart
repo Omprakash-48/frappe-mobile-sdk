@@ -35,15 +35,19 @@ void main() {
     if (await root.exists()) await root.delete(recursive: true);
   });
 
-  MediaResolver resolver({bool online = true, List<int>? bytes}) =>
-      MediaResolver(
-        cache: cache,
-        isOnline: () => online,
-        fetch: (url) async {
-          fetches++;
-          return bytes;
-        },
-      );
+  MediaResolver resolver({
+    bool online = true,
+    List<int>? bytes,
+    int? maxFetchBytes,
+  }) => MediaResolver(
+    cache: cache,
+    isOnline: () => online,
+    maxFetchBytes: maxFetchBytes ?? kDefaultMaxMediaFetchBytes,
+    fetch: (url) async {
+      fetches++;
+      return bytes;
+    },
+  );
 
   test('a pending marker resolves to its staged path', () async {
     final r = await resolver().resolve(
@@ -179,4 +183,30 @@ void main() {
       expect(p, isNotNull);
     },
   );
+
+  group('an oversized download is refused', () {
+    // Picks are size-guarded at 10 MB before staging, but a DOWNLOAD was
+    // unbounded — and the whole body is buffered in memory by the fetcher before
+    // it ever reaches here. This guard is the second half of the fix: it cannot
+    // prevent the memory spike (the bytes already exist by now), but it does
+    // stop an oversized body being written to disk and indexed in `media_cache`,
+    // which would otherwise be re-read on every view.
+    test('it is not written to disk and not indexed', () async {
+      final big = List<int>.filled(64, 7);
+      final r = resolver(bytes: big, maxFetchBytes: 32);
+
+      expect(await r.resolve('/files/big.bin'), isNull);
+      final rows = await db.query('media_cache');
+      expect(rows, isEmpty, reason: 'an over-cap body must not be indexed');
+    });
+
+    test('a body at exactly the cap is still accepted', () async {
+      final exact = List<int>.filled(32, 7);
+      final r = resolver(bytes: exact, maxFetchBytes: 32);
+
+      final path = await r.resolve('/files/exact.bin');
+      expect(path, isNotNull, reason: 'the cap is inclusive');
+      expect(File(path!).existsSync(), isTrue);
+    });
+  });
 }

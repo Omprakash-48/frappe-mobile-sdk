@@ -193,28 +193,14 @@ class AttachField extends BaseField {
     return false;
   }
 
-  /// Build display URL: full URLs (S3, http(s)) use as-is.
-  /// /private/files/ and /files/ use download_file API so auth works; other /
-  /// paths get base prepended. Mirrors ImageField._fullImageUrl.
-  String? _fullFileUrl(String? path) {
-    if (path == null || path.isEmpty) return path;
-    final p = path.trim();
-    if (p.isEmpty) return path;
-    if (p.startsWith('http://') || p.startsWith('https://')) return p;
-    if (!p.startsWith('/') ||
-        fileUrlBase == null ||
-        fileUrlBase!.trim().isEmpty) {
-      return p;
-    }
-    final base = fileUrlBase!.trim();
-    final baseNoSlash = base.endsWith('/')
-        ? base.substring(0, base.length - 1)
-        : base;
-    if (p.startsWith('/private/files/') || p.startsWith('/files/')) {
-      return '$baseNoSlash/api/method/frappe.handler.download_file?file_url=${Uri.encodeComponent(p)}';
-    }
-    return '$baseNoSlash$p';
-  }
+  /// Display URL for a stored attach value.
+  ///
+  /// Delegates to [frappeFileFetchUrl] — this used to be a private copy of that
+  /// logic, one of three. `/private/files/` has to route through
+  /// `download_file` to carry auth, so a drift between the copies was a
+  /// private-file 404. Pinned by `attachment_paths_test.dart`.
+  String? _fullFileUrl(String? path) =>
+      frappeFileFetchUrl(path, fileUrlBase);
 
   /// True when the stored value points at an image (by extension). Query strings
   /// are stripped first so URLs like `.../file.png?token=...` still match.

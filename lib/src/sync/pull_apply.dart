@@ -8,6 +8,7 @@ import '../database/schema/system_columns.dart';
 import '../database/table_name.dart';
 import '../models/doc_type_meta.dart';
 import '../utils/sdk_log.dart';
+import '../utils/uuid_pattern.dart';
 import 'child_table_info.dart';
 
 /// Frappe returns `modified` as `"YYYY-MM-DD HH:MM:SS.ffffff"` with no
@@ -47,28 +48,69 @@ String _asUtc(String raw) {
 /// 1. **An existing local uuid always wins.** Outbox rows and
 ///    `pending_attachments` reference it, so a pull must never renumber a row
 ///    that already exists here.
-/// 2. **A non-empty incoming uuid is ADOPTED.** `mobile_control` provisions
-///    `mobile_uuid` as a UNIQUE field on parent and child doctypes alike, so a
-///    non-empty value is a real global identity — the one this device assigned
+/// 2. **A UUID-SHAPED incoming uuid is ADOPTED.** `mobile_control` provisions
+///    `mobile_uuid` as a UNIQUE field on parent and child doctypes alike, so
+///    such a value is a real global identity — the one this device assigned
 ///    when it created the document, round-tripped back. Minting a new v4 here
 ///    would break that identity across any wipe (logout, reinstall, fresh
 ///    device) and defeat the `mobile_uuid` fallback match, which exists to
 ///    reconcile a row whose `server_name` writeback was interrupted.
-/// 3. **Otherwise mint.** An empty or absent value is NOT adopted, and that is
-///    load-bearing rather than defensive: `mobile_uuid` is the local primary
-///    key, Desk-origin rows return it as null or `''`, and adopting `''` would
-///    write an empty PK that the next such row collides with.
+/// 3. **Otherwise mint.** Two distinct cases fall here, both load-bearing
+///    rather than defensive:
 ///
-/// Shared by both write paths (bulk and sequential) so the precedence cannot
-/// drift between them.
+///    * **Empty or absent.** Desk-origin rows return `mobile_uuid` as null or
+///      `''`, and `mobile_uuid` is the local primary key — adopting `''` would
+///      write an empty PK that the next such row collides with.
+///    * **Present but not UUID-shaped — PARENTS ONLY** (see
+///      [requireUuidShape] below; children keep the emptiness-only test).
+///      Being UUID-shaped is an invariant the
+///      push pipeline depends on: [looksLikeMobileUuid] is what
+///      `UuidRewriter` calls "the complete detector" for a local Link
+///      reference (Frappe server names are never UUID-shaped, SDK uuids always
+///      are), and `PushEngine`'s dependency scan uses the same predicate to
+///      tier a row behind the row it points at. A non-UUID PK is invisible to
+///      both: the rewriter falls back to `__is_local` alone — which its own
+///      comment records as insufficient for `fetch_from`, defaults,
+///      programmatic prefill and back-reference Links — and the dependency
+///      scan drops the edge, so the row lands in its parent's tier and races
+///      it. Reachability is low, because a Link value only carries a
+///      `mobile_uuid` when the target row has no `server_name` and an adopted
+///      row always has one; minting costs nothing and keeps the invariant true
+///      by construction instead of by argument.
+///
+/// Uniqueness is deliberately NOT re-checked here. `mobile_uuid` carries a real
+/// UNIQUE index server-side (verified: a duplicate write fails with MariaDB
+/// error 1062), so two server documents cannot present the same value.
+///
+/// [requireUuidShape] carries the one deliberate asymmetry between parents and
+/// children, and it is history rather than taste:
+///
+/// * **Parents (true).** Parent adoption is new. Before it every pulled parent
+///   minted its own v4, so the shape invariant held by construction — gating
+///   means introducing adoption cannot weaken it.
+/// * **Children (false).** Child adoption is NOT new: the child paths have
+///   always taken any non-empty incoming value (`hasRawUuid` tested emptiness,
+///   never shape). That is load-bearing — a Link field on another document can
+///   reference a child row by its `mobile_uuid`, so a child whose uuid changed
+///   on re-pull left that Link a permanent orphan, the regression pinned by
+///   `pull_apply_test.dart`'s "child mobile_uuid is preserved across re-pull".
+///   Deployments exist whose child uuids are not v4-shaped, so gating children
+///   would re-break exactly that. Tightening it needs its own change, evidence
+///   and migration — not a side effect of this one.
+///
+/// Shared by all four write paths (parent and child, bulk and sequential) so
+/// the precedence cannot drift between them.
 String resolvePulledMobileUuid({
   required String? localUuid,
   required Object? incoming,
   required Uuid uuidGen,
+  bool requireUuidShape = true,
 }) {
   if (localUuid != null && localUuid.isNotEmpty) return localUuid;
-  final adopted = incoming?.toString();
-  if (adopted != null && adopted.isNotEmpty) return adopted;
+  final adopted = incoming?.toString().trim();
+  if (adopted != null && adopted.isNotEmpty) {
+    if (!requireUuidShape || looksLikeMobileUuid(adopted)) return adopted;
+  }
   return uuidGen.v4();
 }
 
@@ -531,6 +573,7 @@ class PullApply {
             localUuid: preserved,
             incoming: rawChildUuid,
             uuidGen: uuidGen,
+            requireUuidShape: false,
           );
           final childRow = <String, Object?>{
             'mobile_uuid': childUuid,
@@ -667,6 +710,7 @@ class PullApply {
             localUuid: null,
             incoming: cr['mobile_uuid'],
             uuidGen: uuidGen,
+            requireUuidShape: false,
           );
 
           final childRow = <String, Object?>{

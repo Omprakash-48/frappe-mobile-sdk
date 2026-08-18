@@ -304,7 +304,7 @@ class LocalWriter {
         mimeType: mimeTypeForPath(path),
         sizeBytes: sizeBytes,
       );
-      return 'pending:$id';
+      return '$kPendingMarkerPrefix$id';
     }
 
     final childInfos = <String, ChildTableInfo>{};

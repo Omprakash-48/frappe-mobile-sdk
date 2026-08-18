@@ -152,7 +152,7 @@ void main() {
       await enqueue();
       final p = pipeline(
         onUpload: () async =>
-            throw ValidationException('File size exceeded the maximum'),
+            throw ValidationException('File size exceeded the maximum', {'exc_type': 'MaxFileSizeReachedError'}),
       );
 
       await expectLater(
@@ -227,7 +227,7 @@ void main() {
     await enqueue();
     try {
       await pipeline(
-        onUpload: () async => throw ValidationException('too big'),
+        onUpload: () async => throw ValidationException('too big', {'exc_type': 'MaxFileSizeReachedError'}),
       ).resolveForTopParent('P1');
       fail('expected BlockedByUpstream');
     } on BlockedByUpstream catch (e) {

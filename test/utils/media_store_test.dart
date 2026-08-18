@@ -88,7 +88,7 @@ void main() {
   test('moveToCache relocates the file and removes the staged copy', () async {
     final src = srcFile('IMG_2.jpg', 'C');
     final staged = await MediaStore.stageToOutbox(src, nameGen: () => 'm1');
-    final ok = await MediaStore.moveToCache(staged, '/files/x.jpg');
+    final ok = await MediaStore.moveToCache(staged, '/files/x.jpg') != null;
     expect(ok, isTrue);
     expect(File(staged).existsSync(), isFalse);
     final cached = await MediaStore.cachePathFor('/files/x.jpg');
@@ -100,17 +100,17 @@ void main() {
     () async {
       final src = srcFile('IMG_3.jpg', 'D');
       final staged = await MediaStore.stageToOutbox(src, nameGen: () => 'm2');
-      expect(await MediaStore.moveToCache(staged, '/files/y.jpg'), isTrue);
+      expect(await MediaStore.moveToCache(staged, '/files/y.jpg'), isNotNull);
       // Second call: the staged file is gone and the destination is present.
       // Must report success so an interrupted upload can resume.
-      expect(await MediaStore.moveToCache(staged, '/files/y.jpg'), isTrue);
+      expect(await MediaStore.moveToCache(staged, '/files/y.jpg'), isNotNull);
       final cached = await MediaStore.cachePathFor('/files/y.jpg');
       expect(File(cached).readAsStringSync(), 'D');
     },
   );
 
   test(
-    'moveToCache returns false when neither source nor destination exists',
+    'moveToCache returns null when neither source nor destination exists',
     () async {
       final ok = await MediaStore.moveToCache(
         '${root.path}/outbox/never.jpg',
@@ -118,7 +118,7 @@ void main() {
       );
       expect(
         ok,
-        isFalse,
+        isNull,
         reason: 'cache population must not silently claim success',
       );
     },

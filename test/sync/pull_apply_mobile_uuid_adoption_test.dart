@@ -21,6 +21,7 @@ import 'package:frappe_mobile_sdk/src/database/schema/parent_schema.dart';
 import 'package:frappe_mobile_sdk/src/models/doc_field.dart';
 import 'package:frappe_mobile_sdk/src/models/doc_type_meta.dart';
 import 'package:frappe_mobile_sdk/src/sync/pull_apply.dart';
+import 'package:frappe_mobile_sdk/src/utils/uuid_pattern.dart';
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 
 DocField f(String n, String t, {String? options}) =>
@@ -214,6 +215,79 @@ void main() {
         expect(p[0]['mobile_uuid'], isNot(p[1]['mobile_uuid']));
       },
     );
+  });
+
+  group('a non-UUID-shaped incoming value is not adopted', () {
+    // `mobile_uuid` being UUID-shaped is an invariant four places rely on, and
+    // `uuid_rewriter.dart` documents the shape check as "the complete detector"
+    // for a local Link reference — Frappe server names are never UUID-shaped
+    // and SDK uuids always are. Adopting a non-UUID string would put a value
+    // into the local primary key that `looksLikeMobileUuid` rejects, so:
+    //
+    //   * `uuid_rewriter` would fall back to `__is_local` alone, which its own
+    //     comment records as insufficient for fetch_from / defaults /
+    //     programmatic prefill / back-reference Links;
+    //   * `push_engine`'s dependency scan would not see the reference, so the
+    //     row would land in its parent's tier and race it.
+    //
+    // Reachability is low — a link value only carries a `mobile_uuid` when the
+    // target row has no `server_name`, and an adopted row always has one — but
+    // minting instead costs nothing and keeps the invariant true by
+    // construction rather than by argument.
+    test('a server-name-shaped uuid mints instead', () async {
+      await pull([
+        {
+          'name': 'SO-9',
+          'modified': '2026-01-01 00:00:00',
+          'customer': 'CUST-9',
+          'mobile_uuid': 'HSFM-2026-00042',
+          'items': const <Map<String, dynamic>>[],
+        },
+      ], isInitialSync: true);
+
+      final p = await db.query('docs__sales_order');
+      expect(p.length, 1);
+      expect(
+        p.first['mobile_uuid'],
+        isNot('HSFM-2026-00042'),
+        reason: 'a non-UUID value must not become the local primary key',
+      );
+      expect(
+        looksLikeMobileUuid(p.first['mobile_uuid'] as String?),
+        isTrue,
+        reason: 'the minted fallback must satisfy the shape invariant',
+      );
+    });
+
+    // Children deliberately do NOT get this gate. Child adoption predates the
+    // parent's and is load-bearing: a Link field on another document can
+    // reference a child row by its `mobile_uuid`, so a child whose uuid changed
+    // on re-pull left that Link a permanent orphan (pinned by
+    // `pull_apply_test.dart`'s "child mobile_uuid is preserved across
+    // re-pull"). Deployments exist whose child uuids are not v4-shaped.
+    test('but a child row still adopts a non-UUID incoming uuid', () async {
+      await pull([
+        {
+          'name': 'SO-10',
+          'modified': '2026-01-01 00:00:00',
+          'customer': 'CUST-10',
+          'mobile_uuid': serverUuid,
+          'items': [
+            {'item_code': 'A', 'qty': 1, 'mobile_uuid': 'fm-uuid-stable-1234'},
+          ],
+        },
+      ], isInitialSync: true);
+
+      final c = await db.query('docs__sales_order_item');
+      expect(c.length, 1);
+      expect(
+        c.first['mobile_uuid'],
+        'fm-uuid-stable-1234',
+        reason:
+            'gating children on shape would re-break the orphan-Link '
+            'regression that child adoption exists to prevent',
+      );
+    });
   });
 
   group('an existing local row keeps its own uuid', () {

@@ -23,6 +23,16 @@ typedef MediaFetchFn = Future<List<int>?> Function(String fileUrl);
 typedef ResolveMediaFn =
     Future<String?> Function(String value, {Map<int, String>? pendingPaths});
 
+/// Ceiling on a single DOWNLOADED media body, matching Frappe's default
+/// `max_file_size` (25 MB) rather than the 10 MB pick guard.
+///
+/// The two limits differ deliberately: [kDefaultMaxAttachmentBytes] bounds what
+/// this device may CREATE, while this bounds what it will accept from a server
+/// that has already accepted it — a Desk user can legitimately attach something
+/// larger than the mobile pick guard allows, and refusing to display it would be
+/// a worse failure than the download costing memory.
+const int kDefaultMaxMediaFetchBytes = 25 * 1024 * 1024;
+
 /// Resolves an attach-field value to a local path for DISPLAY.
 ///
 /// The stored field value is never modified here. Display resolution must not
@@ -34,10 +44,21 @@ class MediaResolver {
   final MediaFetchFn fetch;
   final bool Function() isOnline;
 
+  /// Ceiling on a fetched body, inclusive. See [kDefaultMaxMediaFetchBytes].
+  ///
+  /// This is the SECOND half of the download bound, not the whole of it. By the
+  /// time [fetch] returns, its body is already in memory — so this stops an
+  /// oversized download being written to disk and indexed in `media_cache`
+  /// (where it would be re-read on every view), but it cannot prevent the
+  /// allocation. Bounding memory has to happen inside the injected fetcher,
+  /// which is the only place that sees the response before it is buffered.
+  final int maxFetchBytes;
+
   MediaResolver({
     required this.cache,
     required this.fetch,
     required this.isOnline,
+    this.maxFetchBytes = kDefaultMaxMediaFetchBytes,
   });
 
   /// Resolution order:
@@ -91,6 +112,13 @@ class MediaResolver {
 
       final bytes = await fetch(v);
       if (bytes == null || bytes.isEmpty) return null;
+      if (bytes.length > maxFetchBytes) {
+        sdkLog(
+          'MediaResolver.resolve($v): ${bytes.length} bytes exceeds the '
+          '$maxFetchBytes byte cap — not cached',
+        );
+        return null;
+      }
 
       final dest = await MediaStore.cachePathFor(v);
       final file = File(dest);
