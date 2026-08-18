@@ -25,9 +25,32 @@ typedef AttachmentUploadFn =
 typedef FileFromPathFn = File Function(String path);
 
 /// Default retry-backoff schedule used by [AttachmentPipeline] and
-/// [PushEngine]'s `attachmentBackoff` / `networkBackoff` parameters.
-/// 3 attempts at 2s, 5s, 10s. Defined once so a product-side schedule
-/// change doesn't have to update three default-parameter sites.
+/// [PushEngine]'s `attachmentBackoff` / `networkBackoff` parameters. Defined
+/// once so a product-side schedule change doesn't have to update three
+/// default-parameter sites.
+///
+/// **The two consumers read this list differently, so it does not describe one
+/// attempt count.** Both are correct for their own loop; only a single
+/// "3 attempts at 2s, 5s, 10s" summary was ever wrong, because it fit neither.
+///
+/// | Consumer | Loop bound | Attempts | Delays actually used |
+/// |---|---|---|---|
+/// | [AttachmentPipeline] | `attempt < backoff.length` | **3** | `2s`, `5s` |
+/// | `PushEngine` | `attempt <= networkBackoff.length` | **4** | `2s`, `5s`, `10s` |
+///
+/// In the pipeline the list length IS the attempt count, and the delay is taken
+/// only when another attempt follows (`attempt < backoff.length - 1`) — so the
+/// final entry, `10s`, is never slept on. Two consequences worth knowing before
+/// editing this list:
+///
+/// * **Trimming it changes the pipeline's attempt count, not just its waits.**
+///   Cutting to `[2s, 5s]` silently drops the pipeline from 3 attempts to 2
+///   while leaving `PushEngine` at 3.
+/// * **Appending to it adds a pipeline attempt** and a `PushEngine` delay.
+///
+/// Deliberately left as one shared list rather than split per consumer: the
+/// product-side reason to change a backoff schedule applies to both, and the
+/// asymmetry is in the loops, not in the data.
 const List<Duration> kDefaultSyncBackoff = <Duration>[
   Duration(seconds: 2),
   Duration(seconds: 5),
@@ -198,11 +221,19 @@ class AttachmentPipeline {
     // STEP 3: move staged bytes into the cache. Idempotent, so an interrupted
     // run resumes here. Cache failure NEVER fails the upload — the url is
     // already committed, so the upload genuinely succeeded.
+    //
+    // The destination comes back FROM the move rather than being recomputed
+    // here. `cachePathFor` borrows the extension from the staged file when the
+    // url carries none, so recomputing it without the source named `<digest>`
+    // while the bytes landed at `<digest><ext>` — a `media_cache` row pointing
+    // at a file that was never written, which reads as a permanent cache miss
+    // and strands the real bytes where no sweep reclaims them.
     var cachedPath = '';
     var moved = false;
     try {
-      moved = await MediaStore.moveToCache(p.localPath, fileUrl);
-      if (moved) cachedPath = await MediaStore.cachePathFor(fileUrl);
+      final dest = await MediaStore.moveToCache(p.localPath, fileUrl);
+      moved = dest != null;
+      if (dest != null) cachedPath = dest;
     } catch (e, st) {
       sdkLog('AttachmentPipeline: cache move failed for ${p.id} — $e\n$st');
     }
@@ -316,8 +347,8 @@ class AttachmentPipeline {
     final out = <String, Object?>{};
     for (final entry in payload.entries) {
       final v = entry.value;
-      if (v is String && v.startsWith('pending:')) {
-        final id = int.tryParse(v.substring('pending:'.length));
+      if (v is String && v.startsWith(kPendingMarkerPrefix)) {
+        final id = int.tryParse(v.substring(kPendingMarkerPrefix.length));
         final r = id == null ? null : resolved[id];
         if (r == null) {
           throw StateError(

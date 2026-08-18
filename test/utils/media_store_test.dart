@@ -2,6 +2,12 @@ import 'dart:io';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:frappe_mobile_sdk/src/utils/media_store.dart';
 
+/// Total bytes across both store directories. `MediaStore.usage` is the single
+/// size API; the referenced-set argument only affects orphan accounting, which
+/// `totalBytes` does not include.
+Future<int> storeSize() async =>
+    (await MediaStore.usage(const <String>{})).totalBytes;
+
 void main() {
   late Directory root;
 
@@ -82,7 +88,7 @@ void main() {
   test('moveToCache relocates the file and removes the staged copy', () async {
     final src = srcFile('IMG_2.jpg', 'C');
     final staged = await MediaStore.stageToOutbox(src, nameGen: () => 'm1');
-    final ok = await MediaStore.moveToCache(staged, '/files/x.jpg');
+    final ok = await MediaStore.moveToCache(staged, '/files/x.jpg') != null;
     expect(ok, isTrue);
     expect(File(staged).existsSync(), isFalse);
     final cached = await MediaStore.cachePathFor('/files/x.jpg');
@@ -94,17 +100,17 @@ void main() {
     () async {
       final src = srcFile('IMG_3.jpg', 'D');
       final staged = await MediaStore.stageToOutbox(src, nameGen: () => 'm2');
-      expect(await MediaStore.moveToCache(staged, '/files/y.jpg'), isTrue);
+      expect(await MediaStore.moveToCache(staged, '/files/y.jpg'), isNotNull);
       // Second call: the staged file is gone and the destination is present.
       // Must report success so an interrupted upload can resume.
-      expect(await MediaStore.moveToCache(staged, '/files/y.jpg'), isTrue);
+      expect(await MediaStore.moveToCache(staged, '/files/y.jpg'), isNotNull);
       final cached = await MediaStore.cachePathFor('/files/y.jpg');
       expect(File(cached).readAsStringSync(), 'D');
     },
   );
 
   test(
-    'moveToCache returns false when neither source nor destination exists',
+    'moveToCache returns null when neither source nor destination exists',
     () async {
       final ok = await MediaStore.moveToCache(
         '${root.path}/outbox/never.jpg',
@@ -112,26 +118,26 @@ void main() {
       );
       expect(
         ok,
-        isFalse,
+        isNull,
         reason: 'cache population must not silently claim success',
       );
     },
   );
 
-  test('storeSizeBytes counts both directories', () async {
+  test('storeSize counts both directories', () async {
     final src = srcFile('IMG_4.jpg', '12345');
     final staged = await MediaStore.stageToOutbox(src, nameGen: () => 'm3');
-    expect(await MediaStore.storeSizeBytes(), 5);
+    expect(await storeSize(), 5);
     await MediaStore.moveToCache(staged, '/files/v.jpg');
     expect(
-      await MediaStore.storeSizeBytes(),
+      await storeSize(),
       5,
       reason: 'moving between dirs must not change the total',
     );
   });
 
-  test('storeSizeBytes is 0 when nothing has been stored', () async {
-    expect(await MediaStore.storeSizeBytes(), 0);
+  test('storeSize is 0 when nothing has been stored', () async {
+    expect(await storeSize(), 0);
   });
 
   test('clearAll removes both directories', () async {
@@ -143,7 +149,7 @@ void main() {
 
     await MediaStore.clearAll();
 
-    expect(await MediaStore.storeSizeBytes(), 0);
+    expect(await storeSize(), 0);
     expect(
       File(await MediaStore.cachePathFor('/files/w.jpg')).existsSync(),
       isFalse,

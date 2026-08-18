@@ -132,24 +132,35 @@ class MediaStore {
 
   /// Moves a staged file into the cache under [fileUrl]'s key.
   ///
+  /// Returns **the destination path actually used**, or null when neither
+  /// source nor destination exists — cache population must never silently claim
+  /// success.
+  ///
+  /// Returning the path rather than a bool is load-bearing. [cachePathFor]
+  /// borrows the extension from [stagedPath] when [fileUrl] carries none, so the
+  /// destination is NOT derivable from [fileUrl] alone. A caller that recomputed
+  /// it without the source would name `<digest>` while the bytes sit at
+  /// `<digest><ext>` — a `media_cache` row pointing at a file that was never
+  /// written, which reads as a permanent cache miss and strands the real bytes
+  /// where no sweep reclaims them (`sweepOrphans` walks `outbox/` only).
+  ///
   /// IDEMPOTENT: when the destination already exists this reports success even
   /// if the staged file is gone, so an interrupted upload resumes without
-  /// re-uploading. Returns false only when neither source nor destination
-  /// exists — cache population must never silently claim success.
-  static Future<bool> moveToCache(String stagedPath, String fileUrl) async {
+  /// re-uploading.
+  static Future<String?> moveToCache(String stagedPath, String fileUrl) async {
     final dest = await cachePathFor(fileUrl, sourcePath: stagedPath);
     final destFile = File(dest);
     if (await destFile.exists()) {
       // Already moved by a previous attempt; clean up any staged leftover.
       await deleteOutboxCopy(stagedPath);
-      return true;
+      return dest;
     }
     final src = File(stagedPath);
-    if (!await src.exists()) return false;
+    if (!await src.exists()) return null;
     await _ensureParent(dest);
     try {
       await src.rename(dest);
-      return true;
+      return dest;
     } catch (e, st) {
       // `rename` fails across filesystems (Android app-private vs external).
       sdkLog(
@@ -158,10 +169,10 @@ class MediaStore {
       try {
         await src.copy(dest);
         await deleteOutboxCopy(stagedPath);
-        return true;
+        return dest;
       } catch (e2, st2) {
         sdkLog('MediaStore.moveToCache: copy fallback failed — $e2\n$st2');
-        return false;
+        return null;
       }
     }
   }
@@ -185,28 +196,6 @@ class MediaStore {
     } catch (e, st) {
       sdkLog('MediaStore.deleteOutboxCopy($path) failed — $e\n$st');
     }
-  }
-
-  /// Total bytes across both directories. Drives the host-facing
-  /// "clear cached media" affordance while eviction is still unbuilt.
-  static Future<int> storeSizeBytes() async {
-    var total = 0;
-    for (final sub in const [kOutboxSubDir, kCacheSubDir]) {
-      final dir = Directory(p.join(await _root(), sub));
-      if (!await dir.exists()) continue;
-      await for (final e in dir.list(recursive: true, followLinks: false)) {
-        if (e is File) {
-          try {
-            total += await e.length();
-          } catch (err, st) {
-            sdkLog(
-              'MediaStore.storeSizeBytes: stat(${e.path}) failed — $err\n$st',
-            );
-          }
-        }
-      }
-    }
-    return total;
   }
 
   /// Deletes the staged file behind a field value that is being REPLACED.

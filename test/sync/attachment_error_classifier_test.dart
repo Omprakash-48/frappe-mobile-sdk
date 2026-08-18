@@ -4,15 +4,57 @@ import 'package:frappe_mobile_sdk/src/sync/attachment_error_classifier.dart';
 
 void main() {
   group('terminal — retrying can never succeed', () {
-    test('ValidationException (HTTP 417) is terminal', () {
-      // Frappe's `frappe.throw` yields 417; this is how an oversized file
-      // (MaxFileSizeReachedError) actually reaches the client.
+    // A 417 is terminal only when the body NAMES a terminal Frappe exception.
+    // `exc_type` is always present on an API-v1 error response
+    // (`frappe/utils/response.py` sets it unconditionally), and `RestHelper`
+    // hands the whole decoded body to `ValidationException.errors` — so this is
+    // a structured check, not a substring guess.
+    test('417 naming MaxFileSizeReachedError is terminal', () {
       expect(
         isTerminalAttachmentError(
-          ValidationException('File size exceeded the maximum allowed size'),
+          ValidationException('File size exceeded the maximum allowed size', {
+            'exc_type': 'MaxFileSizeReachedError',
+          }),
         ),
         isTrue,
       );
+    });
+
+    test('417 naming FileTypeNotAllowed is terminal', () {
+      expect(
+        isTerminalAttachmentError(
+          ValidationException('not allowed', {
+            'exc_type': 'FileTypeNotAllowed',
+          }),
+        ),
+        isTrue,
+      );
+    });
+
+    test('an API-v2 error shape is read too', () {
+      // v2 reports `errors: [{type: ...}]` instead of a top-level `exc_type`.
+      expect(
+        isTerminalAttachmentError(
+          ValidationException('not allowed', {
+            'errors': [
+              {'type': 'FileTypeNotAllowed'},
+            ],
+          }),
+        ),
+        isTrue,
+      );
+    });
+
+    test('HTTP 413 — the real oversized-upload status — is terminal', () {
+      // Frappe sets werkzeug's `max_content_length` to the SAME
+      // `get_max_file_size()` value (`frappe/app.py:194`), so the HTTP layer
+      // rejects an oversized upload with a 413 and an HTML body before
+      // `MaxFileSizeReachedError` (417) can ever be raised. Verified against a
+      // live v16 bench: a 30 MB upload returned `413 Request Entity Too Large`.
+      // The non-JSON body means this arrives as an ApiException, and the 4xx
+      // rule below is what makes it terminal — so removing the blanket-417 rule
+      // does not weaken the oversized case.
+      expect(isTerminalAttachmentError(ApiException('too large', 413)), isTrue);
     });
 
     test('AuthException 403 (permission denied) is terminal', () {
@@ -41,6 +83,31 @@ void main() {
   });
 
   group('transient — a later attempt may succeed', () {
+    // The inversion this fix is about. 417 is where EVERY `frappe.throw` lands
+    // — a storage-quota rule, a custom File hook, any transient server-side
+    // business rule — so treating the whole class as terminal contradicted this
+    // module's own stated policy ("a wrongly-transient error costs one retry; a
+    // wrongly-terminal one strands the user's file with no automatic recovery.
+    // Fail toward retrying") and applied that cost to Frappe's broadest error
+    // class.
+    test('a generic 417 frappe.throw is transient', () {
+      expect(
+        isTerminalAttachmentError(
+          ValidationException('Storage quota exceeded for this site', {
+            'exc_type': 'ValidationError',
+          }),
+        ),
+        isFalse,
+      );
+    });
+
+    test('a 417 with no exc_type at all is transient', () {
+      expect(
+        isTerminalAttachmentError(ValidationException('something went wrong')),
+        isFalse,
+      );
+    });
+
     test('NetworkException is transient', () {
       expect(
         isTerminalAttachmentError(NetworkException('Upload failed: socket')),

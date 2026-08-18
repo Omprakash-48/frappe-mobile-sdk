@@ -953,12 +953,11 @@ class FrappeSDK {
     _syncStateNotifier?.clearLastError();
   }
 
-  /// Total bytes held by the on-device media store (staged picks + cache).
+  /// On-device attachment media usage: staged bytes, cached bytes, and how much
+  /// [sweepOrphanedMedia] would reclaim right now.
   ///
   /// Exists so a host can show usage and offer a manual "Clear cached media"
   /// control while automatic eviction is still unbuilt (Phase 2).
-  /// On-device attachment media usage: staged bytes, cached bytes, and how much
-  /// [sweepOrphanedMedia] would reclaim right now.
   ///
   /// Read-only. `orphanBytes` is a subset of `outboxBytes` and is excluded from
   /// `totalBytes`, so a UI can show "1.4 GB — 240 MB reclaimable" without

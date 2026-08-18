@@ -20,7 +20,11 @@ void main() {
     });
 
     test('carries server name too', () {
-      final original = {'mobile_uuid': 'C1', 'name': 'CHILD-0001', 'label': 'x'};
+      final original = {
+        'mobile_uuid': 'C1',
+        'name': 'CHILD-0001',
+        'label': 'x',
+      };
       final submitted = {'label': 'x'};
 
       final result = preserveChildIdentity(original, submitted);

@@ -16,7 +16,7 @@ bool isLocalAttachmentPath(Object? value) {
     '/api/method/',
     'http://',
     'https://',
-    'pending:',
+    kPendingMarkerPrefix,
   ];
   for (final prefix in nonLocalPrefixes) {
     if (p.startsWith(prefix)) return false;
@@ -67,9 +67,11 @@ String? attachmentDisplaySource(Object? value, Map<int, String>? pendingPaths) {
 /// Returns the input unchanged when there is no usable [baseUrl], so callers
 /// degrade to "not fetchable" rather than building a broken request.
 ///
-/// NOTE: `AttachField._fullFileUrl` and `ImageField._fullImageUrl` still hold
-/// private copies of this logic. They are left alone here to keep this change
-/// small; collapsing all three onto this helper is a follow-up.
+/// `AttachField._fullFileUrl` and `ImageField._fullImageUrl` both delegate here;
+/// they were private copies of this logic until the three were collapsed. Keep
+/// it that way — `/private/files/` must route through `download_file` to carry
+/// auth, so a drift between copies is a private-file 404. Every branch is pinned
+/// by `test/utils/attachment_paths_test.dart`.
 String? frappeFileFetchUrl(String? path, String? baseUrl) {
   if (path == null || path.isEmpty) return path;
   final p = path.trim();

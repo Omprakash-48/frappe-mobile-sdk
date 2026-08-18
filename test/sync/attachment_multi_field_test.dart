@@ -339,7 +339,9 @@ void main() {
       await expectLater(
         pipeline(
           failOnContent: 'signature0',
-          error: ValidationException('File size exceeded'),
+          error: ValidationException('File size exceeded', {
+            'exc_type': 'MaxFileSizeReachedError',
+          }),
         ).resolveForTopParent('P1'),
         throwsA(isA<BlockedByUpstream>()),
       );

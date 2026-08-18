@@ -73,4 +73,65 @@ void main() {
       expect(attachmentDisplaySource('   ', {}), isNull);
     });
   });
+
+  // `AttachField._fullFileUrl` and `ImageField._fullImageUrl` now delegate here,
+  // so this is the single point of failure for the private-file auth path: a
+  // `/private/files/` value that does NOT route through `download_file` loses
+  // its auth and 404s. Every branch is pinned.
+  group('frappeFileFetchUrl', () {
+    const base = 'https://site.example.com';
+
+    test('private and public files route through download_file for auth', () {
+      expect(
+        frappeFileFetchUrl('/private/files/a b.png', base),
+        '$base/api/method/frappe.handler.download_file'
+        '?file_url=%2Fprivate%2Ffiles%2Fa%20b.png',
+        reason: 'the value must be percent-encoded into the query',
+      );
+      expect(
+        frappeFileFetchUrl('/files/a.png', base),
+        '$base/api/method/frappe.handler.download_file'
+        '?file_url=%2Ffiles%2Fa.png',
+      );
+    });
+
+    test('absolute http(s) urls pass through untouched (S3 and friends)', () {
+      expect(frappeFileFetchUrl('http://h/f.png', base), 'http://h/f.png');
+      expect(frappeFileFetchUrl('https://h/f.png', base), 'https://h/f.png');
+    });
+
+    test('any other rooted path just gets the base prepended', () {
+      expect(frappeFileFetchUrl('/assets/x.png', base), '$base/assets/x.png');
+    });
+
+    test('a trailing slash on the base is not doubled', () {
+      expect(
+        frappeFileFetchUrl('/assets/x.png', '$base/'),
+        '$base/assets/x.png',
+      );
+    });
+
+    test('without a usable base the input is returned unchanged', () {
+      // Degrade to "not fetchable" rather than building a broken request.
+      expect(frappeFileFetchUrl('/files/a.png', null), '/files/a.png');
+      expect(frappeFileFetchUrl('/files/a.png', '   '), '/files/a.png');
+    });
+
+    test('a relative path is returned unchanged', () {
+      expect(frappeFileFetchUrl('files/a.png', base), 'files/a.png');
+    });
+
+    test('null and empty are returned as given', () {
+      expect(frappeFileFetchUrl(null, base), isNull);
+      expect(frappeFileFetchUrl('', base), '');
+    });
+
+    test('surrounding whitespace is trimmed before classification', () {
+      expect(
+        frappeFileFetchUrl('  /files/a.png  ', base),
+        '$base/api/method/frappe.handler.download_file'
+        '?file_url=%2Ffiles%2Fa.png',
+      );
+    });
+  });
 }
