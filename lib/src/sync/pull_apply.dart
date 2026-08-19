@@ -82,6 +82,36 @@ String _asUtc(String raw) {
 /// UNIQUE index server-side (verified: a duplicate write fails with MariaDB
 /// error 1062), so two server documents cannot present the same value.
 ///
+/// That is a PRECONDITION, not a guarantee this package owns: the index comes
+/// from the `mobile_control` Frappe app (its `_MOBILE_CUSTOM_FIELDS` declares
+/// `mobile_uuid` as `Data` with `"unique": 1`, for workspace doctypes and their
+/// children), while this is a standalone package dependency carrying no
+/// `publish_to: none` — nothing here can enforce it. If a site provisions
+/// `mobile_uuid` without `unique: 1`, `mobile_uuid` is still the
+/// mirror's PK, and two server documents under one value resolve three
+/// different ways — verified, not reasoned:
+///
+/// * **Bulk parent path — silent.** `ConflictAlgorithm.replace` drops the first
+///   document's mirror with no log and no error. The pre-check upstream does not
+///   catch it: it counts locally-dirty and local-only rows, so a clean `synced`
+///   row is replaced without objection. Afterwards the two documents share one
+///   row and swap places on every page carrying either — those swaps DO log,
+///   via the clash tripwire below, because the fallback query now matches. The
+///   bulk page is the only unannounced event.
+/// * **Sequential, both rows in one page — loud.** The plain `INSERT`s are
+///   queued in `txn.batch()` and so invisible to the fallback query below; the
+///   second raises `UNIQUE constraint failed: <table>.mobile_uuid` at
+///   `batch.commit`, which has no `continueOnError` (extended code 1555 as seen
+///   under sqflite FFI; the message is the stable half). The page rolls back,
+///   and both pull paths stop the doctype without advancing its cursor —
+///   `PullEngine` reports it failed mid-pull, `SyncService` raises a `SyncError`
+///   — so it is retried and re-fails every cycle. Reported, not lost.
+/// * **Sequential, rows in different pages — neither.** The fallback matches the
+///   first row, the tripwire logs, and the second document overwrites it.
+///
+/// Children always take the loud path: the bulk child insert is a plain
+/// `INSERT`. Do not relax the server-side index expecting a client-side net.
+///
 /// [requireUuidShape] carries the one deliberate asymmetry between parents and
 /// children, and it is history rather than taste:
 ///
