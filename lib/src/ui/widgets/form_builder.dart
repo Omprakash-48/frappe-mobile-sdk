@@ -16,6 +16,7 @@ import '../../utils/depends_on_evaluator.dart';
 import '../../utils/field_normalizer.dart';
 import '../../utils/sdk_log.dart';
 import '../../utils/translate.dart';
+import '../../services/mobile_creation_capture.dart';
 import 'fields/field_factory.dart';
 import 'fields/base_field.dart';
 import 'default_form_style.dart';
@@ -199,6 +200,11 @@ class FrappeFormBuilder extends StatefulWidget {
   /// Custom field factory (if null, uses default FieldFactory)
   final FieldFactory? customFieldFactory;
 
+  /// Row-level creation capture for child tables — see
+  /// [FieldFactory.creationCapture]. Supplied by [FormScreen]; null disables
+  /// row-level capture.
+  final MobileCreationCapture? creationCapture;
+
   /// Custom styling options
   final FrappeFormStyle? style;
 
@@ -310,6 +316,7 @@ class FrappeFormBuilder extends StatefulWidget {
     this.linkOptionService,
     this.useLinkFieldCoordinator = true,
     this.customFieldFactory,
+    this.creationCapture,
     this.style,
     this.uploadFile,
     this.fileUrlBase,
@@ -433,6 +440,7 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
     // implicit Data varchar(140) cap.
     _fieldFactory.capDataLength = !widget.meta.isSingle;
     _fieldFactory.errorTextResolver = _inlineTableErrorFor;
+    _fieldFactory.creationCapture = widget.creationCapture;
   }
 
   /// Inline error for a child-table field, for whichever mode is active.

@@ -73,6 +73,20 @@ export 'src/services/translation_service.dart';
 export 'src/services/sync_service.dart';
 export 'src/services/offline_repository.dart';
 export 'src/services/link_option_service.dart';
+export 'src/services/location_readiness.dart'
+    show
+        LocationReadiness,
+        checkDeviceLocationReadiness,
+        isLocationReady,
+        openDeviceLocationSettings,
+        openLocationAppSettings,
+        requestDeviceLocationPermission;
+export 'src/services/mobile_creation_capture.dart'
+    show
+        MobileCreationCapture,
+        PendingCreationMeta,
+        kCreationLocationSaveWait,
+        readDeviceLocationAsGeoJson;
 export 'src/services/link_field_coordinator.dart';
 export 'src/services/workflow_service.dart';
 
@@ -136,6 +150,16 @@ export 'src/constants/oauth_constants.dart';
 
 // Utilities (Frappe expression parity)
 export 'src/utils/depends_on_evaluator.dart' show DependsOnEvaluator;
+export 'src/ui/widgets/location_required_barrier.dart'
+    show LocationRequiredBarrier;
+export 'src/utils/geo_json.dart' show GeoPoint, geoJsonPoint, parseGeoJsonPoint;
+export 'src/utils/mobile_creation_stamp.dart'
+    show
+        declaresCreationMeta,
+        formatFrappeDatetime,
+        mobileCreatedAtField,
+        mobileLatitudeLongitudeField,
+        stampCreationMeta;
 
 // Query (UnifiedResolver + FilterParser) — Spec §6
 export 'src/query/filter_errors.dart'

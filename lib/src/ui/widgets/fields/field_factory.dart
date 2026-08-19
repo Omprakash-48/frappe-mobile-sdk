@@ -8,6 +8,7 @@ import '../../../models/doc_type_meta.dart';
 import '../../../models/link_filter_result.dart';
 import '../../../services/link_option_service.dart';
 import '../../../services/link_field_coordinator.dart';
+import '../../../services/mobile_creation_capture.dart';
 import 'attach_field.dart';
 import '../../../models/image_pick_source.dart';
 import '../../../services/media_resolver.dart';
@@ -78,6 +79,16 @@ class FieldFactory {
   /// Instance state rather than a [createField] parameter for the
   /// subclass-compatibility reason documented on [capDataLength].
   String? Function(String fieldname)? errorTextResolver;
+
+  /// Captures `mobile_created_at` / `mobile_latitude_longitude` for a child
+  /// table row at the moment its **Add Row** is tapped — the row-level
+  /// counterpart of the capture [FormScreen] performs for a new parent record.
+  ///
+  /// Instance state rather than a [createField] parameter for the
+  /// subclass-compatibility reason documented on [capDataLength]: a new named
+  /// parameter would break every existing `FieldFactory` subclass at compile
+  /// time, and hosts do ship their own via `customFieldFactory`.
+  MobileCreationCapture? creationCapture;
 
   /// Inline error for [field], or null when none applies.
   String? _errorTextFor(DocField field) {
@@ -265,6 +276,7 @@ class FieldFactory {
           formBuilder: childTableFormBuilder,
           style: fieldStyle,
           errorText: _errorTextFor(field),
+          creationCapture: creationCapture,
         );
 
       case 'Duration':
@@ -383,6 +395,7 @@ class _TableFieldBase extends BaseField {
   final Future<DocTypeMeta> Function(String doctype) getMeta;
   final ChildTableFormBuilder formBuilder;
   final String? errorText;
+  final MobileCreationCapture? creationCapture;
 
   const _TableFieldBase({
     required super.field,
@@ -393,6 +406,7 @@ class _TableFieldBase extends BaseField {
     required this.formBuilder,
     super.style,
     this.errorText,
+    this.creationCapture,
   });
 
   @override
@@ -401,6 +415,7 @@ class _TableFieldBase extends BaseField {
     return ChildTableField(
       field: field,
       value: value,
+      creationCapture: creationCapture,
       onChanged: onChanged != null
           ? (List<dynamic> v) => onChanged!.call(v)
           : null,

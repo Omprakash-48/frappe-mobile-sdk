@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
 import '../../../models/doc_field.dart';
 import '../../../models/doc_type_meta.dart';
+import '../../../services/mobile_creation_capture.dart';
+import '../../../utils/mobile_creation_stamp.dart';
 import '../screen_helpers.dart';
 
 /// Preserves the identity/system columns a child form does not render (e.g.
@@ -43,6 +45,10 @@ class ChildTableField extends StatelessWidget {
   final ChildTableFormBuilder? formBuilder;
   final String? errorText;
 
+  /// Captures a NEW row's `mobile_created_at` / `mobile_latitude_longitude`
+  /// when Add Row is tapped. Null disables row-level capture entirely.
+  final MobileCreationCapture? creationCapture;
+
   const ChildTableField({
     super.key,
     required this.field,
@@ -52,6 +58,7 @@ class ChildTableField extends StatelessWidget {
     this.getMeta,
     this.formBuilder,
     this.errorText,
+    this.creationCapture,
   });
 
   @override
@@ -254,6 +261,15 @@ class ChildTableField extends StatelessWidget {
     }
     if (!context.mounted) return;
 
+    // Begin the row's creation capture HERE — the moment Add Row was tapped —
+    // not when the row is submitted. The user then spends a few seconds filling
+    // the row in, which is exactly the window the GPS read needs, so the wait
+    // at submit below is almost always already satisfied.
+    final capture = creationCapture;
+    final pending = (capture != null && declaresCreationMeta(childMeta))
+        ? capture.begin()
+        : null;
+
     await showModalBottomSheet<void>(
       context: context,
       isScrollControlled: true,
@@ -264,9 +280,21 @@ class ChildTableField extends StatelessWidget {
         initialData: null,
         isEdit: false,
         formBuilder: formBuilder!,
-        onSubmit: (data) {
+        onSubmit: (data) async {
+          final row = pending == null
+              ? data
+              : stampCreationMeta(
+                  meta: childMeta!,
+                  data: data,
+                  createdAt: formatFrappeDatetime(pending.startedAt),
+                  latitudeLongitude: await pending.location(),
+                );
+          // Awaited before the pop so the row is complete when the sheet
+          // closes; a row handed to `onChanged` after the fact could miss a
+          // parent save the user triggers in between.
+          if (!ctx.mounted) return;
           Navigator.pop(ctx);
-          final newList = List<dynamic>.from(listValue)..add(data);
+          final newList = List<dynamic>.from(listValue)..add(row);
           onChanged!(newList);
         },
         onRemove: null,
