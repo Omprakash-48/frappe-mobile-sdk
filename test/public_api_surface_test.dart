@@ -51,4 +51,17 @@ void main() {
         pendingPaths?[1] ?? value;
     expect(resolver, isNotNull);
   });
+
+  test('a host can name ReclaimAttachmentFn to supply its own reclaim', () {
+    // Same shape as `ResolveMediaFn` above. It is NOT a `createField`
+    // parameter — that signature is frozen for subclass compatibility — but it
+    // is a public field on `FieldFactory`, `FrappeFormBuilder`, `AttachField`
+    // and `ImageField`. A host storing or declaring one must WRITE the type;
+    // assignment alone infers it. The annotation is the assertion.
+    ReclaimAttachmentFn? reclaim;
+    expect(reclaim, isNull);
+
+    reclaim = (String? value) async {};
+    expect(reclaim, isNotNull);
+  });
 }

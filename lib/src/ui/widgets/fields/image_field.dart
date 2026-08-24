@@ -158,6 +158,15 @@ class ImageField extends BaseField {
   /// Which pick sources to offer. Null means [ImagePickSource.both].
   final ImagePickSource Function()? imagePickSource;
 
+  /// Reclaims the bytes behind a value this field discards or replaces.
+  ///
+  /// Defaults to [MediaStore.discardValue], which deletes any staged file on
+  /// sight. Hosts with a database wire
+  /// `OfflineRepository.reclaimDiscardedAttachment` instead — see
+  /// [ReclaimAttachmentFn] for why the field's own value is not enough to
+  /// decide.
+  final ReclaimAttachmentFn reclaimAttachment;
+
   const ImageField({
     super.key,
     required super.field,
@@ -173,6 +182,7 @@ class ImageField extends BaseField {
     this.mediaResolver,
     this.isOfflineMode,
     this.imagePickSource,
+    this.reclaimAttachment = MediaStore.discardValue,
   });
 
   /// Only Frappe server file paths or full URLs are treated as server URLs.
@@ -269,8 +279,9 @@ class ImageField extends BaseField {
       return false;
     }
     if (stored != null && stored.isNotEmpty) {
-      // Reclaim the file this pick replaces (guarded by isStagedPath).
-      await MediaStore.discardReplacedValue(fieldState.value);
+      // Reclaim the file this pick replaces (guarded by isStagedPath, and by
+      // the queue when the host wired a database-backed reclaim).
+      await reclaimAttachment(fieldState.value);
       fieldState.didChange(stored);
       onChanged?.call(stored);
       return true;
@@ -660,7 +671,7 @@ class ImageField extends BaseField {
                       final discarded = currentValue;
                       fieldState.didChange(null);
                       onChanged?.call(null);
-                      await MediaStore.discardValue(discarded);
+                      await reclaimAttachment(discarded);
                     },
                   ),
                 ],

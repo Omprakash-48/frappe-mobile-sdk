@@ -1249,6 +1249,11 @@ class _FormScreenState extends State<FormScreen> with WidgetsBindingObserver {
                   isOnline: widget.isOnline,
                   pendingAttachmentPaths: _pendingAttachmentPaths,
                   mediaResolver: _mediaResolver?.resolve,
+                  // Queue-aware: refuses to delete a staged file a
+                  // `pending_attachments` row still owns. See
+                  // `OfflineRepository.reclaimDiscardedAttachment`.
+                  reclaimAttachment:
+                      widget.repository.reclaimDiscardedAttachment,
                   // Read live through the repository so a mid-session toggle
                   // flip takes effect on the next pick.
                   isOfflineMode: () => widget.repository.offlineMode.enabled,

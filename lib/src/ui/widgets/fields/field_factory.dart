@@ -11,6 +11,7 @@ import '../../../services/link_field_coordinator.dart';
 import 'attach_field.dart';
 import '../../../models/image_pick_source.dart';
 import '../../../services/media_resolver.dart';
+import '../../../utils/media_store.dart';
 import 'base_field.dart';
 import 'button_field.dart';
 import 'check_field.dart';
@@ -78,6 +79,20 @@ class FieldFactory {
   /// Instance state rather than a [createField] parameter for the
   /// subclass-compatibility reason documented on [capDataLength].
   String? Function(String fieldname)? errorTextResolver;
+
+  /// Reclaims the bytes behind an attach value a field discards or replaces.
+  ///
+  /// Defaults to [MediaStore.discardValue], which deletes any staged file on
+  /// sight — correct only where the value cannot be a form's. Hosts with a
+  /// database assign `OfflineRepository.reclaimDiscardedAttachment`, which
+  /// refuses a file a queued `pending_attachments` row still owns; see
+  /// [ReclaimAttachmentFn].
+  ///
+  /// Instance state rather than a [createField] parameter for the
+  /// subclass-compatibility reason documented on [capDataLength]: a new named
+  /// parameter breaks every existing override at compile time, and a default
+  /// value does not save it.
+  ReclaimAttachmentFn reclaimAttachment = MediaStore.discardValue;
 
   /// Inline error for [field], or null when none applies.
   String? _errorTextFor(DocField field) {
@@ -316,6 +331,7 @@ class FieldFactory {
           isOnline: isOnline,
           pendingAttachmentPaths: pendingAttachmentPaths,
           mediaResolver: mediaResolver,
+          reclaimAttachment: reclaimAttachment,
           isOfflineMode: isOfflineMode,
         );
 
@@ -333,6 +349,7 @@ class FieldFactory {
           isOnline: isOnline,
           pendingAttachmentPaths: pendingAttachmentPaths,
           mediaResolver: mediaResolver,
+          reclaimAttachment: reclaimAttachment,
           isOfflineMode: isOfflineMode,
           imagePickSource: imagePickSource,
         );

@@ -7,6 +7,7 @@ import 'package:flutter_form_builder/flutter_form_builder.dart';
 import '../../models/doc_type_meta.dart';
 import '../../models/image_pick_source.dart';
 import '../../services/media_resolver.dart';
+import '../../utils/media_store.dart';
 import '../../models/doc_field.dart';
 import '../../models/link_filter_result.dart';
 import '../../constants/field_types.dart';
@@ -225,6 +226,14 @@ class FrappeFormBuilder extends StatefulWidget {
   /// offline previews. Forwarded to Attach / Attach Image / Image fields.
   final ResolveMediaFn? mediaResolver;
 
+  /// Reclaims the bytes behind an attach value a field discards or replaces.
+  ///
+  /// Forwarded to every Attach / Attach Image field, INCLUDING those inside
+  /// child rows — a child row picks and discards on the same path, so a hook
+  /// that stopped at the parent would leave half the fix unwired. Defaults to
+  /// [MediaStore.discardValue]; see [ReclaimAttachmentFn].
+  final ReclaimAttachmentFn reclaimAttachment;
+
   /// Returns true when the SDK is in offline-first mode; forwarded to
   /// Attach / Attach Image / Image so a pick is queued rather than uploaded
   /// inline. See [AttachField.isOfflineMode].
@@ -328,6 +337,7 @@ class FrappeFormBuilder extends StatefulWidget {
     this.isOnline,
     this.pendingAttachmentPaths,
     this.mediaResolver,
+    this.reclaimAttachment = MediaStore.discardValue,
     this.isOfflineMode,
     this.imagePickSource,
   });
@@ -427,12 +437,18 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
   /// not help (a caller holding a `FieldFactory` reference may still pass it
   /// explicitly). Host apps subclass this factory, so the signature is treated
   /// as frozen. Mirrors how `linkOptionService` / `linkFieldCoordinator` are
-  /// already wired. Re-invoked from [didUpdateWidget] because `meta` can change.
+  /// already wired. Re-invoked from [didUpdateWidget] because `meta` can
+  /// change, and from [build] because [FrappeFormBuilder.reclaimAttachment]
+  /// can change without either of `didUpdateWidget`'s two triggers firing.
   void _configureFieldFactoryForMeta() {
     // Frappe stores Single doctypes as mediumtext and exempts them from the
     // implicit Data varchar(140) cap.
     _fieldFactory.capDataLength = !widget.meta.isSingle;
     _fieldFactory.errorTextResolver = _inlineTableErrorFor;
+    // Not covered by the meta/initialData guard in didUpdateWidget — this one
+    // tracks a widget property that can change on its own — which is why
+    // `build` re-runs this method rather than relying on those two callers.
+    _fieldFactory.reclaimAttachment = widget.reclaimAttachment;
   }
 
   /// Inline error for a child-table field, for whichever mode is active.
@@ -1417,6 +1433,7 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
                   isOnline: widget.isOnline,
                   pendingAttachmentPaths: widget.pendingAttachmentPaths,
                   mediaResolver: widget.mediaResolver,
+                  reclaimAttachment: widget.reclaimAttachment,
                   isOfflineMode: widget.isOfflineMode,
                   imagePickSource: widget.imagePickSource,
                   // fetch linked document for child doctype.
@@ -2279,6 +2296,7 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
                       isOnline: widget.isOnline,
                       pendingAttachmentPaths: widget.pendingAttachmentPaths,
                       mediaResolver: widget.mediaResolver,
+                      reclaimAttachment: widget.reclaimAttachment,
                       isOfflineMode: widget.isOfflineMode,
                       imagePickSource: widget.imagePickSource,
                       fetchLinkedDocument: widget.fetchLinkedDocument,
@@ -2310,6 +2328,11 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
     // `_buildSectionContent`) runs inside this build; `_formData` mutations all
     // go through setState, which lands here again before anything re-reads it.
     _resetEvalDataCache();
+    // Refresh the factory's instance-state hooks. `didUpdateWidget` only
+    // reconfigures on a meta / initialData change, so a host that swaps
+    // `reclaimAttachment` alone would otherwise leave a stale one in place and
+    // the field would delete bytes the queue still owns.
+    _configureFieldFactoryForMeta();
     if (_tabs.isEmpty) {
       return const Center(child: Text('No fields to display'));
     }

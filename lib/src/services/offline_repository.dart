@@ -1,5 +1,6 @@
 import 'dart:convert';
 import 'dart:developer' as developer;
+import 'package:path/path.dart' as p;
 import 'package:sqflite/sqflite.dart';
 import 'package:uuid/uuid.dart';
 import '../api/client.dart';
@@ -24,6 +25,7 @@ import '../sync/pull_apply.dart';
 import 'local_writer.dart';
 import 'media_resolver.dart';
 import 'meta_migration.dart';
+import '../utils/media_store.dart';
 import '../utils/sdk_log.dart';
 
 /// Repository for offline document operations
@@ -1195,6 +1197,57 @@ class OfflineRepository {
     fetch: fetch,
     isOnline: isOnline,
   );
+
+  /// Reclaims the staged bytes behind an attach value the user discarded or
+  /// replaced — unless a queued `pending_attachments` row still owns them.
+  ///
+  /// [MediaStore.discardValue] alone is not safe from a form. Its "a raw staged
+  /// path has by construction never been saved" reasoning holds for the DB
+  /// COLUMN, which [LocalWriter] rewrites to `pending:<id>` inside the save
+  /// transaction — but not for the value the open form is holding. The field
+  /// keeps whatever the user picked (`hasInteractedByUser` pins it against a
+  /// later widget value), so after a save the form still offers the raw staged
+  /// path while the column and the queue row have moved on. Discarding then
+  /// deleted the only copy of bytes a committed row pointed at, and the push
+  /// blocked the document on a file that no longer exists — with no auto-retry.
+  ///
+  /// The row is dropped by [LocalWriter] on the next save (the field arrives
+  /// empty), and that is what frees the file. Refusing here costs a staged file
+  /// living until then or until the orphan sweep, which is the recoverable side
+  /// of the trade.
+  ///
+  /// Best-effort like the [MediaStore] calls it fronts: a lookup failure keeps
+  /// the file rather than risking the delete.
+  Future<void> reclaimDiscardedAttachment(String? value) async {
+    final v = value?.trim();
+    if (v == null || v.isEmpty) return;
+    try {
+      final db = _database.rawDatabase;
+      if (await sqliteTableExists(db, 'pending_attachments')) {
+        final referenced = await PendingAttachmentDao(
+          db,
+        ).referencedLocalPaths();
+        // Canonicalised on both sides: the queue stores the path the field held
+        // at save time, and a `..` or double-slash difference must not read as
+        // "not referenced" — that verdict deletes the file.
+        final target = p.canonicalize(v);
+        if (referenced.any((r) => p.canonicalize(r) == target)) {
+          sdkLog(
+            'OfflineRepository: $v is still referenced by a queued '
+            'attachment — not reclaimed',
+          );
+          return;
+        }
+      }
+    } catch (e, st) {
+      sdkLog(
+        'OfflineRepository.reclaimDiscardedAttachment($v) check '
+        'failed — $e\n$st',
+      );
+      return;
+    }
+    await MediaStore.discardValue(v);
+  }
 
   Future<Map<int, String>> pendingAttachmentLocalPaths(
     String topParentUuid,

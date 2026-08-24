@@ -24,6 +24,19 @@ const String kCacheSubDir = 'cache';
 
 const Uuid _uuid = Uuid();
 
+/// Reclaims the local bytes behind an attach value the user discarded or
+/// replaced.
+///
+/// The seam exists because [MediaStore.discardValue] cannot see the queue.
+/// A form's field value outlives the column it was saved into — `LocalWriter`
+/// rewrites the column to `pending:<id>` inside the save transaction while the
+/// open form keeps the raw staged path — so a widget deleting on its own
+/// authority can destroy bytes a committed `pending_attachments` row owns.
+/// Hosts with a database pass `OfflineRepository.reclaimDiscardedAttachment`,
+/// which refuses a referenced file; [MediaStore.discardValue] remains the
+/// default for hosts that have no queue to consult.
+typedef ReclaimAttachmentFn = Future<void> Function(String? value);
+
 /// Two-directory media store backing the attachment pipeline.
 ///
 /// There is NO transaction spanning the filesystem and SQLite, and this class
@@ -204,11 +217,21 @@ class MediaStore {
   /// marker, a server url, a cache path and a host-supplied gallery path are
   /// all left alone.
   ///
-  /// No database check is needed, and that is not a shortcut: a saved
-  /// attachment's column holds `pending:<id>`, never a path — `LocalWriter`
-  /// swaps the path for the marker inside the save transaction, and a failed
-  /// enqueue rolls that transaction back. So a column holding a raw staged path
-  /// has by construction never been saved and has no `pending_attachments` row.
+  /// No database check is made here, and the reason is narrower than it looks.
+  /// A saved attachment's COLUMN holds `pending:<id>`, never a path —
+  /// `LocalWriter` swaps the path for the marker inside the save transaction,
+  /// and a failed enqueue rolls that transaction back. So a *column* holding a
+  /// raw staged path has by construction never been saved.
+  ///
+  /// That does NOT extend to a value handed in by a form. A field keeps what
+  /// the user picked (`hasInteractedByUser` pins it against a later widget
+  /// value), so once the form has been saved and left open it still offers the
+  /// raw path the column no longer holds — and deleting then destroys the only
+  /// copy of bytes a committed `pending_attachments` row owns, blocking the
+  /// document on a file that no longer exists. UI callers therefore go through
+  /// [ReclaimAttachmentFn], wired to
+  /// `OfflineRepository.reclaimDiscardedAttachment`, which consults the queue
+  /// first. Call this directly only where the value is known not to be a form's.
   /// BEST-EFFORT and never throws. Reclaiming bytes must not be able to fail
   /// the user's action: a failure here leaves an orphan, which the sweep
   /// reclaims later, whereas a thrown exception would abort the caller

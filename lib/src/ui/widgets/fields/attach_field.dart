@@ -155,6 +155,15 @@ class AttachField extends BaseField {
   /// "not offline mode", preserving the previous behaviour.
   final bool Function()? isOfflineMode;
 
+  /// Reclaims the bytes behind a value this field discards or replaces.
+  ///
+  /// Defaults to [MediaStore.discardValue], which deletes any staged file on
+  /// sight. Hosts with a database wire
+  /// `OfflineRepository.reclaimDiscardedAttachment` instead — see
+  /// [ReclaimAttachmentFn] for why the field's own value is not enough to
+  /// decide.
+  final ReclaimAttachmentFn reclaimAttachment;
+
   const AttachField({
     super.key,
     required super.field,
@@ -170,6 +179,7 @@ class AttachField extends BaseField {
     this.httpClient,
     this.mediaResolver,
     this.isOfflineMode,
+    this.reclaimAttachment = MediaStore.discardValue,
   });
 
   static const Set<String> _imageExtensions = {
@@ -309,10 +319,10 @@ class AttachField extends BaseField {
                               if (stored != null && stored.isNotEmpty) {
                                 // Reclaim the file this pick replaces.
                                 // Guarded by isStagedPath, so a host path or a
-                                // pending: marker is untouched.
-                                await MediaStore.discardReplacedValue(
-                                  fieldState.value,
-                                );
+                                // pending: marker is untouched — and by the
+                                // queue when the host wired a database-backed
+                                // reclaim.
+                                await reclaimAttachment(fieldState.value);
                                 fieldState.didChange(stored);
                                 onChanged?.call(stored);
                                 return;
@@ -374,7 +384,7 @@ class AttachField extends BaseField {
                       final discarded = current;
                       fieldState.didChange(null);
                       onChanged?.call(null);
-                      await MediaStore.discardValue(discarded);
+                      await reclaimAttachment(discarded);
                     },
                   ),
                 if (hasViewable)

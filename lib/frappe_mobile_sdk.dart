@@ -36,6 +36,12 @@ export 'src/models/media_store_usage.dart' show MediaStoreUsage;
 // and `field_factory.dart` only imports this one. Without this line the only
 // route is an `implementation_imports` violation.
 export 'src/services/media_resolver.dart' show ResolveMediaFn;
+// Same reasoning for `ReclaimAttachmentFn`: it is a parameter of
+// `FieldFactory.createField` and of the `AttachField` / `ImageField`
+// constructors, so a host supplying its own reclaim — or overriding the
+// factory — has to name the type. `media_store.dart` is otherwise internal, so
+// only the typedef is shown.
+export 'src/utils/media_store.dart' show ReclaimAttachmentFn;
 
 // Database
 export 'src/database/app_database.dart';

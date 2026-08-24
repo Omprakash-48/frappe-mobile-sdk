@@ -528,7 +528,7 @@ Consequences:
 
 **Labels never come from the resolved path.** The cache names files `sha256(file_url)`, so a label routed through it would read as 64 hex characters instead of `report.pdf`. Labels derive from the stored value; only the *view target* is resolved.
 
-**The widgets depend on a `ResolveMediaFn` function**, not on `MediaResolver` itself — hosts pass `resolver.resolve`. That keeps the UI layer off the DAO/filesystem stack, which also makes the widgets testable: widget tests run in a fake-async zone where real sqflite and `dart:io` futures never complete. (Passing `resolver.resolve` works because the argument type is inferred; a host that has to *write the type out* — overriding `FieldFactory.createField`, for instance — currently cannot. See §13.)
+**The widgets depend on a `ResolveMediaFn` function**, not on `MediaResolver` itself — hosts pass `resolver.resolve`. That keeps the UI layer off the DAO/filesystem stack, which also makes the widgets testable: widget tests run in a fake-async zone where real sqflite and `dart:io` futures never complete. (Passing `resolver.resolve` works because the argument type is inferred; a host that has to *write the type out* — overriding `FieldFactory.createField`, for instance — needs the typedef exported, which it now is. `ReclaimAttachmentFn` is exported alongside it, but is deliberately **not** a `createField` parameter: that signature is frozen for subclass compatibility, so the reclaim hook is instance state on the factory, the same as `capDataLength` and `errorTextResolver`.)
 
 **The resolve future is memoised per value** (`media_resolve_builder::MediaResolveBuilder`). Starting it inside `build` creates a new future on every rebuild, and each completion triggers another — an infinite loop that re-reads the cache and can re-download indefinitely.
 
@@ -554,7 +554,8 @@ The wipe is **destructive by design** — it also clears `outbox/`, which holds 
 | `kDefaultMaxAttachmentBytes` | 10 MB, matching Frappe's stock `max_file_size`. **Not host-overridable yet** — see §13 |
 | `AttachmentTooLargeException` | thrown at pick, carries `sizeBytes` and `limitBytes` |
 | `attachmentTooLargeMessage(e)` | user-facing message naming the real limit |
-| `ResolveMediaFn` | what the field widgets accept; pass `resolver.resolve`. **Not exported — see §13.** Passing works by inference; *naming* the type does not compile from the public entry point |
+| `ResolveMediaFn` | what the field widgets accept; pass `resolver.resolve`. Exported from the barrel, so a host overriding `FieldFactory.createField` can name it |
+| `ReclaimAttachmentFn` | how a field reclaims bytes it discards or replaces. Defaults to `MediaStore.discardValue`; `FormScreen` wires `OfflineRepository.reclaimDiscardedAttachment`. Exported for the same reason |
 | `FormScreen.imagePickSource` | host hook choosing gallery / camera / both for image fields; global, read live, null means both |
 
 ### Discarding an attachment
@@ -568,11 +569,27 @@ What happens depends on the value's shape, and the three cases differ:
 
 | Value | On discard |
 |---|---|
-| staged path (never saved) | staged file deleted, field cleared |
+| staged path, **unreferenced** | staged file deleted, field cleared |
+| staged path a queue row owns | field cleared; the file is kept — the **save** drops the row and the file with it |
 | `pending:<id>` (saved, queued) | field cleared; the **save** drops the row and its staged file |
 | `/files/…` (synced) | field cleared only; the server `File` is left alone, as with delete and re-pick |
 
-Two things make this safe that are not obvious from the UI:
+Three things make this safe that are not obvious from the UI:
+
+**The field's value is not the column's value, so the reclaim asks the queue.**
+`LocalWriter` rewrites the column to `pending:<id>` inside the save transaction,
+but the open form keeps whatever the user picked — `hasInteractedByUser` pins it
+against a later widget value, which is what lets an explicit clear survive an
+async document load. So after a save the field still offers the **raw staged
+path** the column no longer holds. `MediaStore.discardValue` would delete it on
+sight: its "a raw staged path was never saved" reasoning is sound about the
+column and wrong about a form. Discard and re-pick therefore go through
+`ReclaimAttachmentFn` — `OfflineRepository.reclaimDiscardedAttachment` in every
+host the SDK wires, including child rows — which checks
+`PendingAttachmentDao.referencedLocalPaths()` first and refuses a file a queued
+row still owns. Refusing costs a staged file living until the next save or the
+orphan sweep; deleting cost the push a file that no longer exists, and a blocked
+document waits for a human.
 
 **The field clears before the bytes are reclaimed.** A failure reclaiming leaves
 an orphan the sweep collects; a failure *aborting the clear* would leave the
@@ -636,7 +653,7 @@ The size guard runs **before** the durable copy is made, so an oversized pick ne
 
   None of this is SDK behaviour and none of it is a Frappe default you can assume everywhere — it is one site setting. Turn `strip_exif_metadata_from_uploaded_images` off if originals must be preserved.
 
-- **`ResolveMediaFn` is not exported, so a host cannot override `FieldFactory.createField`.** The typedef appears in the signature of `FieldFactory.createField` — which is public, exported bare from the barrel, and explicitly documented as overridable ("Override this method to customize field creation") — but the typedef itself is declared in `src/services/media_resolver.dart`, which the barrel does not export. Dart does not re-export a library's *imports*, only its own declarations and anything it `export`s, and `field_factory.dart` merely imports the typedef. Verified by probing the public entry point: `ImagePickSource` and `MediaStoreUsage` resolve, while `ResolveMediaFn` fails with `Undefined class 'ResolveMediaFn'`. Passing `resolver.resolve` as an argument is unaffected (the type is inferred); a host that must **name** the type in an override signature has no route but an `implementation_imports` violation. **This is the same defect class as the `ImagePickSource` / `MediaStoreUsage` gap fixed under `[Unreleased]`** — a type on the public surface that no host can name — and the fix is the same one line, exporting it alongside them. Unshipped as of 2.0.0-beta.2.
+- **Reclaim refusal has no second chance of its own.** When a discard declines to delete a file a queue row owns, nothing re-attempts the delete after that row is dropped — the next save frees it, and failing that the orphan sweep does, but both are host-triggered (see the first bullet). The trade is deliberate: an orphan is recoverable and a missing file behind a queued upload is not.
 - **No background prefetch.** Media for a pulled document is cached on first view, not ahead of time.
 - **An inline (offline-mode-OFF) pick does not populate the cache.** `resolvePickedAttachment` deletes the staged copy after a successful inline upload rather than moving it into `cache/`, so previewing that file later costs a download. Only the **push** path promotes bytes into the cache via `moveToCache`. Note this no longer affects offline mode, where every pick goes through the push path and therefore does get cached. Closing it for the inline path is a small change: the bytes, the url and the store are all already in hand there.
 - **The size limit is not host-configurable.** `kDefaultMaxAttachmentBytes` (10 MB) is the default for `resolvePickedAttachment`'s `maxBytes`, but the only callers are this SDK's own `AttachField` / `ImageField` and neither exposes an override. A deployment whose System Settings `max_file_size` differs will either refuse files the server would have accepted, or accept files it will reject at upload (which the pipeline then handles correctly as a terminal rejection — the document blocks with a named reason rather than corrupting). Making it configurable means threading a parameter through `FormScreen` -> `FormBuilder` -> `FieldFactory`, the same path `mediaResolver` takes.
