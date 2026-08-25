@@ -1,4 +1,6 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
+import 'package:http/http.dart' as http;
 
 import '../api/client.dart';
 import '../api/exceptions.dart';
@@ -12,6 +14,8 @@ import '../models/outbox_row.dart';
 import '../models/workflow_transition.dart';
 import '../services/link_option_service.dart';
 import '../services/meta_service.dart';
+import '../models/image_pick_source.dart';
+import '../services/media_resolver.dart';
 import '../services/offline_repository.dart';
 import '../services/sync_controller.dart';
 import '../services/sync_service.dart';
@@ -29,9 +33,74 @@ import 'widgets/form_builder.dart'
         FormValidator;
 import 'form/form_controller.dart' show FormController;
 import 'widgets/fields/field_factory.dart' show FieldFactory;
+import '../utils/attachment_paths.dart';
 import '../utils/sdk_log.dart';
 
 /// Visual customization for [FormScreen] action area.
+/// Bound on the connect/headers phase of a media fetch.
+const Duration _mediaFetchConnectTimeout = Duration(seconds: 30);
+
+/// Bound on the gap between two body chunks of a media fetch.
+///
+/// Deliberately per-chunk rather than a total deadline: a 25 MB attachment over
+/// a slow rural link is legitimate and must be allowed to finish, while a
+/// connection that goes silent mid-body must not hang the resolve forever.
+const Duration _mediaFetchStallTimeout = Duration(seconds: 30);
+
+/// Accumulates [res]'s body, refusing anything over [cap] and giving up if the
+/// stream goes quiet for [stallTimeout]. Returns null on refusal or stall.
+///
+/// Extracted from `FormScreen._fetchMediaBytes` so the guard rails are testable
+/// without standing up a whole screen: the method builds its own `http.Client`,
+/// which leaves no seam for a hung-server test. [label] appears only in logs.
+///
+/// Two ceilings, because they catch different things: `Content-Length` refuses
+/// an oversized body before a single chunk is read, and the accumulate loop
+/// re-checks as it goes, because a chunked response declares no length and a
+/// server may under-report.
+///
+/// The stall bound is per-CHUNK, not a total deadline. A legitimately slow
+/// 25 MB download on a rural link must be allowed to finish; a connection that
+/// dies mid-body must not hang forever. The caller's `send` timeout covers only
+/// the connect/headers phase — once the response object exists it is satisfied,
+/// so before this bound a stalled stream left the resolve future permanently
+/// unresolved and the widget stuck on a spinner. `AttachField`'s own downloader
+/// already guarded this the same way (`_AttachViewButtonState.stallTimeout`).
+@visibleForTesting
+Future<List<int>?> readCappedMediaBody(
+  http.StreamedResponse res, {
+  required int cap,
+  String label = '',
+  Duration stallTimeout = _mediaFetchStallTimeout,
+}) async {
+  final declared = res.contentLength;
+  if (declared != null && declared > cap) {
+    sdkLog(
+      'readCappedMediaBody($label): Content-Length $declared exceeds the '
+      '$cap byte cap — not fetched',
+    );
+    return null;
+  }
+
+  final bytes = <int>[];
+  try {
+    await for (final chunk in res.stream.timeout(stallTimeout)) {
+      bytes.addAll(chunk);
+      if (bytes.length > cap) {
+        sdkLog(
+          'readCappedMediaBody($label): body exceeded the $cap byte cap '
+          'mid-stream — aborted',
+        );
+        return null;
+      }
+    }
+  } on TimeoutException catch (e) {
+    sdkLog('readCappedMediaBody($label): stalled mid-body — $e');
+    return null;
+  }
+  return bytes;
+}
+
 class FormScreenStyle {
   final Color? appBarBackgroundColor;
   final ButtonStyle? saveButtonStyle;
@@ -143,6 +212,18 @@ class FormScreen extends StatefulWidget {
   /// supply an app-specific [FieldFactory] subclass to override field types.
   final FieldFactory? customFieldFactory;
 
+  /// Synchronous last-known connectivity, forwarded to Attach/Image fields.
+  /// When it returns false, an offline pick is stored as a durable local path
+  /// and queued at save instead of being uploaded inline. When null, fields
+  /// attempt the upload and fall back to the local path if it fails — so
+  /// correctness holds even if the host does not supply this.
+  final bool Function()? isOnline;
+
+  /// Host hook choosing which sources image fields offer — gallery, camera, or
+  /// both. Global across doctypes and fields, and read live so a host can flip
+  /// it from a setting without rebuilding. Null means both.
+  final ImagePickSource Function()? imagePickSource;
+
   const FormScreen({
     super.key,
     required this.meta,
@@ -178,6 +259,8 @@ class FormScreen extends StatefulWidget {
     this.controller,
     this.onControllerReady,
     this.customFieldFactory,
+    this.isOnline,
+    this.imagePickSource,
   });
 
   @override
@@ -199,6 +282,68 @@ class _FormScreenState extends State<FormScreen> with WidgetsBindingObserver {
   /// repo in [initState] / [didUpdateWidget] and refreshed on lifecycle
   /// resume + after a Retry tap so the banner reflects the latest state.
   List<OutboxRow> _syncErrorRows = const [];
+
+  /// `pending_attachments.id` → durable local path for this document, so
+  /// Attach/Image fields can preview a `pending:<id>` value (offline pick not
+  /// yet uploaded) from its local copy. Reloaded wherever the document
+  /// (re)loads — initState / didUpdateWidget / resume / after save — so it
+  /// never goes stale against the field markers.
+  Map<int, String> _pendingAttachmentPaths = const {};
+
+  /// Resolves an attach-field value to a local file for preview. Built once per
+  /// screen so the memoised futures inside the field widgets stay stable across
+  /// rebuilds. Null when there is no API client to fetch through — the fields
+  /// then fall back to their previous network-only behaviour.
+  MediaResolver? _mediaResolver;
+
+  /// Fetches the bytes behind a stored attach value, with auth. Returns null on
+  /// any failure: a media fetch must never break form rendering.
+  ///
+  /// STREAMED rather than buffered, and bounded twice, because this is the only
+  /// place that sees the response before it occupies memory:
+  ///
+  /// 1. `Content-Length`, when the server sends one, refuses an oversized body
+  ///    without reading a single chunk.
+  /// 2. The accumulate loop re-checks as it goes, because a chunked response has
+  ///    no declared length and a server may under-report.
+  ///
+  /// [MediaResolver.maxFetchBytes] repeats the ceiling, but by the time it runs
+  /// the allocation has already happened — its job is to keep an oversized body
+  /// out of the cache, not out of RAM. The device floor here is API 26, where a
+  /// single unbounded attachment can take the process down.
+  Future<List<int>?> _fetchMediaBytes(String value) async {
+    final api = widget.api;
+    if (api == null) return null;
+    final url = frappeFileFetchUrl(value, api.baseUrl);
+    if (url == null || !url.startsWith('http')) return null;
+    const cap = kDefaultMaxMediaFetchBytes;
+    http.Client? client;
+    try {
+      client = http.Client();
+      final request = http.Request('GET', Uri.parse(url))
+        ..headers.addAll(api.requestHeaders);
+      final res = await client.send(request).timeout(_mediaFetchConnectTimeout);
+      if (res.statusCode < 200 || res.statusCode >= 300) return null;
+
+      return readCappedMediaBody(res, cap: cap, label: value);
+    } catch (e, st) {
+      sdkLog('FormScreen._fetchMediaBytes($value) failed — $e\n$st');
+      return null;
+    } finally {
+      client?.close();
+    }
+  }
+
+  void _buildMediaResolver() {
+    if (widget.api == null) {
+      _mediaResolver = null;
+      return;
+    }
+    _mediaResolver = widget.repository.mediaResolver(
+      fetch: _fetchMediaBytes,
+      isOnline: () => widget.isOnline?.call() ?? true,
+    );
+  }
 
   /// Baseline form data for dirty check. When current form data differs, show Save.
   Map<String, dynamic>? _baselineFormData;
@@ -281,9 +426,11 @@ class _FormScreenState extends State<FormScreen> with WidgetsBindingObserver {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     _workflowService = widget.api != null ? WorkflowService(widget.api!) : null;
+    _buildMediaResolver();
     _baselineFormData = Map<String, dynamic>.from(_currentDocData);
     _loadWorkflowTransitions();
     _loadSyncErrors();
+    _loadPendingAttachmentPaths();
     widget.onFormDirtyChanged?.call(false);
 
     if (widget.mode == FormBuilderMode.reactive) {
@@ -344,6 +491,7 @@ class _FormScreenState extends State<FormScreen> with WidgetsBindingObserver {
     final route = _route;
     if (route != null && !route.isCurrent) return;
     _loadSyncErrors();
+    _loadPendingAttachmentPaths();
   }
 
   @override
@@ -355,6 +503,7 @@ class _FormScreenState extends State<FormScreen> with WidgetsBindingObserver {
         oldWidget.initialData != widget.initialData) {
       _workflowTransitions = null;
       _workflowUpdatedDocData = null;
+      _buildMediaResolver();
       _workflowService = widget.api != null
           ? WorkflowService(widget.api!)
           : null;
@@ -363,6 +512,7 @@ class _FormScreenState extends State<FormScreen> with WidgetsBindingObserver {
       widget.onFormDirtyChanged?.call(false);
       _loadWorkflowTransitions();
       _loadSyncErrors();
+      _loadPendingAttachmentPaths();
     }
   }
 
@@ -385,6 +535,42 @@ class _FormScreenState extends State<FormScreen> with WidgetsBindingObserver {
       // Banner is best-effort; a query failure should never block the
       // form from rendering.
       sdkLog('FormScreen: _loadSyncErrors failed — $e\n$st');
+    }
+  }
+
+  Future<void> _loadPendingAttachmentPaths() async {
+    final localId = widget.document?.localId;
+    if (localId == null || localId.isEmpty) {
+      if (_pendingAttachmentPaths.isNotEmpty && mounted) {
+        setState(() => _pendingAttachmentPaths = const {});
+      }
+      return;
+    }
+    // Skip the DB round-trip for forms that can hold no attachment — either
+    // directly (Attach/Attach Image/Image) or inside a child table. Avoids a
+    // needless query (and any pending markers) on plain forms.
+    final canHoldAttachment = widget.meta.fields.any((f) {
+      final t = f.fieldtype;
+      return t == 'Attach' ||
+          t == 'Attach Image' ||
+          t == 'Image' ||
+          t == 'Table' ||
+          t == 'Table MultiSelect';
+    });
+    if (!canHoldAttachment) {
+      if (_pendingAttachmentPaths.isNotEmpty && mounted) {
+        setState(() => _pendingAttachmentPaths = const {});
+      }
+      return;
+    }
+    try {
+      final map = await widget.repository.pendingAttachmentLocalPaths(localId);
+      if (!mounted) return;
+      setState(() => _pendingAttachmentPaths = map);
+    } catch (e, st) {
+      // Preview resolution is best-effort; a lookup failure just falls back to
+      // the broken-image placeholder — never blocks the form.
+      sdkLog('FormScreen: _loadPendingAttachmentPaths failed — $e\n$st');
     }
   }
 
@@ -879,6 +1065,9 @@ class _FormScreenState extends State<FormScreen> with WidgetsBindingObserver {
           _baselineFormData = savedData;
         });
         _isFormDirty.value = false;
+        // A save may have queued freshly-picked attachments; refresh the
+        // id→local-path map so any `pending:<id>` markers resolve in-place.
+        _loadPendingAttachmentPaths();
         showStatusSnackBar(
           context,
           sdkTr('Document saved successfully'),
@@ -1100,6 +1289,18 @@ class _FormScreenState extends State<FormScreen> with WidgetsBindingObserver {
                       : null,
                   fileUrlBase: widget.api?.baseUrl,
                   imageHeaders: widget.api?.requestHeaders,
+                  isOnline: widget.isOnline,
+                  pendingAttachmentPaths: _pendingAttachmentPaths,
+                  mediaResolver: _mediaResolver?.resolve,
+                  // Queue-aware: refuses to delete a staged file a
+                  // `pending_attachments` row still owns. See
+                  // `OfflineRepository.reclaimDiscardedAttachment`.
+                  reclaimAttachment:
+                      widget.repository.reclaimDiscardedAttachment,
+                  // Read live through the repository so a mid-session toggle
+                  // flip takes effect on the next pick.
+                  isOfflineMode: () => widget.repository.offlineMode.enabled,
+                  imagePickSource: widget.imagePickSource,
                   fetchLinkedDocument: _fetchLinkedDocument,
                   getMeta: widget.metaService != null
                       ? (doctype) => widget.metaService!.getMeta(doctype)

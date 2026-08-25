@@ -1,5 +1,6 @@
 import 'dart:convert';
 import 'dart:developer' as developer;
+import 'package:path/path.dart' as p;
 import 'package:sqflite/sqflite.dart';
 import 'package:uuid/uuid.dart';
 import '../api/client.dart';
@@ -16,11 +17,15 @@ import '../models/meta_diff.dart';
 import '../models/offline_mode.dart';
 import '../models/offline_mode_notifier.dart';
 import '../database/daos/outbox_dao.dart';
+import '../database/daos/media_cache_dao.dart';
+import '../database/daos/pending_attachment_dao.dart';
 import '../models/outbox_row.dart';
 import '../sync/payload_serializer.dart';
 import '../sync/pull_apply.dart';
 import 'local_writer.dart';
+import 'media_resolver.dart';
 import 'meta_migration.dart';
+import '../utils/media_store.dart';
 import '../utils/sdk_log.dart';
 
 /// Repository for offline document operations
@@ -703,7 +708,16 @@ class OfflineRepository {
       }
     }
 
-    await tryDelete('pending_attachments', 'top_parent_uuid = ?');
+    // Routed through the DAO so the staged `outbox/` files are reclaimed too,
+    // not just the rows. `media_cache` is deliberately untouched.
+    try {
+      await PendingAttachmentDao(db).deleteForTopParent(mobileUuid);
+    } on DatabaseException catch (e, st) {
+      sdkLog(
+        'OfflineRepository.hardDeleteLocalMirror: attachment cleanup failed '
+        'for $doctype/$mobileUuid (best-effort) — $e\n$st',
+      );
+    }
     await tryDelete(normalizeDoctypeTableName(doctype), 'mobile_uuid = ?');
 
     final parentMeta = await _loadMeta(doctype);
@@ -758,11 +772,7 @@ class OfflineRepository {
         // fails the txn must roll back, otherwise we'd commit a
         // hard-deleted docs__ row alongside orphan pending_attachments
         // whose `top_parent_uuid` no longer resolves.
-        await txn.delete(
-          'pending_attachments',
-          where: 'top_parent_uuid = ?',
-          whereArgs: [mobileUuid],
-        );
+        await PendingAttachmentDao(txn).deleteForTopParent(mobileUuid);
         try {
           await txn.delete(
             tableName,
@@ -816,11 +826,7 @@ class OfflineRepository {
       // the server-side doc is gone, so uploading attachments against
       // it would either fail (parent missing) or land orphan File rows
       // that the server then cascade-deletes. Cleaner to drop them now.
-      await txn.delete(
-        'pending_attachments',
-        where: 'top_parent_uuid = ?',
-        whereArgs: [mobileUuid],
-      );
+      await PendingAttachmentDao(txn).deleteForTopParent(mobileUuid);
       try {
         await txn.update(
           tableName,
@@ -1172,6 +1178,97 @@ class OfflineRepository {
   ///
   /// The DB fetch (this method) and the merge ([mergeChildRowsIntoData]) are
   /// split so the merge can be unit-tested with plain maps, no database.
+  /// Returns `pending_attachments.id` → durable `local_path` for every queued
+  /// attachment under [topParentUuid] (parent + child rows). The UI uses this
+  /// to preview an offline-picked file whose field still holds a `pending:<id>`
+  /// marker, rendering it from the local copy until the push pipeline uploads
+  /// it and rewrites the field to a server `file_url`. Empty when the table is
+  /// absent or nothing is queued.
+  /// Builds a [MediaResolver] over this repository's database.
+  ///
+  /// Lives here because the `media_cache` table is this layer's concern and the
+  /// database handle stays private. The caller supplies [fetch] (which needs the
+  /// API client's base URL and auth headers) and [isOnline].
+  MediaResolver mediaResolver({
+    required MediaFetchFn fetch,
+    required bool Function() isOnline,
+  }) => MediaResolver(
+    cache: MediaCacheDao(_database.rawDatabase),
+    fetch: fetch,
+    isOnline: isOnline,
+  );
+
+  /// Reclaims the staged bytes behind an attach value the user discarded or
+  /// replaced — unless a queued `pending_attachments` row still owns them.
+  ///
+  /// [MediaStore.discardValue] alone is not safe from a form. Its "a raw staged
+  /// path has by construction never been saved" reasoning holds for the DB
+  /// COLUMN, which [LocalWriter] rewrites to `pending:<id>` inside the save
+  /// transaction — but not for the value the open form is holding. The field
+  /// keeps whatever the user picked (`hasInteractedByUser` pins it against a
+  /// later widget value), so after a save the form still offers the raw staged
+  /// path while the column and the queue row have moved on. Discarding then
+  /// deleted the only copy of bytes a committed row pointed at, and the push
+  /// blocked the document on a file that no longer exists — with no auto-retry.
+  ///
+  /// The row is dropped by [LocalWriter] on the next save (the field arrives
+  /// empty), and that is what frees the file. Refusing here costs a staged file
+  /// living until then or until the orphan sweep, which is the recoverable side
+  /// of the trade.
+  ///
+  /// Best-effort like the [MediaStore] calls it fronts: a lookup failure keeps
+  /// the file rather than risking the delete.
+  Future<void> reclaimDiscardedAttachment(String? value) async {
+    final v = value?.trim();
+    if (v == null || v.isEmpty) return;
+    try {
+      final db = _database.rawDatabase;
+      if (await sqliteTableExists(db, 'pending_attachments')) {
+        final referenced = await PendingAttachmentDao(
+          db,
+        ).referencedLocalPaths();
+        // Canonicalised on both sides: the queue stores the path the field held
+        // at save time, and a `..` or double-slash difference must not read as
+        // "not referenced" — that verdict deletes the file.
+        final target = p.canonicalize(v);
+        if (referenced.any((r) => p.canonicalize(r) == target)) {
+          sdkLog(
+            'OfflineRepository: $v is still referenced by a queued '
+            'attachment — not reclaimed',
+          );
+          return;
+        }
+      }
+    } catch (e, st) {
+      sdkLog(
+        'OfflineRepository.reclaimDiscardedAttachment($v) check '
+        'failed — $e\n$st',
+      );
+      return;
+    }
+    await MediaStore.discardValue(v);
+  }
+
+  Future<Map<int, String>> pendingAttachmentLocalPaths(
+    String topParentUuid,
+  ) async {
+    final db = _database.rawDatabase;
+    if (!await sqliteTableExists(db, 'pending_attachments')) return {};
+    final rows = await db.query(
+      'pending_attachments',
+      columns: ['id', 'local_path'],
+      where: 'top_parent_uuid = ?',
+      whereArgs: [topParentUuid],
+    );
+    final out = <int, String>{};
+    for (final r in rows) {
+      final id = r['id'] as int?;
+      final path = r['local_path'] as String?;
+      if (id != null && path != null && path.isNotEmpty) out[id] = path;
+    }
+    return out;
+  }
+
   Future<Document> attachChildRows(
     String doctype,
     Document doc,
