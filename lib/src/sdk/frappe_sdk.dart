@@ -961,7 +961,10 @@ class FrappeSDK {
   ///
   /// Read-only. `orphanBytes` is a subset of `outboxBytes` and is excluded from
   /// `totalBytes`, so a UI can show "1.4 GB — 240 MB reclaimable" without
-  /// double-counting. Returns zeros when the SDK is not initialized.
+  /// double-counting. `viewerTempBytes` IS counted in `totalBytes` — it is real
+  /// occupied space, and was previously invisible to this report because the
+  /// viewer's scratch directory sits outside the media store's root. Returns
+  /// zeros when the SDK is not initialized.
   Future<MediaStoreUsage> mediaStoreUsage() async {
     final refs = await _referencedStagedPaths();
     if (refs == null) {
@@ -1007,12 +1010,17 @@ class FrappeSDK {
     }
   }
 
-  /// Clears the on-device media CACHE: the `cache/` directory and its index.
+  /// Clears the on-device media CACHE: the `cache/` directory, its index, and
+  /// the viewer's scratch directory (attachments downloaded so an external app
+  /// could open them).
   ///
   /// SAFE. It never touches `outbox/` or `pending_attachments`, so an
-  /// attachment that has not uploaded yet cannot be lost — cached bytes are a
-  /// performance copy of server media and are always re-fetchable. This is the
-  /// method to wire to a host-facing "Clear cached media" control.
+  /// attachment that has not uploaded yet cannot be lost — everything cleared
+  /// here is a performance copy of server media and is always re-fetchable.
+  /// This is the method to wire to a host-facing "Clear cached media" control,
+  /// and it reclaims every byte `MediaStoreUsage.totalBytes` attributes to
+  /// cache — including `viewerTempBytes`, which no clearing path reached until
+  /// this release.
   ///
   /// Only `logout(clearDatabase: true)` clears `outbox/`, where losing staged
   /// files is the intended security behaviour.

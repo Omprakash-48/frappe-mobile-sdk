@@ -5,7 +5,6 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter_form_builder/flutter_form_builder.dart';
 import 'package:image_picker/image_picker.dart';
-import 'package:path_provider/path_provider.dart';
 import '../../../models/doc_field.dart';
 import '../../../models/image_pick_source.dart';
 import '../../../services/media_resolver.dart';
@@ -92,7 +91,6 @@ void showFullScreenImage(
 /// camera capture is launched. It survives the host activity (and process) being
 /// killed mid-capture, which is the only way a later run can tell WHICH field
 /// the platform's stashed photo belongs to.
-const String _captureMarkerFileName = 'frappe_sdk_camera_capture.marker';
 
 /// A marker older than this is treated as abandoned. Without an age bound, a
 /// field whose capture was interrupted days ago would resurface that ancient
@@ -281,7 +279,22 @@ class ImageField extends BaseField {
     if (stored != null && stored.isNotEmpty) {
       // Reclaim the file this pick replaces (guarded by isStagedPath, and by
       // the queue when the host wired a database-backed reclaim).
-      await reclaimAttachment(fieldState.value);
+      //
+      // This mirrors `buildField`'s `currentValue` rather than reading
+      // `fieldState.value` raw. Before the first interaction the form-field
+      // value is still null while the WIDGET value holds what a document load
+      // supplied, so the raw read reclaimed nothing and the staged file this
+      // pick replaced leaked until the orphan sweep found it. The discard path
+      // already uses the precedence-aware value; the two disagreeing is the bug.
+      // `buildField`'s local is not in scope here, so the expression is
+      // repeated — including the trim, because `isStagedPath` canonicalises
+      // whatever it is handed and an untrimmed path is a different string.
+      final replaced = liveAttachmentValue(
+        hasInteractedByUser: fieldState.hasInteractedByUser,
+        fieldValue: fieldState.value,
+        widgetValue: value,
+      );
+      await reclaimAttachment(replaced);
       fieldState.didChange(stored);
       onChanged?.call(stored);
       return true;
@@ -300,8 +313,9 @@ class ImageField extends BaseField {
   /// (path_provider missing, e.g. in a widget test).
   Future<File?> _captureMarkerFile() async {
     try {
-      final dir = await getTemporaryDirectory();
-      return File('${dir.path}/$_captureMarkerFileName');
+      // Through MediaStore so the writer and the logout wipe cannot disagree
+      // about where this file is. Same resulting path as before.
+      return File(await MediaStore.captureMarkerPath());
     } catch (e) {
       sdkLog('ImageField: cache dir unavailable for capture marker — $e');
       return null;
@@ -420,10 +434,11 @@ class ImageField extends BaseField {
         // widget value was ignored. Falling back unconditionally to the widget
         // value — the previous behaviour — made an explicit clear impossible
         // to represent instead. Neither alone is correct.
-        final raw = fieldState.hasInteractedByUser
-            ? fieldState.value
-            : (imagePath ?? fieldState.value);
-        final currentValue = raw?.toString().trim();
+        final currentValue = liveAttachmentValue(
+          hasInteractedByUser: fieldState.hasInteractedByUser,
+          fieldValue: fieldState.value,
+          widgetValue: imagePath,
+        );
         // Resolve a `pending:<id>` marker to its durable local file for the
         // preview ONLY; the stored value stays `currentValue`. Server URLs and
         // plain local paths pass through unchanged. Null => not yet resolvable

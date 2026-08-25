@@ -25,7 +25,7 @@ A reasonable first assumption is that this is a sync/push feature. It is not. Th
 | **Pick** | size guard before staging, terminal/transient split, staging layout, inline upload only when offline mode is OFF | No |
 | **Save** | enqueue + marker write, size / MIME / original-name capture, re-pick file reclaim | No |
 | **Push** | upload, the commitment boundary, writeback, the gate, payload inlining, `rejected` | **Yes — this is it** |
-| **Read / preview** | `MediaResolver`, `media_cache`, lazy download, rendering from disk | No |
+| **Read / preview** | `MediaResolver`, `media_cache`, download on first *view*, rendering from disk | No |
 | **Delete / discard** | staged-file reclaim on all three document-removal paths | No |
 | **Logout / wipe** | `MediaStore.clearAll` | No |
 | **Schema** | v6 → v7 `media_cache` | Cross-cutting |
@@ -655,6 +655,19 @@ The size guard runs **before** the durable copy is made, so an oversized pick ne
 
 - **Reclaim refusal has no second chance of its own.** When a discard declines to delete a file a queue row owns, nothing re-attempts the delete after that row is dropped — the next save frees it, and failing that the orphan sweep does, but both are host-triggered (see the first bullet). The trade is deliberate: an orphan is recoverable and a missing file behind a queued upload is not.
 - **No background prefetch.** Media for a pulled document is cached on first view, not ahead of time.
+
+  "View" means what it says, and for `Attach` fields it did not always. That field renders only a
+  button — the file opens on tap — but resolution used to start when the field MOUNTED, and
+  `MediaResolver.resolve` downloads on a cache miss. Opening a form therefore fetched every
+  attachment on it (up to `kDefaultMaxMediaFetchBytes`, 25 MB, each) before the user asked for any.
+  `AttachField` now resolves inside the view button's tap handler.
+
+  `ImageField` still resolves on mount, and that is not the same bug: its preview renders FROM the
+  local file, so the path is needed to paint at all — and the network image it would otherwise show
+  costs the same bytes.
+
+  The cost of the fix is that opening a form no longer warms the cache, so a first tap while offline
+  is a miss. That is the behaviour this bullet already promised.
 - **An inline (offline-mode-OFF) pick does not populate the cache.** `resolvePickedAttachment` deletes the staged copy after a successful inline upload rather than moving it into `cache/`, so previewing that file later costs a download. Only the **push** path promotes bytes into the cache via `moveToCache`. Note this no longer affects offline mode, where every pick goes through the push path and therefore does get cached. Closing it for the inline path is a small change: the bytes, the url and the store are all already in hand there.
 - **The size limit is not host-configurable.** `kDefaultMaxAttachmentBytes` (10 MB) is the default for `resolvePickedAttachment`'s `maxBytes`, but the only callers are this SDK's own `AttachField` / `ImageField` and neither exposes an override. A deployment whose System Settings `max_file_size` differs will either refuse files the server would have accepted, or accept files it will reject at upload (which the pipeline then handles correctly as a terminal rejection — the document blocks with a named reason rather than corrupting). Making it configurable means threading a parameter through `FormScreen` -> `FormBuilder` -> `FieldFactory`, the same path `mediaResolver` takes.
 - **Child-row relinking depends on `mobile_control`.** See §3.

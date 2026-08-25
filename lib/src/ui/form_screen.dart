@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 
@@ -36,6 +37,70 @@ import '../utils/attachment_paths.dart';
 import '../utils/sdk_log.dart';
 
 /// Visual customization for [FormScreen] action area.
+/// Bound on the connect/headers phase of a media fetch.
+const Duration _mediaFetchConnectTimeout = Duration(seconds: 30);
+
+/// Bound on the gap between two body chunks of a media fetch.
+///
+/// Deliberately per-chunk rather than a total deadline: a 25 MB attachment over
+/// a slow rural link is legitimate and must be allowed to finish, while a
+/// connection that goes silent mid-body must not hang the resolve forever.
+const Duration _mediaFetchStallTimeout = Duration(seconds: 30);
+
+/// Accumulates [res]'s body, refusing anything over [cap] and giving up if the
+/// stream goes quiet for [stallTimeout]. Returns null on refusal or stall.
+///
+/// Extracted from `FormScreen._fetchMediaBytes` so the guard rails are testable
+/// without standing up a whole screen: the method builds its own `http.Client`,
+/// which leaves no seam for a hung-server test. [label] appears only in logs.
+///
+/// Two ceilings, because they catch different things: `Content-Length` refuses
+/// an oversized body before a single chunk is read, and the accumulate loop
+/// re-checks as it goes, because a chunked response declares no length and a
+/// server may under-report.
+///
+/// The stall bound is per-CHUNK, not a total deadline. A legitimately slow
+/// 25 MB download on a rural link must be allowed to finish; a connection that
+/// dies mid-body must not hang forever. The caller's `send` timeout covers only
+/// the connect/headers phase — once the response object exists it is satisfied,
+/// so before this bound a stalled stream left the resolve future permanently
+/// unresolved and the widget stuck on a spinner. `AttachField`'s own downloader
+/// already guarded this the same way (`_AttachViewButtonState.stallTimeout`).
+@visibleForTesting
+Future<List<int>?> readCappedMediaBody(
+  http.StreamedResponse res, {
+  required int cap,
+  String label = '',
+  Duration stallTimeout = _mediaFetchStallTimeout,
+}) async {
+  final declared = res.contentLength;
+  if (declared != null && declared > cap) {
+    sdkLog(
+      'readCappedMediaBody($label): Content-Length $declared exceeds the '
+      '$cap byte cap — not fetched',
+    );
+    return null;
+  }
+
+  final bytes = <int>[];
+  try {
+    await for (final chunk in res.stream.timeout(stallTimeout)) {
+      bytes.addAll(chunk);
+      if (bytes.length > cap) {
+        sdkLog(
+          'readCappedMediaBody($label): body exceeded the $cap byte cap '
+          'mid-stream — aborted',
+        );
+        return null;
+      }
+    }
+  } on TimeoutException catch (e) {
+    sdkLog('readCappedMediaBody($label): stalled mid-body — $e');
+    return null;
+  }
+  return bytes;
+}
+
 class FormScreenStyle {
   final Color? appBarBackgroundColor;
   final ButtonStyle? saveButtonStyle;
@@ -257,32 +322,10 @@ class _FormScreenState extends State<FormScreen> with WidgetsBindingObserver {
       client = http.Client();
       final request = http.Request('GET', Uri.parse(url))
         ..headers.addAll(api.requestHeaders);
-      final res = await client
-          .send(request)
-          .timeout(const Duration(seconds: 30));
+      final res = await client.send(request).timeout(_mediaFetchConnectTimeout);
       if (res.statusCode < 200 || res.statusCode >= 300) return null;
 
-      final declared = res.contentLength;
-      if (declared != null && declared > cap) {
-        sdkLog(
-          'FormScreen._fetchMediaBytes($value): Content-Length $declared '
-          'exceeds the $cap byte cap — not fetched',
-        );
-        return null;
-      }
-
-      final bytes = <int>[];
-      await for (final chunk in res.stream) {
-        bytes.addAll(chunk);
-        if (bytes.length > cap) {
-          sdkLog(
-            'FormScreen._fetchMediaBytes($value): body exceeded the $cap byte '
-            'cap mid-stream — aborted',
-          );
-          return null;
-        }
-      }
-      return bytes;
+      return readCappedMediaBody(res, cap: cap, label: value);
     } catch (e, st) {
       sdkLog('FormScreen._fetchMediaBytes($value) failed — $e\n$st');
       return null;

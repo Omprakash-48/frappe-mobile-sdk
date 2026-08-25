@@ -8,6 +8,7 @@ import 'package:path_provider/path_provider.dart';
 import 'package:uuid/uuid.dart';
 
 import '../models/media_store_usage.dart';
+import 'attachment_paths.dart';
 import 'sdk_log.dart';
 
 /// Root sub-directory under the app documents directory.
@@ -21,6 +22,11 @@ const String kOutboxSubDir = 'outbox';
 /// Content store keyed by the server `file_url`. Evictable (Phase 2) and wiped
 /// on logout. Always re-fetchable, so losing it is never a correctness problem.
 const String kCacheSubDir = 'cache';
+
+/// A conservative filename extension: a dot plus 1–10 alphanumerics, nothing
+/// else. Anything with a query string, a path separator or punctuation fails,
+/// which is the point — see [MediaStore._safeExtensionOf].
+final RegExp _safeExtensionPattern = RegExp(r'^\.[A-Za-z0-9]{1,10}$');
 
 const Uuid _uuid = Uuid();
 
@@ -70,6 +76,88 @@ class MediaStore {
     _stagedThisSession.clear();
   }
 
+  static String? _testTempRoot;
+
+  /// Test seam for the OS temp root. Same reason as [overrideRootForTest]:
+  /// `getTemporaryDirectory()` needs a platform channel `flutter test` lacks.
+  @visibleForTesting
+  static void overrideTempRootForTest(String? absoluteRoot) {
+    _testTempRoot = absoluteRoot;
+  }
+
+  /// The viewer's scratch directory — attachments downloaded only so the
+  /// device's default app can open them.
+  ///
+  /// NOT under [_root]: it is a performance/convenience copy under the OS temp
+  /// root, which is why every sweep that walks [_root] misses it. See
+  /// [attachmentTempDirName].
+  static Future<String> viewerTempDir() async =>
+      p.join(await _osTempRoot(), attachmentTempDirName);
+
+  /// The OS temp root, honouring [overrideTempRootForTest].
+  ///
+  /// The single resolver for it. Two independent `getTemporaryDirectory()` calls
+  /// building the same path is how the writer and the wipe drift apart — the
+  /// exact shape of the `moveToCache` / `resolve` bug this release also fixes.
+  static Future<String> _osTempRoot() async =>
+      _testTempRoot ?? (await getTemporaryDirectory()).path;
+
+  /// Absolute path of the camera-capture marker.
+  ///
+  /// Deliberately in the temp ROOT rather than inside [viewerTempDir]: that is
+  /// where it has always been written, and moving it would orphan a marker left
+  /// by a version being upgraded from. See [cameraCaptureMarkerFileName].
+  static Future<String> captureMarkerPath() async =>
+      p.join(await _osTempRoot(), cameraCaptureMarkerFileName);
+
+  /// Total bytes held by the viewer scratch cache.
+  static Future<int> viewerTempBytes() async {
+    var total = 0;
+    try {
+      // Resolving the path is itself fallible: `getTemporaryDirectory()` needs
+      // a platform channel, which a plain `flutter test` (no binding) and a
+      // stripped-down embedder both lack. Usage reporting must degrade to "0",
+      // never take the caller down.
+      final dir = Directory(await viewerTempDir());
+      if (!await dir.exists()) return 0;
+      await for (final e in dir.list(recursive: true, followLinks: false)) {
+        if (e is! File) continue;
+        try {
+          total += await e.length();
+        } catch (err, st) {
+          sdkLog('MediaStore.viewerTempBytes: stat(${e.path}) — $err\n$st');
+        }
+      }
+    } catch (e, st) {
+      sdkLog('MediaStore.viewerTempBytes failed — $e\n$st');
+    }
+    return total;
+  }
+
+  /// Deletes the viewer scratch cache outright.
+  ///
+  /// Unconditional and NOT reference-counted, which is precisely why it is not
+  /// part of [sweepOrphans]: that sweep decides what to delete from
+  /// `pending_attachments` references, and nothing ever references a file here,
+  /// so every one of them would read as orphaned. Including them would make a
+  /// reference-based sweep into a blanket delete wearing a sweep's name.
+  ///
+  /// Called from [clearAll] (and therefore logout) and from [clearCache].
+  /// Deleting a file an external viewer still has open is safe on POSIX — the
+  /// reader's descriptor stays valid after the unlink — so an explicit,
+  /// user-initiated clear does not need to wait for viewers to close.
+  static Future<void> clearViewerTempCache() async {
+    try {
+      // Inside the try on purpose: `getTemporaryDirectory()` needs a platform
+      // channel. A logout must not fail because the scratch directory could not
+      // be located — the store wipe that precedes it is the load-bearing half.
+      final dir = Directory(await viewerTempDir());
+      if (await dir.exists()) await dir.delete(recursive: true);
+    } catch (e, st) {
+      sdkLog('MediaStore.clearViewerTempCache failed — $e\n$st');
+    }
+  }
+
   static Future<String> _root() async {
     final base = _testRoot ?? (await getApplicationDocumentsDirectory()).path;
     return p.join(base, kAttachmentStoreDir);
@@ -115,9 +203,33 @@ class MediaStore {
   }) async {
     final dirPath = p.join(await _root(), kCacheSubDir);
     final digest = sha256.convert(utf8.encode(fileUrl)).toString();
-    var ext = p.extension(fileUrl);
-    if (ext.isEmpty && sourcePath != null) ext = p.extension(sourcePath);
+    var ext = _safeExtensionOf(fileUrl);
+    if (ext.isEmpty && sourcePath != null) ext = _safeExtensionOf(sourcePath);
     return p.join(dirPath, '$digest$ext');
+  }
+
+  /// A `.ext` from [pathOrUrl] that is safe to put in a filename, or `''`.
+  ///
+  /// `p.extension` alone is NOT safe here, because a url is not a path: it takes
+  /// everything after the last dot of the last segment, query string included.
+  /// For the `download_file` / cloud-proxy shape this class already documents —
+  /// `…/multi_cloud_storage.download?file=survey.pdf&key=<signature>` — that is
+  /// `.pdf&key=<signature>`, so a 300-character signed key produced a 373-char
+  /// filename against a 255-byte `NAME_MAX`. The write threw `ENAMETOOLONG`,
+  /// [MediaResolver.resolve]'s catch-all swallowed it, no `media_cache` row was
+  /// written, and the attachment re-downloaded on every single view — forever,
+  /// while the bytes it did fetch were never cached.
+  ///
+  /// Rejecting rather than truncating is deliberate: a truncated extension is
+  /// still wrong (`.pdf&key=AAA…`), and the extension is cosmetic here — the
+  /// digest alone is unique and the `media_cache` row carries the real name. An
+  /// empty result yields a bare `<digest>`, which is correct and collision-free.
+  ///
+  /// Mirrors `_safeExtension` in `attach_field.dart`, which guards the same
+  /// hazard on the display-filename path.
+  static String _safeExtensionOf(String pathOrUrl) {
+    final ext = p.extension(pathOrUrl);
+    return _safeExtensionPattern.hasMatch(ext) ? ext.toLowerCase() : '';
   }
 
   /// True only when [path] is a file inside `outbox/`.
@@ -321,6 +433,7 @@ class MediaStore {
       cacheBytes: cacheBytes,
       orphanBytes: orphanBytes,
       orphanCount: orphanCount,
+      viewerTempBytes: await viewerTempBytes(),
     );
   }
 
@@ -363,6 +476,13 @@ class MediaStore {
     } catch (e, st) {
       sdkLog('MediaStore.clearCache failed — $e\n$st');
     }
+    // The viewer scratch cache is reclaimed here too, because
+    // [MediaStoreUsage.totalBytes] COUNTS it: a host that shows that number and
+    // wires a "Clear cached media" control to this method would otherwise leave
+    // the user tapping a button that does not move the figure they were shown.
+    // Both directories hold the same kind of thing — a re-fetchable copy of
+    // server media — so both belong to the same clear.
+    await clearViewerTempCache();
   }
 
   /// Removes BOTH directories. Used by logout and wipe: cached media must not
@@ -377,6 +497,22 @@ class MediaStore {
       if (await dir.exists()) await dir.delete(recursive: true);
     } catch (e, st) {
       sdkLog('MediaStore.clearAll failed — $e\n$st');
+    }
+    // The viewer scratch cache lives under the OS temp root, NOT under
+    // [_root], so deleting the line above never touched it. That left decrypted
+    // copies of private attachments on disk after `logout(clearDatabase: true)`
+    // — which is the one call whose entire purpose is that they are gone.
+    await clearViewerTempCache();
+    // Same root, same reason. The marker names the field that launched the
+    // camera; left behind, an interrupted capture could be handed to a field in
+    // the NEXT session, on a shared device a different user's. Its own staleness
+    // window bounds that but does not close it — a logout inside the window
+    // leaves it live.
+    try {
+      final marker = File(await captureMarkerPath());
+      if (await marker.exists()) await marker.delete();
+    } catch (e, st) {
+      sdkLog('MediaStore.clearAll: capture marker — $e\n$st');
     }
   }
 }

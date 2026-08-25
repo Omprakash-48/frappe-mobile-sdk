@@ -106,10 +106,15 @@ void main() {
     expect(key.currentState?.fields['doc']?.value, '/files/absent.pdf');
   });
 
-  testWidgets('the resolver is invoked exactly once per value', (tester) async {
-    // Regression guard: starting the resolve inside build() creates a new
-    // future on every rebuild, and each completion triggers another rebuild —
-    // an infinite loop that re-reads the cache and can re-download forever.
+  testWidgets('rendering the field does NOT resolve — no fetch before a tap', (
+    tester,
+  ) async {
+    // Round-4 review H1. This used to assert the opposite: resolution ran from
+    // `MediaResolveBuilder.initState`, and `MediaResolver.resolve` DOWNLOADS on
+    // a cache miss. So opening a form pulled every attachment on it, up to
+    // 25 MB each, before the user asked for any of them — on a device floor of
+    // API 26 and often a metered rural connection. This widget renders only a
+    // button, so there is no render-time need for the bytes at all.
     await pump(
       tester,
       value: '/files/report.pdf',
@@ -117,7 +122,36 @@ void main() {
     );
     await tester.pump();
     await tester.pump();
-    expect(resolveCalls, ['/files/report.pdf']);
+
+    expect(
+      resolveCalls,
+      isEmpty,
+      reason: 'a form with five attachments must not download five files',
+    );
+  });
+
+  testWidgets('the resolver is invoked once per tap, not once per rebuild', (
+    tester,
+  ) async {
+    // The original loop guard, still load-bearing: resolving inside `build`
+    // creates a new future on every rebuild and each completion triggers
+    // another rebuild — an infinite loop that can re-download forever. A tap
+    // handler sidesteps it, so one tap must mean exactly one resolve.
+    // An IMAGE value on purpose: a resolved non-image ends in
+    // `OpenFilex.open`, which spawns a real platform process and leaves a
+    // pending timer the fake-async test binding rejects. An image resolves
+    // down the same path and then just pushes the full-screen viewer.
+    await pump(
+      tester,
+      value: '/files/photo.jpg',
+      mediaResolver: resolverReturning('/cache/abc.jpg'),
+    );
+
+    await tester.tap(find.byTooltip('View'));
+    await tester.pump();
+    await tester.pump();
+
+    expect(resolveCalls, ['/files/photo.jpg']);
   });
 
   testWidgets('with no resolver the field still renders (host opt-in)', (

@@ -9,7 +9,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_form_builder/flutter_form_builder.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:http/http.dart' as http;
-import 'package:path_provider/path_provider.dart';
+import 'package:path/path.dart' as p;
 import 'package:open_filex/open_filex.dart';
 import '../../../services/media_resolver.dart';
 import '../../../sync/attachment_error_classifier.dart';
@@ -19,7 +19,6 @@ import '../../../utils/attachment_pick.dart';
 import '../../../utils/sdk_log.dart';
 import 'base_field.dart';
 import 'field_helpers.dart';
-import 'media_resolve_builder.dart';
 // Reuse the shared full-screen zoomable image viewer (showFullScreenImage /
 // showFullScreenImageProvider) so image attachments open exactly like
 // ImageField previews, with the same auth headers.
@@ -29,8 +28,9 @@ import 'image_field.dart';
 /// downloaded so an external app could open them. Keeping them in one folder
 /// instead of loose in the temp root makes the cache identifiable and lets the
 /// OS reclaim it as a unit.
-@visibleForTesting
-const String attachmentTempDirName = 'frappe_attachments';
+///
+/// Declared in `utils/attachment_paths.dart` so `MediaStore` can wipe and
+/// measure the directory without importing a widget file.
 
 /// File name used to cache the attachment at [url] inside
 /// [attachmentTempDirName].
@@ -247,11 +247,11 @@ class AttachField extends BaseField {
         // widget value was ignored. Falling back unconditionally to the widget
         // value — the previous behaviour — made an explicit clear impossible
         // to represent instead. Neither alone is correct.
-        final current =
-            (fieldState.hasInteractedByUser
-                    ? fieldState.value
-                    : (filePath ?? fieldState.value))
-                ?.trim();
+        final current = liveAttachmentValue(
+          hasInteractedByUser: fieldState.hasInteractedByUser,
+          fieldValue: fieldState.value,
+          widgetValue: filePath,
+        );
         final hasValue = current != null && current.isNotEmpty;
         // Resolve a `pending:<id>` marker to its durable local file (display
         // only; stored value stays the marker). Server URLs / local paths pass
@@ -322,7 +322,18 @@ class AttachField extends BaseField {
                                 // pending: marker is untouched — and by the
                                 // queue when the host wired a database-backed
                                 // reclaim.
-                                await reclaimAttachment(fieldState.value);
+                                //
+                                // `current`, NOT `fieldState.value`: before the
+                                // first interaction the form-field value is
+                                // still null while the widget value holds the
+                                // attachment a document load supplied, so the
+                                // raw value reclaimed nothing and the staged
+                                // file this pick replaced was leaked until the
+                                // orphan sweep found it. `current` is the same
+                                // hasInteractedByUser-aware value the discard
+                                // path already uses — the two paths disagreeing
+                                // about which value is live is the bug.
+                                await reclaimAttachment(current);
                                 fieldState.didChange(stored);
                                 onChanged?.call(stored);
                                 return;
@@ -388,36 +399,36 @@ class AttachField extends BaseField {
                     },
                   ),
                 if (hasViewable)
+                  // Resolution moved INTO the button, so it happens on tap
+                  // rather than while the form builds. A `MediaResolveBuilder`
+                  // here started the fetch from `initState`, which meant
+                  // opening a form downloaded every attachment on it before the
+                  // user asked for any — and this widget only renders a button,
+                  // so there was never a render-time need for the bytes.
+                  //
+                  // `url`/`isLocal` are the FALLBACK: what to use when the
+                  // resolve misses (offline, unknown marker, failed fetch), so
+                  // the button still opens over the network exactly as before.
+                  //
                   // The RESOLVED path only ever replaces the view TARGET.
                   // Labels stay derived from `displaySource` (the value or the
                   // staged path) — routing them through the cache path would
                   // show sha256(file_url) instead of "report.pdf".
-                  MediaResolveBuilder(
+                  _AttachViewButton(
+                    url: isServer
+                        ? (_fullFileUrl(displaySource) ?? displaySource)
+                        : displaySource,
+                    isLocal: isLocalFile,
+                    isImage: isImage,
+                    headers: imageHeaders,
+                    // `displaySource`, not `current`: a `pending:<id>` marker
+                    // resolves to its durable local file, so the label shows
+                    // the real filename not the marker text.
+                    fileName: _getFileName(displaySource),
+                    httpClient: httpClient,
+                    resolveValue: current,
                     resolver: mediaResolver,
-                    value: current,
                     pendingPaths: pendingAttachmentPaths,
-                    builder: (context, localPath) {
-                      // Null (resolving, offline miss, failed fetch) falls back
-                      // to the server URL, so the button downloads as it always
-                      // did rather than losing the ability to open the file.
-                      final hasLocal = localPath != null;
-                      return _AttachViewButton(
-                        url: hasLocal
-                            ? localPath
-                            : (isServer
-                                  ? (_fullFileUrl(displaySource) ??
-                                        displaySource)
-                                  : displaySource),
-                        isLocal: hasLocal ? true : isLocalFile,
-                        isImage: isImage,
-                        headers: imageHeaders,
-                        // `displaySource`, not `current`: a `pending:<id>`
-                        // marker resolves to its durable local file, so the
-                        // label shows the real filename not the marker text.
-                        fileName: _getFileName(displaySource),
-                        httpClient: httpClient,
-                      );
-                    },
                   ),
               ],
             ),
@@ -467,6 +478,24 @@ class _AttachViewButton extends StatefulWidget {
   /// Caller-owned client for the download; null means "create and close one".
   final http.Client? httpClient;
 
+  /// The stored field value to resolve through [resolver], or null to skip
+  /// resolution and use [url] directly.
+  final String? resolveValue;
+
+  /// Cache-first resolver, consulted ON TAP rather than on mount.
+  ///
+  /// [AttachField] renders only a BUTTON — it never shows attachment content
+  /// inline — so resolving while the form built meant every attachment on the
+  /// form downloaded (up to the 25 MB resolver cap each) before the user asked
+  /// for any of them. On a metered rural connection that is the difference
+  /// between opening a form and opening a form plus five PDFs. [ImageField] is
+  /// the opposite case and still resolves eagerly: its preview renders FROM the
+  /// local file, so it genuinely needs the path to paint.
+  final ResolveMediaFn? resolver;
+
+  /// Marker map handed to [resolver] so a `pending:<id>` value resolves.
+  final Map<int, String>? pendingPaths;
+
   const _AttachViewButton({
     required this.url,
     required this.isLocal,
@@ -474,6 +503,9 @@ class _AttachViewButton extends StatefulWidget {
     required this.headers,
     required this.fileName,
     required this.httpClient,
+    this.resolveValue,
+    this.resolver,
+    this.pendingPaths,
   });
 
   @override
@@ -522,19 +554,50 @@ class _AttachViewButtonState extends State<_AttachViewButton> {
   http.Client? _ownedClient;
 
   Future<void> _open() async {
+    // Cache-first resolution happens HERE, on tap — not in a builder that runs
+    // when the field mounts. See [_AttachViewButton.resolver]: this widget only
+    // ever renders a button, so an eager resolve downloaded attachments nobody
+    // had asked to see. A resolved hit is by definition a local file, so it
+    // takes the same branches below as a staged pick.
+    var url = widget.url;
+    var isLocal = widget.isLocal;
+    final resolver = widget.resolver;
+    final value = widget.resolveValue?.trim();
+    if (resolver != null && value != null && value.isNotEmpty) {
+      // The resolve itself can hit the network on a cache miss, so it gets the
+      // spinner too — otherwise the first tap on an uncached attachment looked
+      // like nothing had happened.
+      setState(() => _busy = true);
+      String? resolved;
+      try {
+        resolved = await resolver(value, pendingPaths: widget.pendingPaths);
+      } catch (e, st) {
+        // A failed resolve is a cache miss, not an error the user must see:
+        // the fallbacks below still open the file over the network.
+        sdkLog('AttachField: media resolve failed — $e\n$st');
+      }
+      if (_disposed) return;
+      if (mounted) setState(() => _busy = false);
+      if (resolved != null && resolved.isNotEmpty) {
+        url = resolved;
+        isLocal = true;
+      }
+    }
+
     // Images: reuse the shared full-screen zoomable viewer.
     if (widget.isImage) {
-      if (widget.isLocal) {
-        showFullScreenImageProvider(context, FileImage(File(widget.url)));
+      if (!mounted) return;
+      if (isLocal) {
+        showFullScreenImageProvider(context, FileImage(File(url)));
       } else {
-        showFullScreenImage(context, widget.url, widget.headers);
+        showFullScreenImage(context, url, widget.headers);
       }
       return;
     }
 
     // Local non-image file — open directly, no download required.
-    if (widget.isLocal) {
-      final result = await OpenFilex.open(widget.url);
+    if (isLocal) {
+      final result = await OpenFilex.open(url);
       if (result.type != ResultType.done && mounted) {
         _showError('Could not open file: ${result.message}');
       }
@@ -550,7 +613,7 @@ class _AttachViewButtonState extends State<_AttachViewButton> {
     if (widget.httpClient == null) _ownedClient = client;
     File? target;
     try {
-      final request = http.Request('GET', Uri.parse(widget.url));
+      final request = http.Request('GET', Uri.parse(url));
       final headers = widget.headers;
       if (headers != null) request.headers.addAll(headers);
       // Streamed (not http.get) so the whole file is never buffered in memory:
@@ -566,10 +629,19 @@ class _AttachViewButtonState extends State<_AttachViewButton> {
       if (declared != null && declared > maxDownloadBytes) {
         throw const _AttachmentTooLarge();
       }
-      final dir = await getTemporaryDirectory();
+      // Through MediaStore, NOT a second `getTemporaryDirectory()` +
+      // `attachmentTempDirName` of our own. The two constructions produced the
+      // same string, so nothing was broken — but only by coincidence, and this
+      // directory is the one `MediaStore.clearAll` wipes on logout and
+      // `usage` measures. Two independent spellings of a path where one side
+      // deletes what the other writes is the divergence that already caused the
+      // `moveToCache` / `resolve` cache-path bug in this same release. One
+      // source of truth also means the test override reaches this writer.
       target = File(
-        '${dir.path}/$attachmentTempDirName/'
-        '${attachmentTempFileName(widget.url, widget.fileName)}',
+        p.join(
+          await MediaStore.viewerTempDir(),
+          attachmentTempFileName(url, widget.fileName),
+        ),
       );
       await target.parent.create(recursive: true);
       final sink = target.openWrite();

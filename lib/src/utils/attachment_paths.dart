@@ -1,3 +1,64 @@
+/// The attach/image value that is currently LIVE for a form field.
+///
+/// [hasInteractedByUser] is the only thing separating "the user cleared this"
+/// from "never touched", and both readings are needed:
+///
+/// - Trusting [fieldValue] alone makes a discard work but loses a value that
+///   arrives AFTER the first build (an async document load) — `initialValue`
+///   applies once, the field's key is stable so its `State` survives the
+///   rebuild, and the new widget value is ignored.
+/// - Falling back to [widgetValue] unconditionally makes an explicit clear
+///   impossible to represent.
+///
+/// Shared rather than inlined because two call sites per field read this — the
+/// pick path (reclaiming what a new pick replaces) and the discard path — and
+/// they DIVERGED: the pick path read `fieldState.value` raw, so before the first
+/// interaction it reclaimed null while the discard path reclaimed the real
+/// value. A staged file a pick replaced was therefore leaked until the orphan
+/// sweep found it. Sharing the expression is what makes disagreeing impossible.
+///
+/// The result is trimmed: `MediaStore.isStagedPath` canonicalises whatever it is
+/// handed, so an untrimmed path is a different string to the guard that decides
+/// whether a file may be deleted.
+String? liveAttachmentValue({
+  required bool hasInteractedByUser,
+  required Object? fieldValue,
+  required Object? widgetValue,
+}) {
+  final field = fieldValue?.toString();
+  final widget = widgetValue?.toString();
+  final live = hasInteractedByUser ? field : (widget ?? field);
+  return live?.trim();
+}
+
+/// Directory, under the OS temp root, holding attachments downloaded purely so
+/// the device's default app can open them.
+///
+/// A NAMED subdirectory rather than loose files in the temp root makes the cache
+/// identifiable and lets the OS reclaim it as a unit.
+///
+/// Deliberately NOT under `MediaStore`'s own root: it is a viewer scratch area,
+/// not correctness storage. That distinction is why it needs explicit handling —
+/// `clearAll`, `sweepOrphans` and `usage` all walk `MediaStore`'s root and can
+/// never reach here, so for a while nothing wiped it, including
+/// `logout(clearDatabase: true)`.
+const String attachmentTempDirName = 'frappe_attachments';
+
+/// Marker file, directly in the OS temp root, naming the field that launched the
+/// camera so an interrupted capture can be handed back to the right one.
+///
+/// Declared here for the same reason as [attachmentTempDirName]: `MediaStore`
+/// must be able to delete it on logout without importing a widget file.
+///
+/// Both constants carried `@visibleForTesting` while each was private to the
+/// widget that wrote it. That no longer holds — `MediaStore` is a production
+/// caller of both, which is the entire point of moving them — so the annotation
+/// is deliberately absent. Neither name is exported from `frappe_mobile_sdk.dart`,
+/// so neither is public API. Holds a
+/// `fieldtype/fieldname` key — no attachment content — but it must NOT outlive a
+/// session, or a recovered photo can land on a field belonging to the next user.
+const String cameraCaptureMarkerFileName = 'frappe_sdk_camera_capture.marker';
+
 /// Classifies an attach-field value as a durable local file that still needs
 /// to be uploaded.
 ///

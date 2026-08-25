@@ -230,9 +230,18 @@ class FrappeFormBuilder extends StatefulWidget {
   ///
   /// Forwarded to every Attach / Attach Image field, INCLUDING those inside
   /// child rows — a child row picks and discards on the same path, so a hook
-  /// that stopped at the parent would leave half the fix unwired. Defaults to
-  /// [MediaStore.discardValue]; see [ReclaimAttachmentFn].
-  final ReclaimAttachmentFn reclaimAttachment;
+  /// that stopped at the parent would leave half the fix unwired.
+  ///
+  /// Null means "not supplied", NOT "use the destructive default": the effective
+  /// default lives on [FieldFactory.reclaimAttachment]
+  /// ([MediaStore.discardValue]), and a null here leaves whatever the factory
+  /// already carries untouched. That distinction is load-bearing for a host that
+  /// wires its own [customFieldFactory] — when this defaulted to
+  /// `MediaStore.discardValue` the configure pass overwrote the host's queue-aware
+  /// hook with the delete-on-sight default on every build, silently destroying
+  /// files a queued `pending_attachments` row still owned. See
+  /// [ReclaimAttachmentFn].
+  final ReclaimAttachmentFn? reclaimAttachment;
 
   /// Returns true when the SDK is in offline-first mode; forwarded to
   /// Attach / Attach Image / Image so a pick is queued rather than uploaded
@@ -337,7 +346,7 @@ class FrappeFormBuilder extends StatefulWidget {
     this.isOnline,
     this.pendingAttachmentPaths,
     this.mediaResolver,
-    this.reclaimAttachment = MediaStore.discardValue,
+    this.reclaimAttachment,
     this.isOfflineMode,
     this.imagePickSource,
   });
@@ -428,7 +437,8 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
   static bool _rendersInlineTableError(String? fieldtype) =>
       fieldtype == 'Table' || fieldtype == 'Table MultiSelect';
 
-  /// Pushes the two per-form inputs onto [FieldFactory] as instance state.
+  /// Pushes the per-form host capabilities onto [FieldFactory] as instance
+  /// state.
   ///
   /// These are deliberately NOT `createField` parameters: that method is
   /// documented as overridable, and Dart requires an override to redeclare
@@ -436,19 +446,53 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
   /// breaks every existing subclass at compile time, and a default value does
   /// not help (a caller holding a `FieldFactory` reference may still pass it
   /// explicitly). Host apps subclass this factory, so the signature is treated
-  /// as frozen. Mirrors how `linkOptionService` / `linkFieldCoordinator` are
-  /// already wired. Re-invoked from [didUpdateWidget] because `meta` can
-  /// change, and from [build] because [FrappeFormBuilder.reclaimAttachment]
-  /// can change without either of `didUpdateWidget`'s two triggers firing.
+  /// as frozen — `v2.0.0-beta.2`'s signature is the baseline, pinned by
+  /// `field_factory_override_compat_test.dart`. Mirrors how `linkOptionService`
+  /// / `linkFieldCoordinator` are already wired.
+  ///
+  /// Re-invoked from [didUpdateWidget] because `meta` can change, and from
+  /// [build] because several of these track widget properties that change
+  /// without either of `didUpdateWidget`'s two triggers firing. The load-
+  /// bearing case is [FrappeFormBuilder.pendingAttachmentPaths], which changes
+  /// as picks complete rather than per meta and so has no meta change to ride;
+  /// [FrappeFormBuilder.reclaimAttachment] is the same situation. Calling from
+  /// [build] covers both, and is sufficient: none of these can change without a
+  /// parent rebuild, so a field closure rebuilding on its own still reads the
+  /// value it would have been passed directly.
   void _configureFieldFactoryForMeta() {
     // Frappe stores Single doctypes as mediumtext and exempts them from the
     // implicit Data varchar(140) cap.
     _fieldFactory.capDataLength = !widget.meta.isSingle;
     _fieldFactory.errorTextResolver = _inlineTableErrorFor;
-    // Not covered by the meta/initialData guard in didUpdateWidget — this one
-    // tracks a widget property that can change on its own — which is why
-    // `build` re-runs this method rather than relying on those two callers.
-    _fieldFactory.reclaimAttachment = widget.reclaimAttachment;
+    // The six attachment capabilities below are assigned ONLY when this widget
+    // was actually given one. An unconditional assignment clobbers a host that
+    // configured its own [customFieldFactory] and did not repeat the values
+    // here — and it clobbers silently, which is the whole problem: the host's
+    // queue-aware `reclaimAttachment` was replaced by the delete-on-sight
+    // default, deleting files a queued row still owned, and the other five went
+    // to null (network-only previews, inline uploads instead of queueing). A
+    // plain `??=` is NOT the fix: it would also refuse the UPDATE case, and
+    // `pendingAttachmentPaths` has to keep changing as picks complete.
+    //
+    // These five were `createField` parameters until that was found to break
+    // every host subclass written against the published signature; both call
+    // sites passed exactly `widget.<x>` for all five, so they are uniform per
+    // form and moved here without behaviour change.
+    final reclaim = widget.reclaimAttachment;
+    if (reclaim != null) _fieldFactory.reclaimAttachment = reclaim;
+    if (widget.isOnline != null) _fieldFactory.isOnline = widget.isOnline;
+    if (widget.pendingAttachmentPaths != null) {
+      _fieldFactory.pendingAttachmentPaths = widget.pendingAttachmentPaths;
+    }
+    if (widget.mediaResolver != null) {
+      _fieldFactory.mediaResolver = widget.mediaResolver;
+    }
+    if (widget.isOfflineMode != null) {
+      _fieldFactory.isOfflineMode = widget.isOfflineMode;
+    }
+    if (widget.imagePickSource != null) {
+      _fieldFactory.imagePickSource = widget.imagePickSource;
+    }
   }
 
   /// Inline error for a child-table field, for whichever mode is active.
@@ -1409,11 +1453,6 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
       uploadFile: widget.uploadFile,
       fileUrlBase: widget.fileUrlBase,
       imageHeaders: widget.imageHeaders,
-      isOnline: widget.isOnline,
-      pendingAttachmentPaths: widget.pendingAttachmentPaths,
-      mediaResolver: widget.mediaResolver,
-      isOfflineMode: widget.isOfflineMode,
-      imagePickSource: widget.imagePickSource,
       getMeta: widget.getMeta,
       parentFormData: effectiveParentFormData,
       getLinkFilterBuilder: widget.getLinkFilterBuilder,
@@ -2267,11 +2306,6 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
           uploadFile: widget.uploadFile,
           fileUrlBase: widget.fileUrlBase,
           imageHeaders: widget.imageHeaders,
-          isOnline: widget.isOnline,
-          pendingAttachmentPaths: widget.pendingAttachmentPaths,
-          mediaResolver: widget.mediaResolver,
-          isOfflineMode: widget.isOfflineMode,
-          imagePickSource: widget.imagePickSource,
           getMeta: widget.getMeta,
           getLinkFilterBuilder: widget.getLinkFilterBuilder,
           onButtonPressed: widget.onButtonPressed,

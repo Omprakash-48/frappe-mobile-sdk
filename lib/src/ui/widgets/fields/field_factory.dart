@@ -47,6 +47,38 @@ import 'time_field.dart';
 ///   }
 /// }
 /// ```
+///
+/// ## Host capabilities are instance state, not `createField` parameters
+///
+/// `createField` is the documented extension point, and Dart requires an
+/// override to redeclare EVERY named parameter of the method it overrides — so
+/// adding one breaks every existing subclass at compile time, and a default
+/// value does not save it (a caller holding a `FieldFactory` reference may
+/// still pass the argument explicitly). Host-supplied capabilities are
+/// therefore carried as mutable instance fields, which `FrappeFormBuilder`
+/// assigns for the form it renders:
+///
+/// - [capDataLength]
+/// - [errorTextResolver]
+/// - [reclaimAttachment]
+/// - [isOnline]
+/// - [pendingAttachmentPaths]
+/// - [mediaResolver]
+/// - [isOfflineMode]
+/// - [imagePickSource]
+///
+/// **Subclassing is the supported pattern; COMPOSITION is not.** A host that
+/// wraps an inner `FieldFactory` and delegates to it must forward every field
+/// in that list by hand, because the base reads its own fields unqualified and
+/// the inner instance never sees what the SDK set on the outer one. There is no
+/// compile-time signal when one is missed — the capability silently does not
+/// arrive, and for [reclaimAttachment] the default is destructive
+/// ([MediaStore.discardValue] deletes a staged file on sight, including one a
+/// queued `pending_attachments` row still owns). Extend this class instead.
+///
+/// Note also that one factory instance carries the state of ONE form: sharing a
+/// `customFieldFactory` between two simultaneously-mounted `FrappeFormBuilder`s
+/// makes them race on these fields, last `build` winning.
 class FieldFactory {
   LinkOptionService? linkOptionService;
   LinkFieldCoordinator? linkFieldCoordinator;
@@ -94,6 +126,49 @@ class FieldFactory {
   /// value does not save it.
   ReclaimAttachmentFn reclaimAttachment = MediaStore.discardValue;
 
+  /// Synchronous last-known connectivity, per the host. When it returns false
+  /// an attach/image pick is kept as a durable local path for save-time
+  /// queueing instead of being uploaded inline. Null → treated as online.
+  ///
+  /// Instance state rather than a [createField] parameter for the
+  /// subclass-compatibility reason documented on [capDataLength].
+  bool Function()? isOnline;
+
+  /// Map of `pending_attachments.id` → durable local file path, used to resolve
+  /// a `pending:<id>` field value (an offline-picked file not yet uploaded) for
+  /// the filename label, the View/Open action and the image preview.
+  /// Display-only — never alters the stored marker value.
+  ///
+  /// Instance state rather than a [createField] parameter for the
+  /// subclass-compatibility reason documented on [capDataLength]. Unlike the
+  /// others this one changes as picks complete rather than per meta, which is
+  /// why `FrappeFormBuilder` re-assigns it from `build` and not only from
+  /// `initState` / `didUpdateWidget`.
+  Map<int, String>? pendingAttachmentPaths;
+
+  /// Resolves a field value to a LOCAL file for viewing: a cache hit, or a
+  /// download stored in the cache on the way through so the next view works
+  /// offline. Display-only; see [ResolveMediaFn].
+  ///
+  /// Instance state rather than a [createField] parameter for the
+  /// subclass-compatibility reason documented on [capDataLength].
+  ResolveMediaFn? mediaResolver;
+
+  /// Returns true when the SDK is in offline-first mode, in which case a pick
+  /// is ALWAYS staged and queued rather than uploaded inline, whatever the
+  /// connectivity. Null is treated as "not offline mode".
+  ///
+  /// Instance state rather than a [createField] parameter for the
+  /// subclass-compatibility reason documented on [capDataLength].
+  bool Function()? isOfflineMode;
+
+  /// Which pick sources an image field offers. Null means
+  /// [ImagePickSource.both].
+  ///
+  /// Instance state rather than a [createField] parameter for the
+  /// subclass-compatibility reason documented on [capDataLength].
+  ImagePickSource Function()? imagePickSource;
+
   /// Inline error for [field], or null when none applies.
   String? _errorTextFor(DocField field) {
     final fn = field.fieldname;
@@ -129,11 +204,6 @@ class FieldFactory {
     LinkFilterBuilder? Function(String doctype, String fieldname)?
     getLinkFilterBuilder,
     ValueChanged<bool>? onIsLocalChanged,
-    bool Function()? isOnline,
-    Map<int, String>? pendingAttachmentPaths,
-    ResolveMediaFn? mediaResolver,
-    bool Function()? isOfflineMode,
-    ImagePickSource Function()? imagePickSource,
   }) {
     if (field.hidden) {
       return null;

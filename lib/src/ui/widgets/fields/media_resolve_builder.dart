@@ -5,15 +5,31 @@ import '../../../services/media_resolver.dart';
 /// Resolves an attach-field value to a local file path and rebuilds [builder]
 /// with the result.
 ///
-/// [builder] receives null while the resolve is in flight and whenever it
-/// yields nothing (offline miss, unknown marker, failed fetch), so every caller
-/// must have a sensible null branch — typically "fall back to the server URL"
-/// or "show a placeholder". Resolution is display-only and never changes the
-/// stored value.
+/// [builder] receives null while the resolve is in flight and whenever it yields
+/// nothing (offline miss, unknown marker, failed fetch), so every caller must
+/// have a sensible null branch — for the one current caller, an
+/// `Image.network` of the server URL. Resolution is display-only and never
+/// changes the stored value.
 ///
 /// The future is MEMOISED per value. Starting it inside `build` would create a
 /// new future on every rebuild, and each completion triggers another rebuild —
 /// an infinite loop that re-reads the cache and can re-download forever.
+///
+/// ## Use this ONLY when the widget renders the file's CONTENT
+///
+/// Mounting this starts a resolve, and `MediaResolver.resolve` DOWNLOADS on a
+/// cache miss — so building the widget fetches the bytes. That is right for
+/// [ImageField], whose preview paints from the local file and would otherwise
+/// pull the same bytes through `Image.network` anyway. It is wrong for anything
+/// that only renders an affordance: [AttachField] used this for its view
+/// **button** and thereby downloaded every attachment on a form the moment the
+/// form appeared, up to 25 MB each, before the user asked for any of them. It
+/// now resolves inside the button's tap handler instead
+/// (`_AttachViewButton.resolver`), which keeps the memoisation property above
+/// because a tap is not a rebuild.
+///
+/// So: content on screen → eager resolve here. A button that opens the file
+/// later → resolve on tap, not here.
 class MediaResolveBuilder extends StatefulWidget {
   final ResolveMediaFn? resolver;
   final String? value;
