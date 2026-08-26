@@ -9,8 +9,13 @@ import 'package:flutter/material.dart';
 import 'package:flutter_form_builder/flutter_form_builder.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:http/http.dart' as http;
-import 'package:path_provider/path_provider.dart';
+import 'package:path/path.dart' as p;
 import 'package:open_filex/open_filex.dart';
+import '../../../services/media_resolver.dart';
+import '../../../sync/attachment_error_classifier.dart';
+import '../../../utils/attachment_paths.dart';
+import '../../../utils/media_store.dart';
+import '../../../utils/attachment_pick.dart';
 import '../../../utils/sdk_log.dart';
 import 'base_field.dart';
 import 'field_helpers.dart';
@@ -23,8 +28,9 @@ import 'image_field.dart';
 /// downloaded so an external app could open them. Keeping them in one folder
 /// instead of loose in the temp root makes the cache identifiable and lets the
 /// OS reclaim it as a unit.
-@visibleForTesting
-const String attachmentTempDirName = 'frappe_attachments';
+///
+/// Declared in `utils/attachment_paths.dart` so `MediaStore` can wipe and
+/// measure the directory without importing a widget file.
 
 /// File name used to cache the attachment at [url] inside
 /// [attachmentTempDirName].
@@ -111,12 +117,52 @@ class AttachField extends BaseField {
   /// can be fetched. Optional for backward-compat.
   final Map<String, String>? imageHeaders;
 
+  /// Synchronous last-known connectivity. When it returns false (offline) the
+  /// picked file is kept as a durable local path for save-time queueing instead
+  /// of being uploaded inline. Null → treated as online (upload attempted).
+  final bool Function()? isOnline;
+
+  /// Map of `pending_attachments.id` → durable local file path, used to resolve
+  /// a `pending:<id>` field value (an offline-picked file not yet uploaded)
+  /// for the filename label and View/Open action. Display-only.
+  final Map<int, String>? pendingAttachmentPaths;
+
   /// HTTP client used to download a non-image attachment before handing it to
   /// the device's default app. Optional: when null a short-lived client is
   /// created per download and closed afterwards (the pre-existing behaviour).
   /// A client passed in here is owned by the caller and is never closed by this
   /// widget. Exists so the download path can be exercised in tests.
   final http.Client? httpClient;
+
+  /// Resolves a field value to a LOCAL file for viewing: a cache hit, or a
+  /// download that is stored in the cache on the way through so the next view
+  /// works offline.
+  ///
+  /// Optional and additive — hosts that wire nothing keep the previous
+  /// behaviour, where every open re-downloads to a temp path. Display-only:
+  /// it never changes the stored value.
+  ///
+  /// A function rather than a [MediaResolver] so this widget stays off the
+  /// DAO/filesystem stack; pass `myResolver.resolve`.
+  final ResolveMediaFn? mediaResolver;
+
+  /// Returns true when the SDK is in offline-first mode.
+  ///
+  /// When it does, a pick is ALWAYS staged and queued rather than uploaded
+  /// inline, whatever the connectivity — offline-first promises that data entry
+  /// never blocks on the network, and an inline upload would also put the
+  /// attachment outside the push gate and the media cache. Null is treated as
+  /// "not offline mode", preserving the previous behaviour.
+  final bool Function()? isOfflineMode;
+
+  /// Reclaims the bytes behind a value this field discards or replaces.
+  ///
+  /// Defaults to [MediaStore.discardValue], which deletes any staged file on
+  /// sight. Hosts with a database wire
+  /// `OfflineRepository.reclaimDiscardedAttachment` instead — see
+  /// [ReclaimAttachmentFn] for why the field's own value is not enough to
+  /// decide.
+  final ReclaimAttachmentFn reclaimAttachment;
 
   const AttachField({
     super.key,
@@ -128,7 +174,12 @@ class AttachField extends BaseField {
     this.uploadFile,
     this.fileUrlBase,
     this.imageHeaders,
+    this.isOnline,
+    this.pendingAttachmentPaths,
     this.httpClient,
+    this.mediaResolver,
+    this.isOfflineMode,
+    this.reclaimAttachment = MediaStore.discardValue,
   });
 
   static const Set<String> _imageExtensions = {
@@ -152,28 +203,13 @@ class AttachField extends BaseField {
     return false;
   }
 
-  /// Build display URL: full URLs (S3, http(s)) use as-is.
-  /// /private/files/ and /files/ use download_file API so auth works; other /
-  /// paths get base prepended. Mirrors ImageField._fullImageUrl.
-  String? _fullFileUrl(String? path) {
-    if (path == null || path.isEmpty) return path;
-    final p = path.trim();
-    if (p.isEmpty) return path;
-    if (p.startsWith('http://') || p.startsWith('https://')) return p;
-    if (!p.startsWith('/') ||
-        fileUrlBase == null ||
-        fileUrlBase!.trim().isEmpty) {
-      return p;
-    }
-    final base = fileUrlBase!.trim();
-    final baseNoSlash = base.endsWith('/')
-        ? base.substring(0, base.length - 1)
-        : base;
-    if (p.startsWith('/private/files/') || p.startsWith('/files/')) {
-      return '$baseNoSlash/api/method/frappe.handler.download_file?file_url=${Uri.encodeComponent(p)}';
-    }
-    return '$baseNoSlash$p';
-  }
+  /// Display URL for a stored attach value.
+  ///
+  /// Delegates to [frappeFileFetchUrl] — this used to be a private copy of that
+  /// logic, one of three. `/private/files/` has to route through
+  /// `download_file` to carry auth, so a drift between the copies was a
+  /// private-file 404. Pinned by `attachment_paths_test.dart`.
+  String? _fullFileUrl(String? path) => frappeFileFetchUrl(path, fileUrlBase);
 
   /// True when the stored value points at an image (by extension). Query strings
   /// are stripped first so URLs like `.../file.png?token=...` still match.
@@ -203,10 +239,42 @@ class AttachField extends BaseField {
         // Padding(Text(field.label)) that used to live here was a
         // second copy that skipped the asterisk — removed for visual
         // consistency with text/numeric/etc field widgets.
-        final current = (fieldState.value ?? filePath)?.trim();
+        // `hasInteractedByUser` is the ONLY thing that distinguishes "the
+        // user cleared this" from "never touched". Trusting fieldState.value
+        // alone made a discard work but broke a value arriving AFTER the first
+        // build (an async document load): initialValue applies once, the
+        // field's key is stable so its State survives the rebuild, and the new
+        // widget value was ignored. Falling back unconditionally to the widget
+        // value — the previous behaviour — made an explicit clear impossible
+        // to represent instead. Neither alone is correct.
+        final current = liveAttachmentValue(
+          hasInteractedByUser: fieldState.hasInteractedByUser,
+          fieldValue: fieldState.value,
+          widgetValue: filePath,
+        );
         final hasValue = current != null && current.isNotEmpty;
-        final isServer = hasValue && _isServerUrl(current);
-        final isImage = hasValue && _isImage(current);
+        // Resolve a `pending:<id>` marker to its durable local file (display
+        // only; stored value stays the marker). Server URLs / local paths pass
+        // through. Null => an offline pick whose file isn't resolvable yet.
+        final displaySource = attachmentDisplaySource(
+          current,
+          pendingAttachmentPaths,
+        );
+        final isPendingUnresolved =
+            hasValue &&
+            parsePendingMarkerId(current) != null &&
+            displaySource == null;
+        final isServer = displaySource != null && _isServerUrl(displaySource);
+        final isLocalFile = displaySource != null && !isServer;
+        final isImage = displaySource != null && _isImage(displaySource);
+        final hasViewable = isServer || isLocalFile;
+        final label = !hasValue
+            ? 'Select file'
+            : (displaySource != null
+                  ? _getFileName(displaySource)
+                  : (isPendingUnresolved
+                        ? 'Pending upload…'
+                        : _getFileName(current)));
         return Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
@@ -228,61 +296,139 @@ class AttachField extends BaseField {
                                   result.files.single.path == null) {
                                 return;
                               }
-                              final path = result.files.single.path!;
-                              final file = File(path);
-                              if (uploadFile == null) {
-                                fieldState.didChange(path);
-                                onChanged?.call(path);
+                              final picked = File(result.files.single.path!);
+                              // Durable-copy-first; upload inline when online,
+                              // else keep the local path for save-time queueing.
+                              //
+                              // This deliberately REPLACES the older "never
+                              // store the local path — the server expects a
+                              // file_url" rule. A local path is now a valid
+                              // stored value: the offline attachment producer
+                              // queues it at save time and rewrites the field
+                              // once the upload lands. `resolvePickedAttachment`
+                              // absorbs the null-uploader and failed-upload
+                              // branches that used to be spelled out here, and
+                              // falls back to the durable copy in both.
+                              final stored = await resolvePickedAttachment(
+                                picked: picked,
+                                online: isOnline?.call() ?? true,
+                                offlineModeEnabled:
+                                    isOfflineMode?.call() ?? false,
+                                uploadFile: uploadFile,
+                              );
+                              if (stored != null && stored.isNotEmpty) {
+                                // Reclaim the file this pick replaces.
+                                // Guarded by isStagedPath, so a host path or a
+                                // pending: marker is untouched — and by the
+                                // queue when the host wired a database-backed
+                                // reclaim.
+                                //
+                                // `current`, NOT `fieldState.value`: before the
+                                // first interaction the form-field value is
+                                // still null while the widget value holds the
+                                // attachment a document load supplied, so the
+                                // raw value reclaimed nothing and the staged
+                                // file this pick replaced was leaked until the
+                                // orphan sweep found it. `current` is the same
+                                // hasInteractedByUser-aware value the discard
+                                // path already uses — the two paths disagreeing
+                                // about which value is live is the bug.
+                                await reclaimAttachment(current);
+                                fieldState.didChange(stored);
+                                onChanged?.call(stored);
                                 return;
                               }
-                              final url = await uploadFile!(file);
-                              if (url != null && url.isNotEmpty) {
-                                fieldState.didChange(url);
-                                onChanged?.call(url);
-                                return;
-                              }
-                              // Upload "succeeded" but returned nothing usable.
-                              // Never store the local path — the server expects
-                              // a file_url.
+                              // Only reachable if the durable copy itself
+                              // yielded nothing, so there is no local path to
+                              // queue either — the pick is genuinely lost.
                               sdkLog(
-                                'AttachField: uploadFile returned an empty URL '
-                                'for $path',
+                                'AttachField: could not store the picked file '
+                                '${picked.path}',
                               );
                               _notify(
                                 messenger,
                                 'Upload failed — the file was not attached.',
                               );
+                            } on AttachmentTooLargeException catch (e) {
+                              // Refused before staging, so nothing to clean up.
+                              // The message names the real limit: "too large"
+                              // alone leaves the user guessing how much to trim.
+                              _notify(messenger, attachmentTooLargeMessage(e));
                             } catch (e, st) {
                               sdkLog('AttachField: attach failed — $e\n$st');
                               _notify(
                                 messenger,
-                                'Could not attach the file. Check your '
-                                'connection and storage permissions.',
+                                isTerminalAttachmentError(e)
+                                    // The server refused it outright; a retry
+                                    // cannot help, so do not imply otherwise.
+                                    ? 'The server rejected this file, so it was '
+                                          'not attached.'
+                                    : 'Could not attach the file. Check your '
+                                          'connection and storage permissions.',
                               );
                             }
                           }
                         : null,
                     icon: const Icon(Icons.attach_file),
-                    label: Text(
-                      hasValue ? _getFileName(current) : 'Select file',
-                    ),
+                    label: Text(label),
                   ),
                 ),
                 // View/Open affordance — available even when the field is
                 // read-only/disabled so users can always view an attachment
-                // (QA #11).
-                if (hasValue)
+                // (QA #11). Hidden for an unresolved pending pick (nothing to
+                // open yet).
+                // Discard. Shown only when there IS something to remove and
+                // the field is editable. A mandatory field can still be
+                // cleared — requiredValidator catches it at save, which is the
+                // right place; blocking the clear would trap a user who wants
+                // to replace via discard-then-pick.
+                if (hasValue && enabled && !field.readOnly)
+                  IconButton(
+                    tooltip: 'Remove attachment',
+                    icon: const Icon(Icons.close),
+                    onPressed: () async {
+                      // Clear FIRST. The user's action must take effect even if
+                      // reclaiming the bytes fails — a leftover file is an
+                      // orphan the sweep collects, whereas a failed reclaim
+                      // aborting this callback would leave the attachment in
+                      // place while the user believes it is gone.
+                      final discarded = current;
+                      fieldState.didChange(null);
+                      onChanged?.call(null);
+                      await reclaimAttachment(discarded);
+                    },
+                  ),
+                if (hasViewable)
+                  // Resolution moved INTO the button, so it happens on tap
+                  // rather than while the form builds. A `MediaResolveBuilder`
+                  // here started the fetch from `initState`, which meant
+                  // opening a form downloaded every attachment on it before the
+                  // user asked for any — and this widget only renders a button,
+                  // so there was never a render-time need for the bytes.
+                  //
+                  // `url`/`isLocal` are the FALLBACK: what to use when the
+                  // resolve misses (offline, unknown marker, failed fetch), so
+                  // the button still opens over the network exactly as before.
+                  //
+                  // The RESOLVED path only ever replaces the view TARGET.
+                  // Labels stay derived from `displaySource` (the value or the
+                  // staged path) — routing them through the cache path would
+                  // show sha256(file_url) instead of "report.pdf".
                   _AttachViewButton(
-                    // Images open in the shared full-screen viewer; other files
-                    // are downloaded then opened externally.
                     url: isServer
-                        ? (_fullFileUrl(current) ?? current)
-                        : current,
-                    isLocal: !isServer,
+                        ? (_fullFileUrl(displaySource) ?? displaySource)
+                        : displaySource,
+                    isLocal: isLocalFile,
                     isImage: isImage,
                     headers: imageHeaders,
-                    fileName: _getFileName(current),
+                    // `displaySource`, not `current`: a `pending:<id>` marker
+                    // resolves to its durable local file, so the label shows
+                    // the real filename not the marker text.
+                    fileName: _getFileName(displaySource),
                     httpClient: httpClient,
+                    resolveValue: current,
+                    resolver: mediaResolver,
+                    pendingPaths: pendingAttachmentPaths,
                   ),
               ],
             ),
@@ -290,7 +436,9 @@ class AttachField extends BaseField {
               Padding(
                 padding: const EdgeInsets.only(top: 4.0),
                 child: Text(
-                  current,
+                  isPendingUnresolved
+                      ? 'Attached — pending upload'
+                      : (displaySource ?? current),
                   style: TextStyle(fontSize: 12, color: Colors.grey[600]),
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
@@ -330,6 +478,24 @@ class _AttachViewButton extends StatefulWidget {
   /// Caller-owned client for the download; null means "create and close one".
   final http.Client? httpClient;
 
+  /// The stored field value to resolve through [resolver], or null to skip
+  /// resolution and use [url] directly.
+  final String? resolveValue;
+
+  /// Cache-first resolver, consulted ON TAP rather than on mount.
+  ///
+  /// [AttachField] renders only a BUTTON — it never shows attachment content
+  /// inline — so resolving while the form built meant every attachment on the
+  /// form downloaded (up to the 25 MB resolver cap each) before the user asked
+  /// for any of them. On a metered rural connection that is the difference
+  /// between opening a form and opening a form plus five PDFs. [ImageField] is
+  /// the opposite case and still resolves eagerly: its preview renders FROM the
+  /// local file, so it genuinely needs the path to paint.
+  final ResolveMediaFn? resolver;
+
+  /// Marker map handed to [resolver] so a `pending:<id>` value resolves.
+  final Map<int, String>? pendingPaths;
+
   const _AttachViewButton({
     required this.url,
     required this.isLocal,
@@ -337,6 +503,9 @@ class _AttachViewButton extends StatefulWidget {
     required this.headers,
     required this.fileName,
     required this.httpClient,
+    this.resolveValue,
+    this.resolver,
+    this.pendingPaths,
   });
 
   @override
@@ -385,19 +554,50 @@ class _AttachViewButtonState extends State<_AttachViewButton> {
   http.Client? _ownedClient;
 
   Future<void> _open() async {
+    // Cache-first resolution happens HERE, on tap — not in a builder that runs
+    // when the field mounts. See [_AttachViewButton.resolver]: this widget only
+    // ever renders a button, so an eager resolve downloaded attachments nobody
+    // had asked to see. A resolved hit is by definition a local file, so it
+    // takes the same branches below as a staged pick.
+    var url = widget.url;
+    var isLocal = widget.isLocal;
+    final resolver = widget.resolver;
+    final value = widget.resolveValue?.trim();
+    if (resolver != null && value != null && value.isNotEmpty) {
+      // The resolve itself can hit the network on a cache miss, so it gets the
+      // spinner too — otherwise the first tap on an uncached attachment looked
+      // like nothing had happened.
+      setState(() => _busy = true);
+      String? resolved;
+      try {
+        resolved = await resolver(value, pendingPaths: widget.pendingPaths);
+      } catch (e, st) {
+        // A failed resolve is a cache miss, not an error the user must see:
+        // the fallbacks below still open the file over the network.
+        sdkLog('AttachField: media resolve failed — $e\n$st');
+      }
+      if (_disposed) return;
+      if (mounted) setState(() => _busy = false);
+      if (resolved != null && resolved.isNotEmpty) {
+        url = resolved;
+        isLocal = true;
+      }
+    }
+
     // Images: reuse the shared full-screen zoomable viewer.
     if (widget.isImage) {
-      if (widget.isLocal) {
-        showFullScreenImageProvider(context, FileImage(File(widget.url)));
+      if (!mounted) return;
+      if (isLocal) {
+        showFullScreenImageProvider(context, FileImage(File(url)));
       } else {
-        showFullScreenImage(context, widget.url, widget.headers);
+        showFullScreenImage(context, url, widget.headers);
       }
       return;
     }
 
     // Local non-image file — open directly, no download required.
-    if (widget.isLocal) {
-      final result = await OpenFilex.open(widget.url);
+    if (isLocal) {
+      final result = await OpenFilex.open(url);
       if (result.type != ResultType.done && mounted) {
         _showError('Could not open file: ${result.message}');
       }
@@ -413,7 +613,7 @@ class _AttachViewButtonState extends State<_AttachViewButton> {
     if (widget.httpClient == null) _ownedClient = client;
     File? target;
     try {
-      final request = http.Request('GET', Uri.parse(widget.url));
+      final request = http.Request('GET', Uri.parse(url));
       final headers = widget.headers;
       if (headers != null) request.headers.addAll(headers);
       // Streamed (not http.get) so the whole file is never buffered in memory:
@@ -429,10 +629,19 @@ class _AttachViewButtonState extends State<_AttachViewButton> {
       if (declared != null && declared > maxDownloadBytes) {
         throw const _AttachmentTooLarge();
       }
-      final dir = await getTemporaryDirectory();
+      // Through MediaStore, NOT a second `getTemporaryDirectory()` +
+      // `attachmentTempDirName` of our own. The two constructions produced the
+      // same string, so nothing was broken — but only by coincidence, and this
+      // directory is the one `MediaStore.clearAll` wipes on logout and
+      // `usage` measures. Two independent spellings of a path where one side
+      // deletes what the other writes is the divergence that already caused the
+      // `moveToCache` / `resolve` cache-path bug in this same release. One
+      // source of truth also means the test override reaches this writer.
       target = File(
-        '${dir.path}/$attachmentTempDirName/'
-        '${attachmentTempFileName(widget.url, widget.fileName)}',
+        p.join(
+          await MediaStore.viewerTempDir(),
+          attachmentTempFileName(url, widget.fileName),
+        ),
       );
       await target.parent.create(recursive: true);
       final sink = target.openWrite();

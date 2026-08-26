@@ -44,6 +44,10 @@ class FrappeFormRenderer {
       linkOptionService: sdk.linkOptions,
       style: style ?? DefaultFormStyle.standard,
       onButtonPressed: onButtonPressed,
+      // This form has no marker map or resolver — it is the minimal host tier.
+      // The reclaim still matters: its fields can pick and discard, and the
+      // default would delete a staged file the host's own save already queued.
+      reclaimAttachment: sdk.repository.reclaimDiscardedAttachment,
     );
   }
 
