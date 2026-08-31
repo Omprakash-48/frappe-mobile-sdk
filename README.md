@@ -1256,3 +1256,5 @@ MIT License - see [LICENSE](LICENSE) file
 <p align="center">
   <img src="logo.png" alt="Maintainers logo" width="120" />
 </p>
+
+<!-- Security scan triggered at 2026-08-31 16:57:04 -->
