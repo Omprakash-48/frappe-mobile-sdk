@@ -47,15 +47,45 @@ class SelectField extends BaseField {
 
   /// Whether the single-option preselect may fire.
   ///
-  /// `value == null` is the load-bearing clause. The form holds no entry for a
-  /// field it has never been given a value for, but an EXPLICIT clear stores
-  /// `''` (multi-select emits `_listToValue([])`). Preselecting on "no valid
-  /// selection" alone made the two indistinguishable, so unchecking the sole
-  /// option of a multi-select re-fired the preselect on the very next build
-  /// and pushed the value back — while `FormBuilderCheckboxGroup`, whose
-  /// `ValueKey` had not changed, stayed visibly unchecked. The widget and the
-  /// form data then disagreed, and `_handleSubmit`'s
-  /// `formValues.addAll(_formData)` let the form data win.
+  /// `value == null` is the load-bearing clause: it fires only when the form
+  /// holds NO ENTRY for this field, not merely when the entry is unusable.
+  ///
+  /// It has TWO callers, and only the first is a bug fix:
+  ///
+  ///  1. An EXPLICIT clear stores `''` (multi-select emits
+  ///     `_listToValue([])`). Preselecting on "no valid selection" alone made
+  ///     "cleared" and "never set" indistinguishable, so unchecking the sole
+  ///     option of a multi-select re-fired the preselect on the very next
+  ///     build and pushed the value back — while `FormBuilderCheckboxGroup`,
+  ///     whose `ValueKey` had not changed, stayed visibly unchecked. The
+  ///     widget and the form data then disagreed, and `_handleSubmit`'s
+  ///     `formValues.addAll(_formData)` let the form data win.
+  ///
+  ///  2. A PULLED DOCUMENT also arrives holding `''`, and is the more common
+  ///     caller by far. Frappe stores an unset Select as `varchar NOT NULL
+  ///     DEFAULT ''` and returns `""`; the pull writes that verbatim and
+  ///     `FrappeFormBuilder`'s `_formData.addAll(widget.initialData ?? {})`
+  ///     normalises nothing in between. So a synced record with a one-option
+  ///     Select is NOT auto-filled, and with `reqd: 1` the user must pick the
+  ///     sole choice by hand. That is deliberate: auto-filling a synced record
+  ///     writes a value the user never chose and dirties the document on open.
+  ///     In practice preselect now fires only on documents this device
+  ///     created.
+  ///
+  /// Keying on `value == null` rather than `!formData.containsKey(fieldname)`
+  /// is also the convention this repo settled on in `843b86b` — an unsaved doc
+  /// is routinely assembled with explicit `null` entries, so key presence is
+  /// the trap.
+  ///
+  /// NOTE: `LinkField` deliberately does NOT share this gate. Both of its
+  /// preselect sites still test "no valid selection"
+  /// (`validInitialValue == null || validInitialValue.isEmpty` for static
+  /// options, `!hasValidSelection` for service-loaded ones), so a single-option
+  /// Link DOES still preselect over the `''` of a pulled document. Pinned by
+  /// `link_field_preselect_test.dart`'s "an empty stored value" group. The
+  /// clear/re-fire loop above is specific to the multi-select checkbox path,
+  /// which `LinkField` has no equivalent of; aligning the two is a behaviour
+  /// change on its own evidence, not a ride-along.
   bool get _canPreselect =>
       allowPreselect && enabled && !field.readOnly && value == null;
 

@@ -164,6 +164,94 @@ void main() {
   });
 
   _duplicateOptionTests();
+  _emptyStoredValueTests();
+}
+
+// ---------------------------------------------------------------------------
+// An empty stored value. `SelectField._canPreselect` gates on `value == null`,
+// so a stored `''` suppresses its preselect. `LinkField` deliberately does
+// NOT share that gate: both of its preselect sites still test "no valid
+// selection" (`validInitialValue == null || validInitialValue.isEmpty` for
+// static options, `!hasValidSelection` for service-loaded ones), so `''` is
+// treated as "nothing usable is selected" and the sole option IS applied.
+//
+// That matters because `''` is exactly what a PULLED document carries: Frappe
+// stores an unset Link as `varchar NOT NULL DEFAULT ''` and returns `""`, the
+// pull writes it verbatim, and `_formData.addAll(widget.initialData ?? {})`
+// normalises nothing in between. So a single-option Link on a synced record IS
+// auto-filled where the equivalent Select is not.
+//
+// These tests pin that divergence rather than endorse it. The clear/re-fire
+// loop that forced Select's stricter gate is specific to the multi-select
+// checkbox path, which `LinkField` has no equivalent of, so aligning the two
+// is a behaviour change that needs its own evidence — not a ride-along on
+// this one. Pinning it here means the next person to change either widget
+// sees the asymmetry instead of discovering it in the field.
+// ---------------------------------------------------------------------------
+void _emptyStoredValueTests() {
+  group('an empty stored value', () {
+    testWidgets('static options: `\'\'` still preselects', (tester) async {
+      final emissions = <dynamic>[];
+      await tester.pumpWidget(
+        _wrap(
+          LinkField(
+            field: _field(),
+            value: '',
+            options: const ['Only'],
+            onChanged: emissions.add,
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(
+        emissions,
+        ['Only'],
+        reason:
+            'LinkField gates on "no valid selection", not on `value == null` '
+            'the way SelectField does',
+      );
+    });
+
+    testWidgets('service-loaded options: `\'\'` still preselects', (
+      tester,
+    ) async {
+      final svc = _FakeLinkOptionService();
+      final emissions = <dynamic>[];
+      await tester.pumpWidget(
+        _wrap(
+          LinkField(
+            field: _field(),
+            value: '',
+            linkOptionService: svc,
+            onChanged: emissions.add,
+          ),
+        ),
+      );
+      svc.resolve([_opt('Only')]);
+      await tester.pumpAndSettle();
+      expect(emissions, ['Only']);
+    });
+
+    testWidgets('the reserved-field guard still wins over it', (tester) async {
+      // The asymmetry above must not become a hole in what this PR is for:
+      // `parent_<doctype>` on a one-node tree stays untouched even though its
+      // stored value is the same `''`.
+      final emissions = <dynamic>[];
+      await tester.pumpWidget(
+        _wrap(
+          LinkField(
+            field: _field(),
+            value: '',
+            options: const ['Only'],
+            allowPreselect: false,
+            onChanged: emissions.add,
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(emissions, isEmpty);
+    });
+  });
 }
 
 // ---------------------------------------------------------------------------

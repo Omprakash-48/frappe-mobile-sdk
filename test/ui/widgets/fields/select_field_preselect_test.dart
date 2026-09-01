@@ -176,32 +176,68 @@ void main() {
       );
     });
 
-    testWidgets('an explicitly cleared value is not re-preselected on mount', (
-      tester,
-    ) async {
-      final key = GlobalKey<_HostState>();
-      await tester.pumpWidget(
-        _Host(
-          key: key,
-          initial: '',
-          field: _select(options: 'Only', multi: true),
-        ),
-      );
-      await tester.pumpAndSettle();
-      expect(key.currentState!.emissions, isEmpty);
-    });
+    // The gate is `value == null`, so what it actually distinguishes is an
+    // ABSENT key from a stored `''` — not "cleared" from "never touched".
+    // Those have two callers, and the pulled document is the common one.
+    testWidgets(
+      'a stored empty string is never preselected — multi-select, whether it '
+      'came from an explicit clear or from a pulled document',
+      (tester) async {
+        final key = GlobalKey<_HostState>();
+        await tester.pumpWidget(
+          _Host(
+            key: key,
+            initial: '',
+            field: _select(options: 'Only', multi: true),
+          ),
+        );
+        await tester.pumpAndSettle();
+        expect(key.currentState!.emissions, isEmpty);
+      },
+    );
 
-    testWidgets('an absent value IS preselected on mount', (tester) async {
-      final key = GlobalKey<_HostState>();
-      await tester.pumpWidget(
-        _Host(
-          key: key,
-          field: _select(options: 'Only'),
-        ),
-      );
-      await tester.pumpAndSettle();
-      expect(key.currentState!.emissions, ['Only']);
-    });
+    testWidgets(
+      'a stored empty string is never preselected — single-select, which is '
+      'how every pulled document arrives',
+      (tester) async {
+        // Frappe stores an unset Select as `varchar NOT NULL DEFAULT ''` and
+        // returns `""`. The pull writes it verbatim and
+        // `_formData.addAll(widget.initialData ?? {})` normalises nothing, so
+        // this — not the clear — is the case a field team meets first: a
+        // synced record with a one-option Select stays empty, and with
+        // `reqd: 1` the user must pick the sole choice by hand.
+        final key = GlobalKey<_HostState>();
+        await tester.pumpWidget(
+          _Host(
+            key: key,
+            initial: '',
+            field: _select(options: 'Only'),
+          ),
+        );
+        await tester.pumpAndSettle();
+        expect(
+          key.currentState!.emissions,
+          isEmpty,
+          reason: 'a pulled document must not be auto-filled on open',
+        );
+      },
+    );
+
+    testWidgets(
+      'an absent value IS preselected on mount — in practice, only a document '
+      'this device created',
+      (tester) async {
+        final key = GlobalKey<_HostState>();
+        await tester.pumpWidget(
+          _Host(
+            key: key,
+            field: _select(options: 'Only'),
+          ),
+        );
+        await tester.pumpAndSettle();
+        expect(key.currentState!.emissions, ['Only']);
+      },
+    );
   });
 
   group('duplicate options', () {
